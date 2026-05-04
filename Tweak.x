@@ -448,39 +448,40 @@ static const CGFloat kTriggerBottomOffset = 100.0;
     // 获取安全区域
     UIEdgeInsets safe = self.safeAreaInsets;
     CGRect bounds = self.bounds;
+    CGFloat w = bounds.size.width;
+    CGFloat h = bounds.size.height;
+
     // 计算安全区域内的有效绘图区
     CGRect safeBounds = CGRectMake(safe.left, safe.top, 
-                                   bounds.size.width - safe.left - safe.right, 
-                                   bounds.size.height - safe.top - safe.bottom);
+                                   w - safe.left - safe.right, 
+                                   h - safe.top - safe.bottom);
 
     // 1. 设置触发区域：根据目标方向动态调整 (解决横屏观察不到旋转的问题)
     self.edgeTriggerView.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.5];
     UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
     
-    CGRect screenBounds = [UIScreen mainScreen].bounds;
-    CGFloat portraitW = MIN(screenBounds.size.width, screenBounds.size.height);
-    CGFloat portraitH = MAX(screenBounds.size.width, screenBounds.size.height);
-
     switch (orientation) {
         case UIInterfaceOrientationLandscapeLeft:
             self.systemEdgePan.edges = UIRectEdgeTop;
-            self.edgeTriggerView.frame = CGRectMake(0, 0, portraitW, kTriggerVisualWidth);
+            self.edgeTriggerView.frame = CGRectMake(0, 0, w, kTriggerVisualWidth);
             break;
         case UIInterfaceOrientationLandscapeRight:
             self.systemEdgePan.edges = UIRectEdgeBottom;
-            self.edgeTriggerView.frame = CGRectMake(0, portraitH - kTriggerVisualWidth, portraitW, kTriggerVisualWidth);
+            self.edgeTriggerView.frame = CGRectMake(0, h - kTriggerVisualWidth, w, kTriggerVisualWidth);
             break;
         case UIInterfaceOrientationPortraitUpsideDown:
             self.systemEdgePan.edges = UIRectEdgeLeft;
-            self.edgeTriggerView.frame = CGRectMake(0, safe.top, kTriggerVisualWidth, portraitH - safe.top - kTriggerBottomOffset);
+            self.edgeTriggerView.frame = CGRectMake(0, safe.top, kTriggerVisualWidth, h - safe.top - kTriggerBottomOffset);
             break;
         case UIInterfaceOrientationPortrait:
         default:
             self.systemEdgePan.edges = UIRectEdgeRight;
-            self.edgeTriggerView.frame = CGRectMake(portraitW - kTriggerVisualWidth, safe.top, kTriggerVisualWidth, portraitH - safe.top - kTriggerBottomOffset);
+            self.edgeTriggerView.frame = CGRectMake(w - kTriggerVisualWidth, safe.top, kTriggerVisualWidth, h - safe.top - kTriggerBottomOffset);
             break;
     }
     [self.rootViewController.view bringSubviewToFront:self.edgeTriggerView];
+    
+    CV3LogToFile(@"[Layout] CV3Window 宽度: %.1f, 高度: %.1f, 方向: %ld", w, h, (long)orientation);
 
     // 2. 面板容器：蓝色 (主要操作区域)
     self.panelContainer.backgroundColor = [[UIColor blueColor] colorWithAlphaComponent:0.2];
@@ -805,13 +806,9 @@ static const CGFloat kTriggerBottomOffset = 100.0;
                 self.hidden = NO; 
                 [self applyAdaptiveLevel];
                 
+                // 使用 UIScreen 完整 bounds，并根据当前 Scene 自动同步旋转
                 CGRect screenBounds = [UIScreen mainScreen].bounds;
-                CGFloat portraitW = MIN(screenBounds.size.width, screenBounds.size.height);
-                CGFloat portraitH = MAX(screenBounds.size.width, screenBounds.size.height);
-                
-                // 强制锁定物理肖像 Bounds，防止 Scene 自动交换宽高导致的子视图漂移
-                self.bounds = CGRectMake(0, 0, portraitW, portraitH);
-                self.center = CGPointMake(screenBounds.size.width/2.0, screenBounds.size.height/2.0);
+                self.frame = screenBounds;
 
                 [self setNeedsLayout];
             }
@@ -855,19 +852,44 @@ static const CGFloat kTriggerBottomOffset = 100.0;
         return nil;
     }
     
-    // 拦截热区：固定为右侧边缘
-    CGFloat dist = self.bounds.size.width - point.x;
-    if (dist >= -5.0 && dist <= kTriggerHotzoneWidth) {
-        // 复用键盘避让逻辑
+    // 拦截热区：根据当前方向动态判断边缘
+    UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+    BOOL inHotzone = NO;
+    
+    CGFloat w = self.bounds.size.width;
+    CGFloat h = self.bounds.size.height;
+    UIEdgeInsets safe = self.safeAreaInsets;
+
+    switch (orientation) {
+        case UIInterfaceOrientationLandscapeLeft:
+            if (point.y <= kTriggerHotzoneWidth) inHotzone = YES;
+            break;
+        case UIInterfaceOrientationLandscapeRight:
+            if (point.y >= h - kTriggerHotzoneWidth) inHotzone = YES;
+            break;
+        case UIInterfaceOrientationPortraitUpsideDown:
+            if (point.x <= kTriggerHotzoneWidth) inHotzone = YES;
+            break;
+        case UIInterfaceOrientationPortrait:
+        default:
+            if (point.x >= w - kTriggerHotzoneWidth) inHotzone = YES;
+            break;
+    }
+
+    if (inHotzone) {
+        // 复用键盘避让逻辑 (仅在竖屏或有意义时)
         if (self.isKeyboardVisible) {
-            CGFloat yThreshold = self.bounds.size.height * 0.4;
+            CGFloat yThreshold = h * 0.4;
             if (point.y > yThreshold) return nil;
         }
-        // 避开安全区域触发
-        UIEdgeInsets safe = self.safeAreaInsets;
-        if (point.y < safe.top || point.y > (self.bounds.size.height - safe.bottom)) return nil;
+        
+        // 避开安全区域触发 (对于左右边缘，检查 Y 轴；对于上下边缘，检查 X 轴)
+        if (orientation == UIInterfaceOrientationPortrait || orientation == UIInterfaceOrientationPortraitUpsideDown) {
+            if (point.y < safe.top || point.y > (h - safe.bottom)) return nil;
+        } else {
+            if (point.x < safe.left || point.x > (w - safe.right)) return nil;
+        }
 
-        // 返回自身，让 CV3Window 作为根管理者处理手势
         return self;
     }
     
