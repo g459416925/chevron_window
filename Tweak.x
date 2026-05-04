@@ -96,9 +96,8 @@
 
 @interface CV3RootViewController : UIViewController
 @end
-
-// --- Helper for File Logging (Asynchronous & Safe) ---
 static void CV3LogToFile(NSString *format, ...) {
+// --- Helper for File Logging (Asynchronous & Safe) ---
     va_list args;
     va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
@@ -756,7 +755,6 @@ static const CGFloat kPanelH = 520.0;
     @try {
         [self attachToCurrentActiveScene];
         
-        // 核心监控：仅用于窗口层级映射，不进行任何方向日志记录
         NSMutableString *winMap = [NSMutableString stringWithFormat:@"\n    [Hierarchy Map]"];
         
         NSArray *windows = nil;
@@ -777,25 +775,6 @@ static const CGFloat kPanelH = 520.0;
 }
 
 - (void)updateWindowTransformForOrientation:(UIInterfaceOrientation)orientation {
-    // 强制记录方向变化
-    switch (orientation) {
-        case UIInterfaceOrientationPortrait:
-            CV3LogToFile(@"界面直立");
-            break;
-        case UIInterfaceOrientationPortraitUpsideDown:
-            CV3LogToFile(@"界面直立，上下颠倒");
-            break;
-        case UIInterfaceOrientationLandscapeLeft:
-            CV3LogToFile(@"界面朝左");
-            break;
-        case UIInterfaceOrientationLandscapeRight:
-            CV3LogToFile(@"界面朝右");
-            break;
-        default:
-            CV3LogToFile(@"未知方向 (Raw: %ld)", (long)orientation);
-            break;
-    }
-
     CGAffineTransform transform = CGAffineTransformIdentity;
     if (orientation == UIInterfaceOrientationLandscapeLeft) {
         transform = CGAffineTransformMakeRotation(M_PI_2);
@@ -838,7 +817,6 @@ static const CGFloat kPanelH = 520.0;
                     [role isEqualToString:@"SBWindowSceneSessionRoleHomeScreen"] ||
                     [role isEqualToString:@"UIWindowSceneSessionRoleApplication"]) {
                     targetScene = (UIWindowScene *)scene;
-                    if (scene.activationState == UISceneActivationStateForegroundActive) break;
                 }
             }
         }
@@ -925,12 +903,20 @@ static const CGFloat kPanelH = 520.0;
 
     // 仅监控处于前台且已激活的窗口场景
     if (self.windowScene && self.windowScene.activationState == UISceneActivationStateForegroundActive) {
-        // 使用持久化变量来确保只有方向真正改变时才记录
+        // 使用持久化变量来确保只有方向真正改变时才记录，并增加时间窗口防抖
         static UIInterfaceOrientation globalLastConfirmedOrientation = UIInterfaceOrientationUnknown;
+        static NSTimeInterval lastLogTime = 0;
+        
         UIInterfaceOrientation currentOrientation = self.windowScene.interfaceOrientation;
+        NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
 
-        if (currentOrientation != globalLastConfirmedOrientation && currentOrientation != UIInterfaceOrientationUnknown) {
+        // 只有当方向确实发生变化，且不是未知方向，且距离上次记录超过 1 秒时才记录
+        if (currentOrientation != globalLastConfirmedOrientation && 
+            currentOrientation != UIInterfaceOrientationUnknown &&
+            (currentTime - lastLogTime > 1.0)) {
+            
             globalLastConfirmedOrientation = currentOrientation;
+            lastLogTime = currentTime;
             
             switch (currentOrientation) {
                 case UIInterfaceOrientationPortrait:
@@ -975,7 +961,6 @@ static const CGFloat kPanelH = 520.0;
 - (void)applicationDidFinishLaunching:(id)application {
     %orig;
 
-    CV3LogToFile(@"[System] ChevronV3 Started. Monitoring Orientation via Geometry Hooks.");
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (sharedWindow) return;
