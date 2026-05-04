@@ -225,7 +225,7 @@ static const CGFloat kTriggerBottomOffset = 100.0;
     if (self) {
         if (!cv3IconCache) cv3IconCache = [[NSCache alloc] init];
         [self applyAdaptiveLevel];
-        self.backgroundColor = [UIColor clearColor];
+        self.backgroundColor = [[UIColor blueColor] colorWithAlphaComponent:0.2];
         self.apps = [NSMutableArray array];
         self.feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
         self.selectionFeedback = [[UISelectionFeedbackGenerator alloc] init];
@@ -462,19 +462,23 @@ static const CGFloat kTriggerBottomOffset = 100.0;
     
     switch (orientation) {
         case UIInterfaceOrientationLandscapeLeft:
+            // 物理逆时针旋转90度(Home键在右)，显示右侧为物理顶部
             self.systemEdgePan.edges = UIRectEdgeTop;
             self.edgeTriggerView.frame = CGRectMake(0, 0, w, kTriggerVisualWidth);
             break;
         case UIInterfaceOrientationLandscapeRight:
+            // 物理顺时针旋转90度(Home键在左)，显示右侧为物理底部
             self.systemEdgePan.edges = UIRectEdgeBottom;
             self.edgeTriggerView.frame = CGRectMake(0, h - kTriggerVisualWidth, w, kTriggerVisualWidth);
             break;
         case UIInterfaceOrientationPortraitUpsideDown:
+            // 物理倒转，显示右侧为物理左侧
             self.systemEdgePan.edges = UIRectEdgeLeft;
             self.edgeTriggerView.frame = CGRectMake(0, safe.top, kTriggerVisualWidth, h - safe.top - kTriggerBottomOffset);
             break;
         case UIInterfaceOrientationPortrait:
         default:
+            // 正常竖屏，显示右侧为物理右侧
             self.systemEdgePan.edges = UIRectEdgeRight;
             self.edgeTriggerView.frame = CGRectMake(w - kTriggerVisualWidth, safe.top, kTriggerVisualWidth, h - safe.top - kTriggerBottomOffset);
             break;
@@ -806,9 +810,9 @@ static const CGFloat kTriggerBottomOffset = 100.0;
                 self.hidden = NO; 
                 [self applyAdaptiveLevel];
                 
-                // 使用 UIScreen 完整 bounds，并根据当前 Scene 自动同步旋转
-                CGRect screenBounds = [UIScreen mainScreen].bounds;
-                self.frame = screenBounds;
+                // 使用 targetScene 的 bounds 以保证在不同场景旋转下覆盖整个屏幕
+                CGRect targetBounds = targetScene.coordinateSpace.bounds;
+                self.frame = targetBounds;
 
                 [self setNeedsLayout];
             }
