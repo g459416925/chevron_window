@@ -176,7 +176,6 @@ static NSCache *cv3IconCache = nil;
 static CV3Window *sharedWindow = nil;
 static const CGFloat kPanelW = 370.0;
 static const CGFloat kPanelH = 520.0;
-static const CGFloat kEdgeHitWidth = 30.0; 
 
 @implementation CV3Window
 
@@ -188,10 +187,18 @@ static const CGFloat kEdgeHitWidth = 30.0;
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
     if (gesture == self.systemEdgePan) {
+        // 键盘可见时限制区域
         if (self.isKeyboardVisible) {
-            CGPoint p = [gesture locationInView:nil]; // 使用绝对坐标
+            CGPoint p = [gesture locationInView:nil];
             CGFloat yThreshold = self.bounds.size.height * 0.4;
-            if (p.y > yThreshold) {
+            if (p.y > yThreshold) return NO;
+        }
+        
+        // 界面直立时，限制在安全区域范围内触发
+        if (self.windowScene && self.windowScene.interfaceOrientation == UIInterfaceOrientationPortrait) {
+            UIEdgeInsets safe = self.safeAreaInsets;
+            CGPoint p = [gesture locationInView:self];
+            if (p.y < safe.top || p.y > (self.bounds.size.height - safe.bottom)) {
                 return NO;
             }
         }
@@ -476,24 +483,39 @@ static const CGFloat kEdgeHitWidth = 30.0;
 
 - (void)layoutSubviews {
     [super layoutSubviews];
+    
+    // 获取安全区域
+    UIEdgeInsets safe = self.safeAreaInsets;
     CGRect bounds = self.bounds;
+    // 计算安全区域内的有效绘图区
+    CGRect safeBounds = CGRectMake(safe.left, safe.top, 
+                                   bounds.size.width - safe.left - safe.right, 
+                                   bounds.size.height - safe.top - safe.bottom);
 
-    self.dimmingView.frame = bounds;
-    self.edgeTriggerView.frame = CGRectMake(bounds.size.width - kEdgeHitWidth, 0, kEdgeHitWidth, bounds.size.height);
+    // 1. 设置触发区域：宽度 1pt，高度在安全区域内
+    self.edgeTriggerView.backgroundColor = [UIColor clearColor];
+    CGFloat effectiveHeight = safeBounds.size.height - 100.0; // 减去底部留白
+    self.edgeTriggerView.frame = CGRectMake(bounds.size.width - 1.0, safe.top, 1.0, effectiveHeight);
     [self.rootViewController.view bringSubviewToFront:self.edgeTriggerView];
 
+    // 2. 面板容器：限制在安全区域内
     if (!self.isAnimating && !self.hasBeenMoved) {
-        self.panelContainer.center = CGPointMake(bounds.size.width/2, bounds.size.height/2);
+        self.panelContainer.center = CGPointMake(CGRectGetMidX(safeBounds), CGRectGetMidY(safeBounds));
     }
+
+    // 3. 特效层：仅在安全区域内渲染
+    self.bezierContainer.frame = safeBounds;
+    self.bezierBlur.frame = self.bezierContainer.bounds;
+    
+    self.bezierContainer.backgroundColor = [UIColor clearColor];
+    self.panelContainer.backgroundColor = [UIColor clearColor];
+    self.appPanel.backgroundColor = [UIColor clearColor];
 
     for (UIView *subview in self.appPanel.subviews) {
         if ([NSStringFromClass([subview class]) containsString:@"Backdrop"]) {
             subview.transform = CGAffineTransformMakeScale(1.15, 1.15);
         }
     }
-
-    self.bezierContainer.frame = bounds;
-    self.bezierBlur.frame = bounds;
 }
 
 
@@ -734,6 +756,7 @@ static const CGFloat kEdgeHitWidth = 30.0;
     @try {
         [self attachToCurrentActiveScene];
         
+        // 核心监控：仅用于窗口层级映射，不进行任何方向日志记录
         NSMutableString *winMap = [NSMutableString stringWithFormat:@"\n    [Hierarchy Map]"];
         
         NSArray *windows = nil;
@@ -871,16 +894,23 @@ static const CGFloat kEdgeHitWidth = 30.0;
         if (CGRectContainsPoint(self.panelContainer.bounds, p)) {
             return [self.panelContainer hitTest:p withEvent:e];
         }
-        return self.dimmingView;
+        return nil;
     }
     
-    // 拦截热区：返回边缘触发视图以协助可能需要的触摸路由，且保证边缘手势能够获得最高优先权
+    // 拦截热区：将触发区域扩大到右侧 40pt，即使视觉上只有 1pt
     CGFloat distanceToRightEdge = self.bounds.size.width - point.x;
-    if (distanceToRightEdge <= 30.0 && distanceToRightEdge >= -10.0) {
+    if (distanceToRightEdge <= 40.0 && distanceToRightEdge >= -5.0) {
         // 复用键盘避让逻辑
         if (self.isKeyboardVisible) {
             CGFloat yThreshold = self.bounds.size.height * 0.4;
             if (point.y > yThreshold) return nil;
+        }
+        // 竖屏时避开安全区域触发
+        if (self.windowScene && self.windowScene.interfaceOrientation == UIInterfaceOrientationPortrait) {
+            UIEdgeInsets safe = self.safeAreaInsets;
+            if (point.y < safe.top || point.y > (self.bounds.size.height - safe.bottom)) {
+                return nil;
+            }
         }
         return self.edgeTriggerView;
     }

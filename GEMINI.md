@@ -52,6 +52,8 @@
     - **方向监控强制规范 (Hard Mandate)**:
         - 界面方向监听**必须**使用 `UIWindow layoutSubviews` 的 Hook 方式，通过检测 `windowScene.interfaceOrientation` 实现。禁止使用任何 `UIApplication` 级别或 `UIScene` 级别的通知监听。
         - 界面方向变更日志**必须**使用 `CV3LogToFile` 函数，确保日志异步写入至 `/var/mobile/Documents/ChevronV3_Logs.txt`，并严格使用定义好的中文字符串格式。
+    - **安全区域约束强制规范 (Hard Mandate)**:
+        - 所有视图层（包括手势触发区、特效层、面板容器等）的几何尺寸与布局**必须**强制约束在 `self.safeAreaInsets` 定义的安全区域之内。严禁任何组件超出此边界，以防止遮挡系统状态栏、Dock 栏或 Home 条。
 
 ## 6. 项目维护历史 (Maintenance Log)
 - **v1.0.0 关键修正**:
@@ -60,5 +62,6 @@
     - 修复了布局刷新导致的面板位置复位问题（引入 hasBeenMoved）。
     - 修复了边缘手势与系统翻页冲突（升级为 30pt 抢占式手势）。
     - 解决了多行字符串导致的 16 处编译错误。
-- **v1.0.1 界面方向监听实现**:
+- **v1.0.1 界面方向监听实现与安全区域约束**:
     - 确立了以 `UIWindow layoutSubviews` 为核心的界面方向监控规范，作为后续开发的硬性准则。
+    - 明确了视图层级的“安全区域约束（Safe Area Constraint）”为强制要求，所有布局调整必须基于 `self.safeAreaInsets` 进行计算。
