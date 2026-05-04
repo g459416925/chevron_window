@@ -49,6 +49,10 @@
 - **研发守则**: 
     - 严禁进行无关代码改动。修改必须自审是否影响其他功能，并在回复中明确告知。
     - **严禁硬编码 (No Hard-coding)**: 任何配置参数（如偏移量、颜色、尺寸、阈值等）严禁直接散布在逻辑代码中。必须集中定义为 `static const` 变量或枚举类型，且建议按功能模块划分（例如 `kChevronLayoutConstants`）。
+    - **方向监控强制规范 (Hard Mandate)**:
+        - 界面方向监听**必须**使用 `UIWindow layoutSubviews` 的 Hook 方式，通过检测 `windowScene.interfaceOrientation` 实现。禁止使用任何 `UIApplication` 级别或 `UIScene` 级别的通知监听。
+        - 界面方向变更日志**必须**使用 `CV3LogToFile` 函数，确保日志异步写入至 `/var/mobile/Documents/ChevronV3_Logs.txt`，并严格使用定义好的中文字符串格式。
+
 ## 6. 项目维护历史 (Maintenance Log)
 - **v1.0.0 关键修正**:
     - 修复了 `setupUI` 中 Backdrop 缩放失效问题（移至 layoutSubviews）。
@@ -56,3 +60,5 @@
     - 修复了布局刷新导致的面板位置复位问题（引入 hasBeenMoved）。
     - 修复了边缘手势与系统翻页冲突（升级为 30pt 抢占式手势）。
     - 解决了多行字符串导致的 16 处编译错误。
+- **v1.0.1 界面方向监听实现**:
+    - 确立了以 `UIWindow layoutSubviews` 为核心的界面方向监控规范，作为后续开发的硬性准则。

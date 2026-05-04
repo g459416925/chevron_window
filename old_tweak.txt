@@ -92,8 +92,6 @@
 @end
 
 // --- Root VC ---
-#import <UIKit/UIKit.h> // Explicitly import UIKit to ensure visibility of UIWindowScene
-
 @interface CV3RootViewController : UIViewController
 @end
 
@@ -104,35 +102,25 @@ static void CV3LogToFile(NSString *format, ...) {
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
 
-    // 立即输出到系统日志，作为第一层保障
-    NSLog(@"[ChevronV3] %@", message);
-
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         @try {
-            NSFileManager *fm = [NSFileManager defaultManager];
-            NSString *logPath = @"/var/mobile/Documents/ChevronV3_Logs.txt";
-            NSString *parentDir = [logPath stringByDeletingLastPathComponent];
-            
-            // 确保父目录存在
-            if (![fm fileExistsAtPath:parentDir]) {
-                [fm createDirectoryAtPath:parentDir withIntermediateDirectories:YES attributes:nil error:nil];
-            }
+            NSString *logPath = @"/var/mobile/Library/Preferences/ChevronV3_Logs.txt";
+            NSString *timestamp = [NSDateFormatter localizedStringFromDate:[NSDate date] dateStyle:NSDateFormatterShortStyle timeStyle:NSDateFormatterMediumStyle];
+            NSString *finalLog = [NSString stringWithFormat:@"[%@] %@\n", timestamp, message];
 
-            if (![fm fileExistsAtPath:logPath]) {
-                [fm createFileAtPath:logPath contents:nil attributes:nil];
+            if (![[NSFileManager defaultManager] fileExistsAtPath:logPath]) {
+                [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil];
             }
             
             NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:logPath];
             if (handle) {
                 [handle seekToEndOfFile];
-                NSString *timestamp = [NSDateFormatter localizedStringFromDate:[NSDate date] dateStyle:NSDateFormatterShortStyle timeStyle:NSDateFormatterMediumStyle];
-                NSString *finalLog = [NSString stringWithFormat:@"[%@] %@\n", timestamp, message];
-                // 确保使用 UTF-8 编码写入文件
                 [handle writeData:[finalLog dataUsingEncoding:NSUTF8StringEncoding]];
                 [handle closeFile];
             }
         } @catch (NSException *e) {}
     });
+    NSLog(@"[ChevronV3] %@", message);
 }
 
 @implementation CV3RootViewController
@@ -192,6 +180,7 @@ static const CGFloat kEdgeHitWidth = 30.0;
             CGPoint p = [gesture locationInView:nil]; // 使用绝对坐标
             CGFloat yThreshold = self.bounds.size.height * 0.4;
             if (p.y > yThreshold) {
+                CV3LogToFile(@"[Gesture] Ignored due to Keyboard area.");
                 return NO;
             }
         }
@@ -263,7 +252,9 @@ static const CGFloat kEdgeHitWidth = 30.0;
     @try {
         SBSystemGestureManager *manager = [%c(SBSystemGestureManager) mainDisplayManager];
         [manager addGestureRecognizer:self.systemEdgePan withType:112];
+        CV3LogToFile(@"[Core] System Edge Gesture successfully registered to SBSystemGestureManager.");
     } @catch (NSException *e) {
+        CV3LogToFile(@"[Error] Failed to register system gesture: %@", e.reason);
     }
     
     self.bezierContainer = [[UIView alloc] initWithFrame:bounds];
@@ -532,6 +523,7 @@ static const CGFloat kEdgeHitWidth = 30.0;
     }
 
     if (gesture.state == UIGestureRecognizerStateBegan) {
+        CV3LogToFile(@"[Gesture] Began. Orientation: %ld | Trans: %@ | Vel: %@", (long)orientation, NSStringFromCGPoint(translation), NSStringFromCGPoint(velocity));
         if (!self.isPanelShowing) {
             [self.feedback impactOccurred];
             [self.selectionFeedback prepare];
@@ -572,12 +564,15 @@ static const CGFloat kEdgeHitWidth = 30.0;
             }
 
             if (stretch > 45) { 
+                CV3LogToFile(@"[Gesture] Threshold met. Showing panel.");
                 [self animateSpotlight:YES fromPoint:location]; 
                 gesture.enabled = NO; gesture.enabled = YES; 
             }
         }
     } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        CV3LogToFile(@"[Gesture] Ended. Stretch: %.1f | VelX: %.1f", stretch, velocity.x);
         if (self.bezierContainer.alpha > 0 && !self.isPanelShowing && velocity.x < -300 && gesture.state != UIGestureRecognizerStateCancelled) {
+            CV3LogToFile(@"[Gesture] Flick detected. Showing panel.");
             [self animateSpotlight:YES fromPoint:location];
         }
         [UIView animateWithDuration:0.4 animations:^{ 
@@ -705,6 +700,7 @@ static const CGFloat kEdgeHitWidth = 30.0;
 }
 
 - (void)handleMemoryWarning {
+    CV3LogToFile(@"[System] Memory Warning received. Clearing icon cache.");
     [cv3IconCache removeAllObjects];
 }
 
@@ -731,8 +727,6 @@ static const CGFloat kEdgeHitWidth = 30.0;
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillHide:) name:UIKeyboardWillHideNotification object:nil];
 }
 
-
-
 - (void)keyboardWillShow:(NSNotification *)notification {
     self.isKeyboardVisible = YES;
 }
@@ -743,8 +737,8 @@ static const CGFloat kEdgeHitWidth = 30.0;
 
 - (void)monitorState {
     @try {
-        [self attachToCurrentActiveScene];
-        
+        [self attachToCurrentActiveScene]; 
+
         NSMutableString *winMap = [NSMutableString stringWithFormat:@"\n    [Hierarchy Map]"];
         
         NSArray *windows = nil;
@@ -760,30 +754,19 @@ static const CGFloat kEdgeHitWidth = 30.0;
             [winMap appendFormat:@"\n    - [%@]: Lvl=%.1f, Alpha=%.2f, Hidden=%d, Scene=%p", 
                 NSStringFromClass([win class]), win.windowLevel, win.alpha, win.hidden, win.windowScene];
         }
+
+        CV3LogToFile(@"[HEARTBEAT] Window: Lvl=%.1f, Frame=%@ | Scene=%p (%@) %@", 
+                     self.windowLevel, 
+                     NSStringFromCGRect(self.frame), 
+                     self.windowScene,
+                     self.windowScene.session.role,
+                     winMap);
     } @catch (NSException *e) {
+        CV3LogToFile(@"[Error] Heartbeat scan failed: %@", e.reason);
     }
 }
 
 - (void)updateWindowTransformForOrientation:(UIInterfaceOrientation)orientation {
-    // 强制记录方向变化
-    switch (orientation) {
-        case UIInterfaceOrientationPortrait:
-            CV3LogToFile(@"界面直立");
-            break;
-        case UIInterfaceOrientationPortraitUpsideDown:
-            CV3LogToFile(@"界面直立，上下颠倒");
-            break;
-        case UIInterfaceOrientationLandscapeLeft:
-            CV3LogToFile(@"界面朝左");
-            break;
-        case UIInterfaceOrientationLandscapeRight:
-            CV3LogToFile(@"界面朝右");
-            break;
-        default:
-            CV3LogToFile(@"未知方向 (Raw: %ld)", (long)orientation);
-            break;
-    }
-
     CGAffineTransform transform = CGAffineTransformIdentity;
     if (orientation == UIInterfaceOrientationLandscapeLeft) {
         transform = CGAffineTransformMakeRotation(M_PI_2);
@@ -797,6 +780,8 @@ static const CGFloat kEdgeHitWidth = 30.0;
         self.transform = transform;
         self.frame = [UIScreen mainScreen].bounds;
     } completion:nil];
+
+    CV3LogToFile(@"[Rotation] Synced to orientation: %ld", (long)orientation);
 }
 
 - (void)attachToCurrentActiveScene {
@@ -835,6 +820,8 @@ static const CGFloat kEdgeHitWidth = 30.0;
     if (targetScene && self.windowScene != targetScene) {
         self.windowScene = targetScene;
         self.hidden = NO; 
+        CV3LogToFile(@"[Scene] Attached to: %@ (Role: %@, State: %ld)", 
+                     targetScene, targetScene.session.role, (long)targetScene.activationState);
         
         [self applyAdaptiveLevel];
         self.bounds = targetScene.coordinateSpace.bounds;
@@ -853,6 +840,7 @@ static const CGFloat kEdgeHitWidth = 30.0;
     
     if (self.windowLevel != targetLevel) {
         self.windowLevel = targetLevel;
+        CV3LogToFile(@"[Hierarchy] WindowLevel set to %.1f", targetLevel);
     }
 }
 
@@ -896,34 +884,13 @@ static const CGFloat kEdgeHitWidth = 30.0;
 }
 @end
 
-%hook UIWindow
-- (void)layoutSubviews {
+%hook UIWindowScene
+- (void)_INTERNAL_geometryDidUpdateWithTransitionContext:(id)context {
     %orig;
-
-    // 只对前台活跃场景的窗口进行监控
-    if (self.windowScene && self.windowScene.activationState == UISceneActivationStateForegroundActive) {
-        static UIInterfaceOrientation lastObservedOrientation = UIInterfaceOrientationUnknown;
-        UIInterfaceOrientation currentOrientation = self.windowScene.interfaceOrientation;
-
-        if (currentOrientation != lastObservedOrientation && currentOrientation != UIInterfaceOrientationUnknown) {
-            lastObservedOrientation = currentOrientation;
-            
-            switch (currentOrientation) {
-                case UIInterfaceOrientationPortrait:
-                    CV3LogToFile(@"界面直立");
-                    break;
-                case UIInterfaceOrientationPortraitUpsideDown:
-                    CV3LogToFile(@"界面直立，上下颠倒");
-                    break;
-                case UIInterfaceOrientationLandscapeLeft:
-                    CV3LogToFile(@"界面朝左");
-                    break;
-                case UIInterfaceOrientationLandscapeRight:
-                    CV3LogToFile(@"界面朝右");
-                    break;
-                default:
-                    break;
-            }
+    if (sharedWindow) {
+        [sharedWindow attachToCurrentActiveScene];
+        if (sharedWindow.windowScene == self) {
+            [sharedWindow updateWindowTransformForOrientation:self.interfaceOrientation];
         }
     }
 }
@@ -950,9 +917,6 @@ static const CGFloat kEdgeHitWidth = 30.0;
 %hook SpringBoard
 - (void)applicationDidFinishLaunching:(id)application {
     %orig;
-
-    CV3LogToFile(@"[System] ChevronV3 Started. Monitoring Orientation via Geometry Hooks.");
-
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (sharedWindow) return;
         sharedWindow = [[CV3Window alloc] initWithFrame:[UIScreen mainScreen].bounds];
