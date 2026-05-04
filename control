@@ -1,0 +1,9 @@
+Package: com.xu.chevronv3
+Name: ChevronV3
+Depends: mobilesubstrate
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: New generation for testing.
+Maintainer: xu
+Author: xu
+Section: Tweaks
