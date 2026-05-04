@@ -135,8 +135,6 @@ static void CV3LogToFile(NSString *format, ...) {
 }
 
 @implementation CV3RootViewController
-- (BOOL)shouldAutorotate { return YES; }
-- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskAll; }
 @end
 
 // --- Main Window ---
@@ -166,6 +164,7 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, strong) NSArray<UIView *> *trafficDots;
 @property (nonatomic, assign) CGFloat lastHapticX;
 @property (nonatomic, strong) UIScreenEdgePanGestureRecognizer *systemEdgePan;
+@property (nonatomic, assign) UIInterfaceOrientation targetOrientation;
 
 - (void)show;
 - (NSString *)_role; 
@@ -175,6 +174,9 @@ static NSCache *cv3IconCache = nil;
 static CV3Window *sharedWindow = nil;
 static const CGFloat kPanelW = 370.0;
 static const CGFloat kPanelH = 520.0;
+static const CGFloat kTriggerHotzoneWidth = 50.0;
+static const CGFloat kTriggerVisualWidth = 20.0;
+static const CGFloat kTriggerBottomOffset = 100.0;
 
 @implementation CV3Window
 
@@ -193,20 +195,17 @@ static const CGFloat kPanelH = 520.0;
             if (p.y > yThreshold) return NO;
         }
         
-        // 界面直立时，限制在安全区域范围内触发
-        if (self.windowScene && self.windowScene.interfaceOrientation == UIInterfaceOrientationPortrait) {
-            UIEdgeInsets safe = self.safeAreaInsets;
-            CGPoint p = [gesture locationInView:self];
-            if (p.y < safe.top || p.y > (self.bounds.size.height - safe.bottom)) {
-                return NO;
-            }
+        // 限制在安全区域范围内触发
+        UIEdgeInsets safe = self.safeAreaInsets;
+        CGPoint p = [gesture locationInView:self];
+        if (p.y < safe.top || p.y > (self.bounds.size.height - safe.bottom)) {
+            return NO;
         }
     }
     return YES;
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
-    // 如果是我们的边缘手势，且对方也是边缘手势（如系统侧滑返回），则要求对方失败，从而确保我们的优先权
     if (gestureRecognizer == self.systemEdgePan && [otherGestureRecognizer isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) {
         return YES;
     }
@@ -218,7 +217,6 @@ static const CGFloat kPanelH = 520.0;
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
-    // 允许共存以保证灵活性，但通过上面的 shouldBeRequiredToFailBy 确保优先级
     return YES; 
 }
 
@@ -243,13 +241,11 @@ static const CGFloat kPanelH = 520.0;
 
 - (void)setupUI {
     CGRect bounds = self.bounds;
-    
-    // 调试辅助：为层级添加颜色，便于观察
-    // 移除 dimmingView 相关代码
 
     self.edgeTriggerView = [[UIView alloc] initWithFrame:CGRectZero];
     self.edgeTriggerView.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.2]; // 调试可见
     self.edgeTriggerView.userInteractionEnabled = NO;
+    self.edgeTriggerView.autoresizingMask = UIViewAutoresizingNone;
     [self.rootViewController.view addSubview:self.edgeTriggerView];
     
     // 创建边缘手势
@@ -266,10 +262,12 @@ static const CGFloat kPanelH = 520.0;
     self.bezierContainer.backgroundColor = [[UIColor greenColor] colorWithAlphaComponent:0.1]; // 调试可见
     self.bezierContainer.alpha = 0;
     self.bezierContainer.userInteractionEnabled = NO;
+    self.bezierContainer.autoresizingMask = UIViewAutoresizingNone;
     [self.rootViewController.view addSubview:self.bezierContainer];
     
     self.bezierBlur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
     self.bezierBlur.frame = bounds;
+    self.bezierBlur.autoresizingMask = UIViewAutoresizingNone;
     [self.bezierContainer addSubview:self.bezierBlur];
     self.bezierLayer = [CAShapeLayer layer];
     self.bezierLayer.fillColor = [UIColor whiteColor].CGColor;
@@ -282,6 +280,7 @@ static const CGFloat kPanelH = 520.0;
     self.panelContainer.layer.shadowOffset = CGSizeMake(0, 20);
     self.panelContainer.layer.shadowOpacity = 0.45;
     self.panelContainer.layer.shadowRadius = 50;
+    self.panelContainer.autoresizingMask = UIViewAutoresizingNone;
     [self.rootViewController.view addSubview:self.panelContainer];
     
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePanelDrag:)];
@@ -366,42 +365,6 @@ static const CGFloat kPanelH = 520.0;
     [self.appPanel.contentView addSubview:self.collectionView];
 }
 
-- (void)sendEvent:(UIEvent *)event {
-    [super sendEvent:event];
-    if (event.type == UIEventTypeTouches) {
-        UITouch *touch = [event.allTouches anyObject];
-        if (touch.phase == UITouchPhaseBegan) {
-            [self handleGlobalRippleAtPoint:[touch locationInView:self]];
-            
-            if (self.isPanelShowing) {
-                CGPoint p = [touch locationInView:self];
-                CGPoint panelP = [self convertPoint:p toView:self.panelContainer];
-                if (!CGRectContainsPoint(self.panelContainer.bounds, panelP)) {
-                    [self animateSpotlight:NO fromPoint:p];
-                    [self updateTrafficLightsFocus:NO]; 
-                } else {
-                    [self updateTrafficLightsFocus:YES]; 
-                }
-            }
-        }
-    }
-}
-
-- (void)handleGlobalRippleAtPoint:(CGPoint)p {
-    UIView *ripple = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 80, 80)];
-    ripple.center = p;
-    ripple.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.15];
-    ripple.layer.cornerRadius = 40;
-    ripple.transform = CGAffineTransformMakeScale(0.1, 0.1);
-    ripple.userInteractionEnabled = NO;
-    [self addSubview:ripple];
-    
-    [UIView animateWithDuration:0.6 animations:^{
-        ripple.transform = CGAffineTransformMakeScale(2.5, 2.5);
-        ripple.alpha = 0;
-    } completion:^(BOOL f){ [ripple removeFromSuperview]; }];
-}
-
 - (void)handlePanelDrag:(UIPanGestureRecognizer *)gesture {
     CGPoint location = [gesture locationInView:self.panelContainer];
     if (gesture.state == UIGestureRecognizerStateBegan) {
@@ -478,7 +441,6 @@ static const CGFloat kPanelH = 520.0;
         } completion:nil];
     }
 }
-// 移除 handleDimmingTap 方法
 
 - (void)layoutSubviews {
     [super layoutSubviews];
@@ -491,24 +453,52 @@ static const CGFloat kPanelH = 520.0;
                                    bounds.size.width - safe.left - safe.right, 
                                    bounds.size.height - safe.top - safe.bottom);
 
-    // 1. 设置触发区域：宽度 1pt，高度在安全区域内
-    self.edgeTriggerView.backgroundColor = [UIColor clearColor];
-    CGFloat effectiveHeight = safeBounds.size.height - 100.0; // 减去底部留白
-    self.edgeTriggerView.frame = CGRectMake(bounds.size.width - 1.0, safe.top, 1.0, effectiveHeight);
+    // 1. 设置触发区域：根据目标方向动态调整 (解决横屏观察不到旋转的问题)
+    self.edgeTriggerView.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.5];
+    UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+    
+    CGRect screenBounds = [UIScreen mainScreen].bounds;
+    CGFloat portraitW = MIN(screenBounds.size.width, screenBounds.size.height);
+    CGFloat portraitH = MAX(screenBounds.size.width, screenBounds.size.height);
+
+    switch (orientation) {
+        case UIInterfaceOrientationLandscapeLeft:
+            self.systemEdgePan.edges = UIRectEdgeTop;
+            self.edgeTriggerView.frame = CGRectMake(0, 0, portraitW, kTriggerVisualWidth);
+            break;
+        case UIInterfaceOrientationLandscapeRight:
+            self.systemEdgePan.edges = UIRectEdgeBottom;
+            self.edgeTriggerView.frame = CGRectMake(0, portraitH - kTriggerVisualWidth, portraitW, kTriggerVisualWidth);
+            break;
+        case UIInterfaceOrientationPortraitUpsideDown:
+            self.systemEdgePan.edges = UIRectEdgeLeft;
+            self.edgeTriggerView.frame = CGRectMake(0, safe.top, kTriggerVisualWidth, portraitH - safe.top - kTriggerBottomOffset);
+            break;
+        case UIInterfaceOrientationPortrait:
+        default:
+            self.systemEdgePan.edges = UIRectEdgeRight;
+            self.edgeTriggerView.frame = CGRectMake(portraitW - kTriggerVisualWidth, safe.top, kTriggerVisualWidth, portraitH - safe.top - kTriggerBottomOffset);
+            break;
+    }
     [self.rootViewController.view bringSubviewToFront:self.edgeTriggerView];
 
-    // 2. 面板容器：限制在安全区域内
+    // 2. 面板容器：蓝色 (主要操作区域)
+    self.panelContainer.backgroundColor = [[UIColor blueColor] colorWithAlphaComponent:0.2];
     if (!self.isAnimating && !self.hasBeenMoved) {
         self.panelContainer.center = CGPointMake(CGRectGetMidX(safeBounds), CGRectGetMidY(safeBounds));
     }
 
-    // 3. 特效层：仅在安全区域内渲染
+    // 3. 特效层：绿色 (贝塞尔曲线拉伸背景区域)
     self.bezierContainer.frame = safeBounds;
     self.bezierBlur.frame = self.bezierContainer.bounds;
+    self.bezierContainer.backgroundColor = [[UIColor greenColor] colorWithAlphaComponent:0.15];
     
-    self.bezierContainer.backgroundColor = [UIColor clearColor];
-    self.panelContainer.backgroundColor = [UIColor clearColor];
-    self.appPanel.backgroundColor = [UIColor clearColor];
+    // 4. 面板主体：黄色 (UIVisualEffectView 容器)
+    self.appPanel.backgroundColor = [[UIColor yellowColor] colorWithAlphaComponent:0.2];
+
+    // 5. 辅助视图：紫色 (交通灯) 与 青色 (缩放手柄)
+    self.trafficCapsule.backgroundColor = [[UIColor purpleColor] colorWithAlphaComponent:0.4];
+    self.resizingHandle.backgroundColor = [[UIColor cyanColor] colorWithAlphaComponent:0.4];
 
     for (UIView *subview in self.appPanel.subviews) {
         if ([NSStringFromClass([subview class]) containsString:@"Backdrop"]) {
@@ -524,22 +514,8 @@ static const CGFloat kPanelH = 520.0;
     CGPoint translation = [gesture translationInView:nil];
     CGPoint velocity = [gesture velocityInView:nil];
 
-    // 修复唤出 BUG：防止 App Scene 返回 Unknown(0) 导致 stretch 永远为 0
-    CGFloat stretch = 0;
-    UIInterfaceOrientation orientation = UIInterfaceOrientationPortrait;
-    if (self.windowScene && self.windowScene.interfaceOrientation != 0) {
-        orientation = self.windowScene.interfaceOrientation;
-    }
-
-    if (orientation == UIInterfaceOrientationPortrait) {
-        stretch = -translation.x;
-    } else if (orientation == UIInterfaceOrientationLandscapeLeft) {
-        stretch = translation.y;
-    } else if (orientation == UIInterfaceOrientationLandscapeRight) {
-        stretch = -translation.y;
-    } else if (orientation == UIInterfaceOrientationPortraitUpsideDown) {
-        stretch = translation.x;
-    }
+    // 锁定为右侧拉伸计算
+    CGFloat stretch = -translation.x;
 
     if (gesture.state == UIGestureRecognizerStateBegan) {
         if (!self.isPanelShowing) {
@@ -774,70 +750,74 @@ static const CGFloat kPanelH = 520.0;
     }
 }
 
-- (void)updateWindowTransformForOrientation:(UIInterfaceOrientation)orientation {
-    CGAffineTransform transform = CGAffineTransformIdentity;
-    if (orientation == UIInterfaceOrientationLandscapeLeft) {
-        transform = CGAffineTransformMakeRotation(M_PI_2);
-    } else if (orientation == UIInterfaceOrientationLandscapeRight) {
-        transform = CGAffineTransformMakeRotation(-M_PI_2);
-    } else if (orientation == UIInterfaceOrientationPortraitUpsideDown) {
-        transform = CGAffineTransformMakeRotation(M_PI);
-    }
-    
-    [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:0 animations:^{
-        self.transform = transform;
-        self.frame = [UIScreen mainScreen].bounds;
-    } completion:nil];
-}
+- (BOOL)_shouldAutorotateToInterfaceOrientation:(long long)orientation { return NO; }
 
 - (void)attachToCurrentActiveScene {
-    UIWindowScene *targetScene = nil;
-    
-    // 1. 尝试获取 SpringBoard 的主显示场景 (iOS 13+)
-    if ([NSClassFromString(@"SBWindowScene") respondsToSelector:@selector(mainDisplayWindowScene)]) {
-        targetScene = [NSClassFromString(@"SBWindowScene") performSelector:@selector(mainDisplayWindowScene)];
-    }
-    
-    // 2. 如果没找到，遍历所有场景
-    if (!targetScene) {
-        NSArray *scenes = [[UIApplication sharedApplication].connectedScenes allObjects];
-        for (UIScene *scene in scenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]]) {
-                NSString *role = scene.session.role;
-                
-                // 绝对禁止挂载到灵动岛、占位符或系统内部隔离场景
-                if ([role isEqualToString:@"SBWindowSceneSessionRoleSystemAperture"] ||
-                    [role isEqualToString:@"SBWindowSceneSessionRoleSystemApertureCurtain"] ||
-                    [role isEqualToString:@"UISceneSessionRolePlaceholder"]) {
-                    continue;
-                }
-                
-                // 优先寻找活跃的 App 或 HomeScreen 场景
-                if (scene.activationState == UISceneActivationStateForegroundActive || 
-                    [role isEqualToString:@"SBWindowSceneSessionRoleHomeScreen"] ||
-                    [role isEqualToString:@"UIWindowSceneSessionRoleApplication"]) {
-                    targetScene = (UIWindowScene *)scene;
-                }
+    // 异步获取方向并分发，确保不在敏感的系统转换周期内执行同步 UI 操作
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIInterfaceOrientation orientation = UIInterfaceOrientationPortrait;
+        Class workspaceClass = NSClassFromString(@"SBMainWorkspace");
+        if (workspaceClass && [workspaceClass respondsToSelector:@selector(sharedInstance)]) {
+            id workspace = [workspaceClass performSelector:@selector(sharedInstance)];
+            if (workspace && [workspace respondsToSelector:@selector(activeInterfaceOrientation)]) {
+                orientation = (UIInterfaceOrientation)[workspace activeInterfaceOrientation];
             }
         }
-    }
+        [self attachToCurrentActiveSceneWithOrientation:orientation];
+    });
+}
 
-    if (targetScene && self.windowScene != targetScene) {
-        self.windowScene = targetScene;
-        self.hidden = NO; 
-        
-        [self applyAdaptiveLevel];
-        self.bounds = targetScene.coordinateSpace.bounds;
-        self.center = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
-        [self setNeedsLayout];
-        [self layoutIfNeeded];
-        
-        // 确保挂载新场景时，同步执行一次方向变换逻辑
-        [self updateWindowTransformForOrientation:targetScene.interfaceOrientation];
-    } else if (targetScene && self.windowScene == targetScene) {
-        // 场景未变，但可能发生了旋转，确保同步方向
-        [self updateWindowTransformForOrientation:targetScene.interfaceOrientation];
-    }
+- (void)attachToCurrentActiveSceneWithOrientation:(UIInterfaceOrientation)orientation {
+    // 记录目标方向，供 layoutSubviews 使用
+    self.targetOrientation = orientation;
+    
+    // 增加内部保护，防止异步任务堆叠
+    static BOOL isProcessing = NO;
+    if (isProcessing) return;
+    isProcessing = YES;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            UIWindowScene *targetScene = nil;
+            if ([NSClassFromString(@"SBWindowScene") respondsToSelector:@selector(mainDisplayWindowScene)]) {
+                targetScene = [NSClassFromString(@"SBWindowScene") performSelector:@selector(mainDisplayWindowScene)];
+            }
+            
+            if (!targetScene) {
+                for (UIScene *scene in [[UIApplication sharedApplication].connectedScenes allObjects]) {
+                    if ([scene isKindOfClass:[UIWindowScene class]]) {
+                        NSString *role = scene.session.role;
+                        if ([role isEqualToString:@"SBWindowSceneSessionRoleSystemAperture"] ||
+                            [role isEqualToString:@"SBWindowSceneSessionRoleSystemApertureCurtain"] ||
+                            [role isEqualToString:@"UISceneSessionRolePlaceholder"]) continue;
+                        
+                        if (scene.activationState == UISceneActivationStateForegroundActive || 
+                            [role isEqualToString:@"SBWindowSceneSessionRoleHomeScreen"] ||
+                            [role isEqualToString:@"UIWindowSceneSessionRoleApplication"]) {
+                            targetScene = (UIWindowScene *)scene;
+                        }
+                    }
+                }
+            }
+
+            if (targetScene) {
+                if (self.windowScene != targetScene) self.windowScene = targetScene;
+                self.hidden = NO; 
+                [self applyAdaptiveLevel];
+                
+                CGRect screenBounds = [UIScreen mainScreen].bounds;
+                CGFloat portraitW = MIN(screenBounds.size.width, screenBounds.size.height);
+                CGFloat portraitH = MAX(screenBounds.size.width, screenBounds.size.height);
+                
+                // 强制锁定物理肖像 Bounds，防止 Scene 自动交换宽高导致的子视图漂移
+                self.bounds = CGRectMake(0, 0, portraitW, portraitH);
+                self.center = CGPointMake(screenBounds.size.width/2.0, screenBounds.size.height/2.0);
+
+                [self setNeedsLayout];
+            }
+        } @catch (NSException *e) {}
+        isProcessing = NO;
+    });
 }
 
 - (void)applyAdaptiveLevel {
@@ -875,22 +855,20 @@ static const CGFloat kPanelH = 520.0;
         return nil;
     }
     
-    // 拦截热区：将触发区域扩大到右侧 40pt，即使视觉上只有 1pt
-    CGFloat distanceToRightEdge = self.bounds.size.width - point.x;
-    if (distanceToRightEdge <= 40.0 && distanceToRightEdge >= -5.0) {
+    // 拦截热区：固定为右侧边缘
+    CGFloat dist = self.bounds.size.width - point.x;
+    if (dist >= -5.0 && dist <= kTriggerHotzoneWidth) {
         // 复用键盘避让逻辑
         if (self.isKeyboardVisible) {
             CGFloat yThreshold = self.bounds.size.height * 0.4;
             if (point.y > yThreshold) return nil;
         }
-        // 竖屏时避开安全区域触发
-        if (self.windowScene && self.windowScene.interfaceOrientation == UIInterfaceOrientationPortrait) {
-            UIEdgeInsets safe = self.safeAreaInsets;
-            if (point.y < safe.top || point.y > (self.bounds.size.height - safe.bottom)) {
-                return nil;
-            }
-        }
-        return self.edgeTriggerView;
+        // 避开安全区域触发
+        UIEdgeInsets safe = self.safeAreaInsets;
+        if (point.y < safe.top || point.y > (self.bounds.size.height - safe.bottom)) return nil;
+
+        // 返回自身，让 CV3Window 作为根管理者处理手势
+        return self;
     }
     
     return nil;
@@ -901,39 +879,47 @@ static const CGFloat kPanelH = 520.0;
 - (void)layoutSubviews {
     %orig;
 
+    // 增加递归保护：如果是 CV3Window 自身的 layoutSubviews，或者已经在处理中，则跳过
+    static BOOL isUpdating = NO;
+    if (isUpdating || (sharedWindow && self == sharedWindow)) return;
+
     // 仅监控处于前台且已激活的窗口场景
     if (self.windowScene && self.windowScene.activationState == UISceneActivationStateForegroundActive) {
-        // 使用持久化变量来确保只有方向真正改变时才记录，并增加时间窗口防抖
         static UIInterfaceOrientation globalLastConfirmedOrientation = UIInterfaceOrientationUnknown;
         static NSTimeInterval lastLogTime = 0;
         
         UIInterfaceOrientation currentOrientation = self.windowScene.interfaceOrientation;
         NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
 
-        // 只有当方向确实发生变化，且不是未知方向，且距离上次记录超过 1 秒时才记录
         if (currentOrientation != globalLastConfirmedOrientation && 
             currentOrientation != UIInterfaceOrientationUnknown &&
-            (currentTime - lastLogTime > 1.0)) {
+            (currentTime - lastLogTime > 0.5)) { // 缩短防抖到 0.5s 提高响应速度
             
             globalLastConfirmedOrientation = currentOrientation;
             lastLogTime = currentTime;
             
+            isUpdating = YES;
             switch (currentOrientation) {
                 case UIInterfaceOrientationPortrait:
                     CV3LogToFile(@"界面直立");
+                    if (sharedWindow) [sharedWindow attachToCurrentActiveSceneWithOrientation:currentOrientation];
                     break;
                 case UIInterfaceOrientationPortraitUpsideDown:
                     CV3LogToFile(@"界面直立，上下颠倒");
+                    if (sharedWindow) [sharedWindow attachToCurrentActiveSceneWithOrientation:currentOrientation];
                     break;
                 case UIInterfaceOrientationLandscapeLeft:
                     CV3LogToFile(@"界面朝左");
+                    if (sharedWindow) [sharedWindow attachToCurrentActiveSceneWithOrientation:currentOrientation];
                     break;
                 case UIInterfaceOrientationLandscapeRight:
                     CV3LogToFile(@"界面朝右");
+                    if (sharedWindow) [sharedWindow attachToCurrentActiveSceneWithOrientation:currentOrientation];
                     break;
                 default:
                     break;
             }
+            isUpdating = NO;
         }
     }
 }
