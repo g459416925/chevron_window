@@ -238,35 +238,26 @@ static const CGFloat kEdgeHitWidth = 30.0;
 - (void)setupUI {
     CGRect bounds = self.bounds;
     
-    // 初始化隔离层 (Dimming View)
-    self.dimmingView = [[UIView alloc] initWithFrame:bounds];
-    self.dimmingView.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.15]; // 增加轻微变暗效果
-    self.dimmingView.alpha = 0;
-    self.dimmingView.userInteractionEnabled = YES; // 用于拦截触控
-    [self.rootViewController.view addSubview:self.dimmingView];
-    
-    // 给隔离层添加点击手势，点击空白处关闭面板
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDimmingTap:)];
-    [self.dimmingView addGestureRecognizer:tap];
+    // 调试辅助：为层级添加颜色，便于观察
+    // 移除 dimmingView 相关代码
 
     self.edgeTriggerView = [[UIView alloc] initWithFrame:CGRectZero];
-    self.edgeTriggerView.backgroundColor = [UIColor clearColor];
-    self.edgeTriggerView.userInteractionEnabled = NO; // 不再由视图接收触摸
+    self.edgeTriggerView.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.2]; // 调试可见
+    self.edgeTriggerView.userInteractionEnabled = NO;
     [self.rootViewController.view addSubview:self.edgeTriggerView];
     
-    // 创建边缘手势，delegate 设为 self 以支持共存
+    // 创建边缘手势
     self.systemEdgePan = [[UIScreenEdgePanGestureRecognizer alloc] initWithTarget:self action:@selector(handleEdgeInteraction:)];
     self.systemEdgePan.edges = UIRectEdgeRight;
     self.systemEdgePan.delegate = self;
     
-    // 将手势注册到 SpringBoard 的系统手势管理器中 (type 112 = 自定义系统手势)
     @try {
         SBSystemGestureManager *manager = [%c(SBSystemGestureManager) mainDisplayManager];
         [manager addGestureRecognizer:self.systemEdgePan withType:112];
-    } @catch (NSException *e) {
-    }
+    } @catch (NSException *e) {}
     
     self.bezierContainer = [[UIView alloc] initWithFrame:bounds];
+    self.bezierContainer.backgroundColor = [[UIColor greenColor] colorWithAlphaComponent:0.1]; // 调试可见
     self.bezierContainer.alpha = 0;
     self.bezierContainer.userInteractionEnabled = NO;
     [self.rootViewController.view addSubview:self.bezierContainer];
@@ -279,6 +270,7 @@ static const CGFloat kEdgeHitWidth = 30.0;
     self.bezierBlur.layer.mask = self.bezierLayer; 
     
     self.panelContainer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kPanelW, kPanelH)];
+    self.panelContainer.backgroundColor = [[UIColor blueColor] colorWithAlphaComponent:0.2]; // 调试可见
     self.panelContainer.hidden = YES;
     self.panelContainer.layer.shadowColor = [UIColor blackColor].CGColor;
     self.panelContainer.layer.shadowOffset = CGSizeMake(0, 20);
@@ -291,6 +283,7 @@ static const CGFloat kEdgeHitWidth = 30.0;
     
     self.appPanel = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
     self.appPanel.frame = self.panelContainer.bounds;
+    self.appPanel.backgroundColor = [[UIColor yellowColor] colorWithAlphaComponent:0.3]; // 调试可见
     self.appPanel.layer.cornerRadius = 28;
     self.appPanel.layer.masksToBounds = YES;
     self.appPanel.layer.borderWidth = 0.4;
@@ -479,11 +472,7 @@ static const CGFloat kEdgeHitWidth = 30.0;
         } completion:nil];
     }
 }
-- (void)handleDimmingTap:(UITapGestureRecognizer *)tap {
-    if (self.isPanelShowing && !self.isAnimating) {
-        [self animateSpotlight:NO fromPoint:self.panelContainer.center];
-    }
-}
+// 移除 handleDimmingTap 方法
 
 - (void)layoutSubviews {
     [super layoutSubviews];
@@ -842,6 +831,10 @@ static const CGFloat kEdgeHitWidth = 30.0;
         [self setNeedsLayout];
         [self layoutIfNeeded];
         
+        // 确保挂载新场景时，同步执行一次方向变换逻辑
+        [self updateWindowTransformForOrientation:targetScene.interfaceOrientation];
+    } else if (targetScene && self.windowScene == targetScene) {
+        // 场景未变，但可能发生了旋转，确保同步方向
         [self updateWindowTransformForOrientation:targetScene.interfaceOrientation];
     }
 }
@@ -900,30 +893,43 @@ static const CGFloat kEdgeHitWidth = 30.0;
 - (void)layoutSubviews {
     %orig;
 
-    // 只对前台活跃场景的窗口进行监控
     if (self.windowScene && self.windowScene.activationState == UISceneActivationStateForegroundActive) {
-        static UIInterfaceOrientation lastObservedOrientation = UIInterfaceOrientationUnknown;
+        static UIInterfaceOrientation lastConfirmedOrientation = UIInterfaceOrientationUnknown;
+        static NSTimer *debounceTimer = nil;
         UIInterfaceOrientation currentOrientation = self.windowScene.interfaceOrientation;
 
-        if (currentOrientation != lastObservedOrientation && currentOrientation != UIInterfaceOrientationUnknown) {
-            lastObservedOrientation = currentOrientation;
-            
-            switch (currentOrientation) {
-                case UIInterfaceOrientationPortrait:
-                    CV3LogToFile(@"界面直立");
-                    break;
-                case UIInterfaceOrientationPortraitUpsideDown:
-                    CV3LogToFile(@"界面直立，上下颠倒");
-                    break;
-                case UIInterfaceOrientationLandscapeLeft:
-                    CV3LogToFile(@"界面朝左");
-                    break;
-                case UIInterfaceOrientationLandscapeRight:
-                    CV3LogToFile(@"界面朝右");
-                    break;
-                default:
-                    break;
+        if (currentOrientation != lastConfirmedOrientation && currentOrientation != UIInterfaceOrientationUnknown) {
+            // 取消之前的定时器，重新计时
+            if (debounceTimer) {
+                [debounceTimer invalidate];
             }
+            
+            // 使用 __block 捕获变量，用于在 timer block 中使用
+            __block UIInterfaceOrientation orientationToLog = currentOrientation;
+            
+            debounceTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:NO block:^(NSTimer *timer) {
+                // 确保计时器结束后，当前方向仍然是这个值，才记录
+                if (self.windowScene && self.windowScene.interfaceOrientation == orientationToLog) {
+                    lastConfirmedOrientation = orientationToLog;
+                    
+                    switch (orientationToLog) {
+                        case UIInterfaceOrientationPortrait:
+                            CV3LogToFile(@"界面直立");
+                            break;
+                        case UIInterfaceOrientationPortraitUpsideDown:
+                            CV3LogToFile(@"界面直立，上下颠倒");
+                            break;
+                        case UIInterfaceOrientationLandscapeLeft:
+                            CV3LogToFile(@"界面朝左");
+                            break;
+                        case UIInterfaceOrientationLandscapeRight:
+                            CV3LogToFile(@"界面朝右");
+                            break;
+                        default:
+                            break;
+                    }
+                }
+            }];
         }
     }
 }
