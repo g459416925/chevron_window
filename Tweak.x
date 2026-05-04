@@ -923,43 +923,31 @@ static const CGFloat kPanelH = 520.0;
 - (void)layoutSubviews {
     %orig;
 
+    // 仅监控处于前台且已激活的窗口场景
     if (self.windowScene && self.windowScene.activationState == UISceneActivationStateForegroundActive) {
-        static UIInterfaceOrientation lastConfirmedOrientation = UIInterfaceOrientationUnknown;
-        static NSTimer *debounceTimer = nil;
+        // 使用持久化变量来确保只有方向真正改变时才记录
+        static UIInterfaceOrientation globalLastConfirmedOrientation = UIInterfaceOrientationUnknown;
         UIInterfaceOrientation currentOrientation = self.windowScene.interfaceOrientation;
 
-        if (currentOrientation != lastConfirmedOrientation && currentOrientation != UIInterfaceOrientationUnknown) {
-            // 取消之前的定时器，重新计时
-            if (debounceTimer) {
-                [debounceTimer invalidate];
+        if (currentOrientation != globalLastConfirmedOrientation && currentOrientation != UIInterfaceOrientationUnknown) {
+            globalLastConfirmedOrientation = currentOrientation;
+            
+            switch (currentOrientation) {
+                case UIInterfaceOrientationPortrait:
+                    CV3LogToFile(@"界面直立");
+                    break;
+                case UIInterfaceOrientationPortraitUpsideDown:
+                    CV3LogToFile(@"界面直立，上下颠倒");
+                    break;
+                case UIInterfaceOrientationLandscapeLeft:
+                    CV3LogToFile(@"界面朝左");
+                    break;
+                case UIInterfaceOrientationLandscapeRight:
+                    CV3LogToFile(@"界面朝右");
+                    break;
+                default:
+                    break;
             }
-            
-            // 使用 __block 捕获变量，用于在 timer block 中使用
-            __block UIInterfaceOrientation orientationToLog = currentOrientation;
-            
-            debounceTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:NO block:^(NSTimer *timer) {
-                // 确保计时器结束后，当前方向仍然是这个值，才记录
-                if (self.windowScene && self.windowScene.interfaceOrientation == orientationToLog) {
-                    lastConfirmedOrientation = orientationToLog;
-                    
-                    switch (orientationToLog) {
-                        case UIInterfaceOrientationPortrait:
-                            CV3LogToFile(@"界面直立");
-                            break;
-                        case UIInterfaceOrientationPortraitUpsideDown:
-                            CV3LogToFile(@"界面直立，上下颠倒");
-                            break;
-                        case UIInterfaceOrientationLandscapeLeft:
-                            CV3LogToFile(@"界面朝左");
-                            break;
-                        case UIInterfaceOrientationLandscapeRight:
-                            CV3LogToFile(@"界面朝右");
-                            break;
-                        default:
-                            break;
-                    }
-                }
-            }];
         }
     }
 }
