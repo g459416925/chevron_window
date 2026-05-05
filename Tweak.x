@@ -183,6 +183,7 @@ struct {
     CGFloat triggerBottomOffset;
     CGFloat safeAreaBreath;
     CGFloat cornerRadius;
+    CGFloat minHeight;
 } static const kChevronLayoutConstants = {
     .panelW = 370.0,
     .panelH = 520.0,
@@ -190,7 +191,8 @@ struct {
     .triggerVisualWidth = 20.0,
     .triggerBottomOffset = 100.0,
     .safeAreaBreath = 10.0,
-    .cornerRadius = 28.0
+    .cornerRadius = 28.0,
+    .minHeight = 300.0
 };
 
 
@@ -254,7 +256,7 @@ struct {
     if (self) {
         if (!cv3IconCache) cv3IconCache = [[NSCache alloc] init];
         [self applyAdaptiveLevel];
-        self.backgroundColor = [[UIColor blueColor] colorWithAlphaComponent:0.2];
+        self.backgroundColor = [UIColor clearColor];
         self.apps = [NSMutableArray array];
         self.feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
         self.selectionFeedback = [[UISelectionFeedbackGenerator alloc] init];
@@ -287,9 +289,15 @@ struct {
         [manager addGestureRecognizer:self.systemEdgePan withType:112];
     } @catch (NSException *e) {}
     
+    self.dimmingView = [[UIView alloc] initWithFrame:bounds];
+    self.dimmingView.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.15];
+    self.dimmingView.alpha = 0;
+    self.dimmingView.userInteractionEnabled = NO; // 初始关闭
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDimmingTap:)];
+    [self.dimmingView addGestureRecognizer:tap];
+    [self.rootViewController.view addSubview:self.dimmingView];
+    
     self.bezierContainer = [[UIView alloc] initWithFrame:bounds];
-
-    self.bezierContainer.backgroundColor = [[UIColor greenColor] colorWithAlphaComponent:0.1]; // 调试可见
     self.bezierContainer.alpha = 0;
     self.bezierContainer.userInteractionEnabled = NO;
     self.bezierContainer.autoresizingMask = UIViewAutoresizingNone;
@@ -431,23 +439,22 @@ struct {
     }
 }
 
+- (void)handleDimmingTap:(UITapGestureRecognizer *)tap {
+    [self animateSpotlight:NO fromPoint:self.panelContainer.center];
+}
+
 - (void)handleResize:(UIPanGestureRecognizer *)gesture {
     CGPoint translation = [gesture translationInView:self.panelContainer];
-    CGRect f = self.panelContainer.frame;
+    CGRect f = self.panelContainer.bounds;
     
     CGFloat newWidth = MAX(280, f.size.width + translation.x);
     CGFloat newHeight = MAX(350, f.size.height + translation.y);
     
-    UIEdgeInsets safe = self.safeAreaInsets;
-    CGFloat maxX = self.bounds.size.width - safe.right - 10.0;
-    CGFloat maxY = self.bounds.size.height - safe.bottom - 10.0;
-    
-    if (f.origin.x + newWidth > maxX) newWidth = maxX - f.origin.x;
-    if (f.origin.y + newHeight > maxY) newHeight = maxY - f.origin.y;
+    // 注意：拖拽大小的边界控制应该相对于屏幕，这里因为旋转可能会有偏差，但先保持基本逻辑
     
     f.size.width = newWidth;
     f.size.height = newHeight;
-    self.panelContainer.frame = f;
+    self.panelContainer.bounds = f;
     [gesture setTranslation:CGPointZero inView:self.panelContainer];
     
     self.appPanel.frame = self.panelContainer.bounds;
@@ -466,7 +473,7 @@ struct {
         [self animateSpotlight:NO fromPoint:self.panelContainer.center];
     } else if (sender.tag == 2) {
         [UIView animateWithDuration:0.6 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:1 options:0 animations:^{
-            self.panelContainer.frame = CGRectMake(0, 0, kChevronLayoutConstants.panelW, kChevronLayoutConstants.panelH);
+            self.panelContainer.bounds = CGRectMake(0, 0, kChevronLayoutConstants.panelW, kChevronLayoutConstants.panelH);
             self.panelContainer.center = CGPointMake(self.bounds.size.width/2, self.bounds.size.height/2);
             [self handleResize:nil];
         } completion:nil];
@@ -522,7 +529,36 @@ struct {
     CV3LogToFile(@"[Debug] Window: %.1fx%.1f, EdgeFrame: %@, Source: layoutSubviews, Interval: %.3fs", w, h, NSStringFromCGRect(self.edgeTriggerView.frame), interval);
 
     // 2. 面板容器
+    self.dimmingView.frame = bounds;
     self.panelContainer.backgroundColor = [UIColor clearColor];
+    
+    // 动态计算面板尺寸
+    CGFloat targetW, targetH;
+    if (orientation == UIInterfaceOrientationLandscapeLeft || orientation == UIInterfaceOrientationLandscapeRight) {
+        // 横屏：宽 50% (屏幕高度的50%), 高 70% (屏幕宽度的70%)
+        targetW = h * 0.5;
+        targetH = w * 0.7;
+    } else {
+        // 竖屏：宽 80% (屏幕宽度的80%), 高 70% (屏幕高度的70%)
+        targetW = w * 0.8;
+        targetH = h * 0.7;
+    }
+    targetH = MAX(targetH, kChevronLayoutConstants.minHeight);
+    
+    CGRect panelBounds = CGRectMake(0, 0, targetW, targetH);
+    if (!CGRectEqualToRect(self.panelContainer.bounds, panelBounds)) {
+        self.panelContainer.bounds = panelBounds;
+        // 调整子组件大小以匹配容器
+        self.appPanel.frame = self.panelContainer.bounds;
+        self.collectionView.frame = CGRectMake(0, 45, targetW, targetH - 45);
+        self.trafficCapsule.frame = CGRectMake(16, 14, 64, 24);
+        self.resizingHandle.frame = CGRectMake(targetW - 40, targetH - 40, 40, 40);
+        self.specularHighlight.frame = self.appPanel.bounds;
+        self.cyanLayer.frame = CGRectInset(self.appPanel.bounds, -0.3, -0.3);
+        self.magentaLayer.frame = CGRectInset(self.appPanel.bounds, 0.3, 0.3);
+        [self.collectionView.collectionViewLayout invalidateLayout];
+    }
+
     if (!self.isAnimating && !self.hasBeenMoved) {
         self.panelContainer.center = CGPointMake(CGRectGetMidX(safeBounds), CGRectGetMidY(safeBounds));
     }
@@ -702,17 +738,29 @@ struct {
     if (visible) {
         [self loadAppsAsync];
         [self updateTrafficLightsFocus:YES];
+        self.dimmingView.userInteractionEnabled = YES; // 显示时开启拦截
         self.panelContainer.hidden = NO; self.panelContainer.center = point;
-        self.panelContainer.transform = CGAffineTransformScale(CGAffineTransformIdentity, 0.01, 0.01);
+        
+        // 预先应用正确的旋转变换
+        CGAffineTransform initialRotation = CGAffineTransformIdentity;
+        switch (self.targetOrientation) {
+            case UIInterfaceOrientationLandscapeLeft: initialRotation = CGAffineTransformMakeRotation(-M_PI_2); break;
+            case UIInterfaceOrientationLandscapeRight: initialRotation = CGAffineTransformMakeRotation(M_PI_2); break;
+            case UIInterfaceOrientationPortraitUpsideDown: initialRotation = CGAffineTransformMakeRotation(M_PI); break;
+            default: initialRotation = CGAffineTransformIdentity; break;
+        }
+        self.panelContainer.transform = CGAffineTransformScale(initialRotation, 0.01, 0.01);
+        
         [UIView animateWithDuration:0.6 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:1 options:0 animations:^{
             self.dimmingView.alpha = 1.0;
             self.panelContainer.center = CGPointMake(self.bounds.size.width/2, self.bounds.size.height/2);
-            self.panelContainer.transform = CGAffineTransformIdentity;
+            self.panelContainer.transform = initialRotation;
             self.panelContainer.alpha = 1;
         } completion:^(BOOL f){ self.isAnimating = NO; [self startLiquidMotion]; }];
     } else {
         [self updateTrafficLightsFocus:NO];
         [self stopLiquidMotion];
+        self.dimmingView.userInteractionEnabled = NO; // 隐藏时关闭拦截
         [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0.5 options:UIViewAnimationOptionCurveEaseInOut animations:^{ 
             self.dimmingView.alpha = 0;
             self.panelContainer.alpha = 0; 
@@ -920,22 +968,21 @@ struct {
         if (CGRectContainsPoint(self.panelContainer.bounds, p)) {
             return [self.panelContainer hitTest:p withEvent:e];
         }
+        // 当面板显示时，如果点击遮罩层，返回遮罩层以便处理 TapGesture
+        CGPoint pInDimming = [self convertPoint:point toView:self.dimmingView];
+        if (CGRectContainsPoint(self.dimmingView.bounds, pInDimming)) {
+            return self.dimmingView;
+        }
         return nil;
     }
 
-    // 终极绑定逻辑：不再手动计算坐标，直接判断触点是否落在视觉触发层 (edgeTriggerView) 内
-    // 这保证了拦截层 (hitTest) 永远与视觉层 (edgeTriggerView) 物理重合
+    // 终极绑定逻辑
     CGPoint pointInRoot = [self convertPoint:point toView:self.rootViewController.view];
     if (CGRectContainsPoint(self.edgeTriggerView.frame, pointInRoot)) {
-
-        // 保留键盘智能避让
         if (self.isKeyboardVisible) {
-            // 在当前 frame 的局部坐标系中判断
             CGPoint pInTrigger = [self.rootViewController.view convertPoint:pointInRoot toView:self.edgeTriggerView];
             if (pInTrigger.y > self.edgeTriggerView.bounds.size.height * 0.4) return nil;
         }
-
-        CV3LogToFile(@"[Debug] HitTest 命中绑定区域: point=%@, EdgeFrame=%@", NSStringFromCGPoint(pointInRoot), NSStringFromCGRect(self.edgeTriggerView.frame));
         return self;
     }
 
