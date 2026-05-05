@@ -2427,13 +2427,10 @@ static NSTimeInterval lastLogTime = 0;
 - (void)applicationDidFinishLaunching:(id)application {
     %orig;
 
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (sharedWindow) return;
-        sharedWindow = [[CV3Window alloc] initWithFrame:[UIScreen mainScreen].bounds];
-        sharedWindow.hidden = NO;
-        sharedWindow.alpha = 1.0;
-        [sharedWindow show];
-    });
+    if (sharedWindow) return;
+    sharedWindow = [[CV3Window alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    sharedWindow.hidden = NO;
+    sharedWindow.alpha = 1.0;
+    [sharedWindow show];
 }
 %end
