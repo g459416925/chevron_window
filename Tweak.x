@@ -315,9 +315,9 @@ struct {
     self.panelContainer.backgroundColor = [[UIColor blueColor] colorWithAlphaComponent:0.0]; // 调试可见，现在设为透明
     self.panelContainer.hidden = YES;
     self.panelContainer.layer.shadowColor = [UIColor blackColor].CGColor;
-    self.panelContainer.layer.shadowOffset = CGSizeMake(0, 20);
-    self.panelContainer.layer.shadowOpacity = 0.45;
-    self.panelContainer.layer.shadowRadius = 50;
+    self.panelContainer.layer.shadowOffset = CGSizeMake(0, 0); // 居中阴影，四周扩散
+    self.panelContainer.layer.shadowOpacity = 0.7; // 加深不透明度凸显聚焦
+    self.panelContainer.layer.shadowRadius = 60; // 扩大阴影半径
     self.panelContainer.autoresizingMask = UIViewAutoresizingNone;
     [self.rootViewController.view addSubview:self.panelContainer];
     
