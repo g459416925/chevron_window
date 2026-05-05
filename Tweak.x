@@ -285,6 +285,7 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, assign) CGAffineTransform baseRotationTransform; // 新增：存储基础旋转变换
 @property (nonatomic, strong) UIView *contrastBackdrop; // 新增：对比度增强层
 @property (nonatomic, strong) CALayer *innerGlowLayer; // 新增：内发光边框层
+@property (nonatomic, assign) CGPoint cachedTargetCenter; // 建议3：布局预热缓存
 
 - (void)show;
 - (void)loadAppsAsync;
@@ -574,6 +575,19 @@ struct {
     if (textField == self.searchField) {
         UIView *container = textField.superview;
         
+        // 建议2：搜索框液态响应 (Liquid Search Focus)
+        // 面板圆角呼吸动画：28pt -> 32pt -> 28pt
+        CABasicAnimation *cornerAnim = [CABasicAnimation animationWithKeyPath:@"cornerRadius"];
+        cornerAnim.fromValue = @(kChevronLayoutConstants.cornerRadius);
+        cornerAnim.toValue = @(32.0);
+        cornerAnim.duration = 0.6;
+        cornerAnim.autoreverses = YES;
+        cornerAnim.repeatCount = HUGE_VALF;
+        cornerAnim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [self.appPanel.layer addAnimation:cornerAnim forKey:@"liquidCorner"];
+        [self.innerGlowLayer addAnimation:cornerAnim forKey:@"liquidCorner"];
+        [self.dispersionContainer.layer addAnimation:cornerAnim forKey:@"liquidCorner"];
+
         // 1. 基础缩放与阴影动画
         [UIView animateWithDuration:0.5 delay:0 options:UIViewAnimationOptionAutoreverse | UIViewAnimationOptionRepeat | UIViewAnimationOptionAllowUserInteraction animations:^{
             container.transform = CGAffineTransformMakeScale(1.02, 1.02);
@@ -622,6 +636,9 @@ struct {
         UIView *container = textField.superview;
         [container.layer removeAllAnimations];
         [self.searchBackground removeAllAnimations];
+        [self.appPanel.layer removeAnimationForKey:@"liquidCorner"];
+        [self.innerGlowLayer removeAnimationForKey:@"liquidCorner"];
+        [self.dispersionContainer.layer removeAnimationForKey:@"liquidCorner"];
 
         [UIView animateWithDuration:0.3 animations:^{
             container.transform = CGAffineTransformIdentity;
@@ -1009,6 +1026,7 @@ struct {
     self.collectionView.delaysContentTouches = NO; // 关键：禁用触碰延迟实现即时反馈
     self.collectionView.showsVerticalScrollIndicator = NO;   // 隐藏纵向滚动条
     self.collectionView.showsHorizontalScrollIndicator = NO; // 隐藏横向滚动条
+    self.collectionView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag; // 滚动时自动收起键盘
     [self.collectionView registerClass:[CV3AppCell class] forCellWithReuseIdentifier:@"C"];
     [self.appPanel.contentView addSubview:self.collectionView];
 
@@ -1280,6 +1298,11 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
 - (void)handlePanelDrag:(UIPanGestureRecognizer *)gesture {
     CGPoint location = [gesture locationInView:self.panelContainer];
+    
+    // 智能模糊抽离 (Smart Blur Easing) 计算
+    CGPoint velocity = [gesture velocityInView:self.panelContainer.superview];
+    CGFloat speed = sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
+    
     if (gesture.state == UIGestureRecognizerStateBegan) {
         if (location.y > 45.0) { return; }
         self.hasBeenMoved = YES;
@@ -1290,6 +1313,16 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         } completion:nil];
     }
     
+    if (gesture.state == UIGestureRecognizerStateChanged) {
+        // 动态调整模糊强度与透明度，模拟物理上的视觉暂留
+        // 速度 0 -> 3000 对应 alpha 1.0 -> 0.75
+        CGFloat easingAlpha = MAX(0.75, 1.0 - (speed / 3000.0) * 0.25);
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        self.appPanel.alpha = easingAlpha;
+        [CATransaction commit];
+    }
+
     // 使用 superview 坐标系以确保与父容器内的绝对位置一致
     CGPoint translation = [gesture translationInView:self.panelContainer.superview];
     CGPoint newCenter = CGPointMake(self.panelContainer.center.x + translation.x, self.panelContainer.center.y + translation.y);
@@ -1312,21 +1345,51 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
         // 恢复原始缩放，但不重置 transform（保留旋转）
         CGAffineTransform current = self.panelContainer.transform;
-        [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.5 initialSpringVelocity:1.0 options:0 animations:^{
+        
+        // 磁吸靠边 (Magnetic Snapping) 逻辑
+        CGRect screenBounds = self.bounds;
+        UIEdgeInsets safe = self.safeAreaInsets;
+        CGFloat threshold = 60.0; // 磁吸阈值
+        
+        CGPoint currentCenter = self.panelContainer.center;
+        CGPoint targetCenter = currentCenter;
+        
+        CGSize sizeInRoot = CGRectApplyAffineTransform(panelBounds, self.panelContainer.transform).size;
+        CGFloat rootHalfW = sizeInRoot.width / 2.0;
+        CGFloat rootHalfH = sizeInRoot.height / 2.0;
+
+        // 检查左/右磁吸
+        if (currentCenter.x < (safe.left + rootHalfW + threshold)) {
+            targetCenter.x = safe.left + rootHalfW;
+        } else if (currentCenter.x > (screenBounds.size.width - safe.right - rootHalfW - threshold)) {
+            targetCenter.x = screenBounds.size.width - safe.right - rootHalfW;
+        }
+        
+        // 检查顶/底磁吸
+        if (currentCenter.y < (safe.top + rootHalfH + threshold)) {
+            targetCenter.y = safe.top + rootHalfH;
+        } else if (currentCenter.y > (screenBounds.size.height - safe.bottom - rootHalfH - threshold)) {
+            targetCenter.y = screenBounds.size.height - safe.bottom - rootHalfH;
+        }
+
+        // 提前应用回弹钳位约束，避免在 Block 中捕获为只读变量
+        CGRect b = self.bounds;
+        CGRect pb = self.panelContainer.bounds;
+        CGFloat hW = pb.size.width * 0.4;
+        CGFloat hH = pb.size.height * 0.4;
+        targetCenter.x = MAX(hW, MIN(b.size.width - hW, targetCenter.x));
+        targetCenter.y = MAX(hH, MIN(b.size.height - hH, targetCenter.y));
+
+        // 建议1：触觉反馈深度耦合 (Haptic Coupling)
+        // 如果检测到位置发生了磁吸偏移，触发一次刚性震动
+        if (!CGPointEqualToPoint(currentCenter, targetCenter)) {
+            UIImpactFeedbackGenerator *rigid = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid];
+            [rigid impactOccurred];
+        }
+
+        [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.6 initialSpringVelocity:1.0 options:0 animations:^{
             self.panelContainer.transform = CGAffineTransformScale(current, 1/1.05, 1/1.05);
-            
-            // 自动回弹检测
-            CGRect b = self.bounds;
-            CGRect pb = self.panelContainer.bounds;
-            CGFloat hW = pb.size.width * 0.4;
-            CGFloat hH = pb.size.height * 0.4;
-            
-            CGPoint currentCenter = self.panelContainer.center;
-            CGPoint targetCenter = currentCenter;
-            
-            targetCenter.x = MAX(hW, MIN(b.size.width - hW, targetCenter.x));
-            targetCenter.y = MAX(hH, MIN(b.size.height - hH, targetCenter.y));
-            
+            self.appPanel.alpha = 1.0; // 恢复全透明度
             self.panelContainer.center = targetCenter;
         } completion:nil];
     }
@@ -1530,6 +1593,21 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     } completion:nil];
 }
 
+- (CGPoint)calculateTargetCenter {
+    UIEdgeInsets safe = self.safeAreaInsets;
+    CGRect bounds = self.bounds;
+    CGFloat w = bounds.size.width;
+    CGFloat h = bounds.size.height;
+    
+    // 计算安全区域内的有效绘图区
+    CGRect safeBounds = CGRectMake(safe.left + kChevronLayoutConstants.safeAreaBreath, 
+                                   safe.top + kChevronLayoutConstants.safeAreaBreath, 
+                                   w - safe.left - safe.right - 2 * kChevronLayoutConstants.safeAreaBreath, 
+                                   h - safe.top - safe.bottom - 2 * kChevronLayoutConstants.safeAreaBreath);
+                                   
+    return CGPointMake(CGRectGetMidX(safeBounds), CGRectGetMidY(safeBounds));
+}
+
 - (void)handleTrafficLight:(UIButton *)sender {
     // 立即反馈
     [self.feedback impactOccurred];
@@ -1547,7 +1625,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             targetH = MAX(targetH, kChevronLayoutConstants.minHeight);
             
             self.panelContainer.bounds = CGRectMake(0, 0, targetW, targetH);
-            self.panelContainer.center = CGPointMake(self.bounds.size.width/2, self.bounds.size.height/2);
+            self.panelContainer.center = [self calculateTargetCenter];
             [self handleResize:nil];
         } completion:nil];
     }
@@ -1568,10 +1646,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     CGFloat h = bounds.size.height;
 
     // 计算安全区域内的有效绘图区
-    CGRect safeBounds = CGRectMake(safe.left + kChevronLayoutConstants.safeAreaBreath, 
-                                   safe.top + kChevronLayoutConstants.safeAreaBreath, 
-                                   w - safe.left - safe.right - 2 * kChevronLayoutConstants.safeAreaBreath, 
-                                   h - safe.top - safe.bottom - 2 * kChevronLayoutConstants.safeAreaBreath);
+    CGPoint targetCenter = [self calculateTargetCenter];
+    self.cachedTargetCenter = targetCenter; // 建议3：实时预热缓存
 
     // 1. 设置触发区域
     self.edgeTriggerView.backgroundColor = [UIColor clearColor];
@@ -1664,7 +1740,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             [self.collectionView.collectionViewLayout invalidateLayout];
             
             if (!self.hasBeenMoved) {
-                CGPoint targetCenter = CGPointMake(CGRectGetMidX(safeBounds), CGRectGetMidY(safeBounds));
                 if (CGPointDistance(self.panelContainer.center, targetCenter) > 0.5) {
                     self.panelContainer.center = targetCenter;
                 }
@@ -1679,9 +1754,11 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         }
         
         if (!self.isAnimating && !self.hasBeenMoved) {
-            CGPoint targetCenter = CGPointMake(CGRectGetMidX(safeBounds), CGRectGetMidY(safeBounds));
+            // 建议1：锚点平滑补偿 (Anchor Smoothing)
             if (CGPointDistance(self.panelContainer.center, targetCenter) > 0.5) {
-                self.panelContainer.center = targetCenter;
+                [UIView animateWithDuration:0.15 delay:0 options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState animations:^{
+                    self.panelContainer.center = targetCenter;
+                } completion:nil];
             }
         } else if (self.isPanelShowing && !self.isAnimating) {
             // 保持在屏幕内的钳位逻辑
@@ -1755,6 +1832,9 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     }
 
     if (gesture.state == UIGestureRecognizerStateBegan) {
+        // 建议3：布局预热 (Layout Pre-warming)
+        self.cachedTargetCenter = [self calculateTargetCenter];
+
         if (!self.isPanelShowing) {
             [self.feedback impactOccurred];
             [self.selectionFeedback prepare];
@@ -1923,9 +2003,12 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         self.panelContainer.transform = CGAffineTransformScale(initialRotation, 0.01, 0.01);
         self.panelContainer.alpha = 0;
 
+        // 建议3：使用预热缓存的中心点 (Layout Pre-warming)
+        CGPoint targetCenter = (self.cachedTargetCenter.x > 0) ? self.cachedTargetCenter : [self calculateTargetCenter];
+
         [UIView animateWithDuration:0.6 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:1 options:0 animations:^{
             self.dimmingView.alpha = 1.0;
-            self.panelContainer.center = CGPointMake(self.bounds.size.width/2, self.bounds.size.height/2);
+            self.panelContainer.center = targetCenter;
             self.panelContainer.transform = initialRotation;
             self.panelContainer.alpha = 1;
         } completion:^(BOOL f){ self.isAnimating = NO; [self startLiquidMotion]; }];
@@ -1980,17 +2063,11 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         self.cyanLayer.transform = CATransform3DMakeTranslation(-dx, -dy, 0);
         self.magentaLayer.transform = CATransform3DMakeTranslation(dx, dy, 0);
         
-        // 2. 新增：整个面板容器的 3D 悬浮视差 (Parallax Panel)
-        // 计算最大 +/- 8pt 的位移
+        // 建议2：视差解耦 (Parallax Decoupling)
+        // 将位移作用于 appPanel 而不是 panelContainer，物理干扰不影响布局坐标
         CGFloat panelDX = m.attitude.roll * 8.0;
         CGFloat panelDY = m.attitude.pitch * 8.0;
-        
-        // 使用存储的基础变换，避免 layoutSubviews 冲突
-        CGAffineTransform baseRotation = self.baseRotationTransform;
-        
-        // 叠加视差位移
-        CGAffineTransform parallaxTransform = CGAffineTransformMakeTranslation(panelDX, panelDY);
-        self.panelContainer.transform = CGAffineTransformConcat(baseRotation, parallaxTransform);
+        self.appPanel.transform = CGAffineTransformMakeTranslation(panelDX, panelDY);
 
         [CATransaction commit];
     }];
@@ -2204,10 +2281,62 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
 - (void)keyboardWillShow:(NSNotification *)notification {
     self.isKeyboardVisible = YES;
+    
+    NSDictionary *userInfo = notification.userInfo;
+    CGRect keyboardFrame = [userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
+    double duration = [userInfo[UIKeyboardAnimationDurationUserInfoKey] doubleValue];
+    UIViewAnimationOptions options = [userInfo[UIKeyboardAnimationCurveUserInfoKey] unsignedIntegerValue] << 16;
+    
+    // 计算面板底部与键盘顶部的重叠情况
+    // 注意：keyboardFrame 是物理屏幕坐标系
+    CGRect panelFrameInScreen = [self.panelContainer.superview convertRect:self.panelContainer.frame toView:nil];
+    CGFloat overlap = CGRectGetMaxY(panelFrameInScreen) - keyboardFrame.origin.y;
+    
+    if (overlap > -10.0) { // 如果重叠或距离太近（预留 10pt 呼吸间距）
+        CGFloat offset = overlap + 20.0; // 额外向上推移 20pt 以确保舒适感
+        
+        [UIView animateWithDuration:duration delay:0 options:options animations:^{
+            CGPoint center = self.panelContainer.center;
+            // 根据当前旋转方向计算推移矢量
+            UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+            
+            switch (orientation) {
+                case UIInterfaceOrientationLandscapeLeft:
+                    center.x += offset; // 横屏下，y轴推移对应x轴变化
+                    break;
+                case UIInterfaceOrientationLandscapeRight:
+                    center.x -= offset;
+                    break;
+                case UIInterfaceOrientationPortraitUpsideDown:
+                    center.y += offset;
+                    break;
+                case UIInterfaceOrientationPortrait:
+                default:
+                    center.y -= offset;
+                    break;
+            }
+            self.panelContainer.center = center;
+        } completion:nil];
+    }
 }
 
 - (void)keyboardWillHide:(NSNotification *)notification {
     self.isKeyboardVisible = NO;
+    
+    NSDictionary *userInfo = notification.userInfo;
+    double duration = [userInfo[UIKeyboardAnimationDurationUserInfoKey] doubleValue];
+    UIViewAnimationOptions options = [userInfo[UIKeyboardAnimationCurveUserInfoKey] unsignedIntegerValue] << 16;
+    
+    [UIView animateWithDuration:duration delay:0 options:options animations:^{
+        // 自动回弹至由安全区域决定的目标中心（除非用户手动大幅挪动过）
+        if (!self.hasBeenMoved) {
+            self.panelContainer.center = [self calculateTargetCenter];
+        } else {
+            // 如果用户手动挪动过，则尝试执行反向推回逻辑，或者保持现状（这里选择回弹钳位以保证可用性）
+            [self setNeedsLayout];
+            [self layoutIfNeeded];
+        }
+    } completion:nil];
 }
 
 - (void)monitorState {
