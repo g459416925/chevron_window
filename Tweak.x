@@ -450,6 +450,17 @@ struct {
 }
 
 - (void)collectionView:(UICollectionView *)cv didSelectItemAtIndexPath:(NSIndexPath *)indexPath {
+    UICollectionViewCell *cell = [cv cellForItemAtIndexPath:indexPath];
+    
+    // 立即提供物理点击感：微缩动画
+    [UIView animateWithDuration:0.15 delay:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
+        cell.transform = CGAffineTransformMakeScale(0.9, 0.9);
+    } completion:^(BOOL finished) {
+        [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.5 initialSpringVelocity:0.5 options:0 animations:^{
+            cell.transform = CGAffineTransformIdentity;
+        } completion:nil];
+    }];
+
     if (indexPath.item < self.filteredApps.count) {
         [self launchApp:self.filteredApps[indexPath.item]];
     }
@@ -696,6 +707,11 @@ struct {
         
         dotBtn.tag = i;
         [dotBtn addTarget:self action:@selector(handleTrafficLight:) forControlEvents:UIControlEventTouchDown];
+        
+        // 增加按钮点击的微缩视觉反馈
+        [dotBtn addTarget:self action:@selector(btnTouchDown:) forControlEvents:UIControlEventTouchDown];
+        [dotBtn addTarget:self action:@selector(btnTouchUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
+        
         [self.trafficCapsule addSubview:dotBtn];
         [dots addObject:visualDot]; // 存储视觉圆点用于颜色更新
     }
@@ -881,6 +897,18 @@ struct {
     } else if (!gesture) {
         self.isProcessing = NO;
     }
+}
+
+- (void)btnTouchDown:(UIButton *)sender {
+    [UIView animateWithDuration:0.2 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+        sender.transform = CGAffineTransformMakeScale(0.85, 0.85);
+    } completion:nil];
+}
+
+- (void)btnTouchUp:(UIButton *)sender {
+    [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.5 initialSpringVelocity:0.5 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+        sender.transform = CGAffineTransformIdentity;
+    } completion:nil];
 }
 
 - (void)handleTrafficLight:(UIButton *)sender {
