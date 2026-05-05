@@ -870,10 +870,15 @@ struct {
         [self updateTrafficLightsFocus:NO];
         [self stopLiquidMotion];
         self.dimmingView.userInteractionEnabled = NO; // 隐藏时关闭拦截
-        [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0.5 options:UIViewAnimationOptionCurveEaseInOut animations:^{ 
+        
+        // 获取当前的旋转状态
+        CGAffineTransform currentRotation = self.panelContainer.transform;
+        
+        [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:1 options:0 animations:^{ 
             self.dimmingView.alpha = 0;
             self.panelContainer.alpha = 0; 
-            self.panelContainer.transform = CGAffineTransformScale(CGAffineTransformIdentity, 0.001, 0.001);
+            self.panelContainer.center = point; // 回退到触发点
+            self.panelContainer.transform = CGAffineTransformScale(currentRotation, 0.01, 0.01);
         } completion:^(BOOL f){ self.isAnimating = NO; self.panelContainer.hidden = YES; }];
     }
 }
