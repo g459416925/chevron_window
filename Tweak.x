@@ -482,22 +482,23 @@ struct {
     switch (orientation) {
         case UIInterfaceOrientationLandscapeLeft:
             self.systemEdgePan.edges = UIRectEdgeTop;
-            self.edgeTriggerView.frame = CGRectMake(0, 0, w, kChevronLayoutConstants.triggerVisualWidth);
+            self.edgeTriggerView.frame = CGRectMake(0, 0, w, kChevronLayoutConstants.triggerHotzoneWidth);
             break;
         case UIInterfaceOrientationLandscapeRight:
             self.systemEdgePan.edges = UIRectEdgeBottom;
-            self.edgeTriggerView.frame = CGRectMake(0, h - kChevronLayoutConstants.triggerVisualWidth, w, kChevronLayoutConstants.triggerVisualWidth);
+            self.edgeTriggerView.frame = CGRectMake(0, h - kChevronLayoutConstants.triggerHotzoneWidth, w, kChevronLayoutConstants.triggerHotzoneWidth);
             break;
         case UIInterfaceOrientationPortraitUpsideDown:
             self.systemEdgePan.edges = UIRectEdgeLeft;
-            self.edgeTriggerView.frame = CGRectMake(0, safe.top, kChevronLayoutConstants.triggerVisualWidth, h - safe.top - kChevronLayoutConstants.triggerBottomOffset);
+            self.edgeTriggerView.frame = CGRectMake(0, safe.top, kChevronLayoutConstants.triggerHotzoneWidth, h - safe.top - kChevronLayoutConstants.triggerBottomOffset);
             break;
         case UIInterfaceOrientationPortrait:
         default:
             self.systemEdgePan.edges = UIRectEdgeRight;
-            self.edgeTriggerView.frame = CGRectMake(w - kChevronLayoutConstants.triggerVisualWidth, safe.top, kChevronLayoutConstants.triggerVisualWidth, h - safe.top - kChevronLayoutConstants.triggerBottomOffset);
+            self.edgeTriggerView.frame = CGRectMake(w - kChevronLayoutConstants.triggerHotzoneWidth, safe.top, kChevronLayoutConstants.triggerHotzoneWidth, h - safe.top - kChevronLayoutConstants.triggerBottomOffset);
             break;
     }
+
     [self.rootViewController.view bringSubviewToFront:self.edgeTriggerView];
     
     static NSTimeInterval lastLayoutTime = 0;
@@ -540,8 +541,30 @@ struct {
     CGPoint translation = [gesture translationInView:nil];
     CGPoint velocity = [gesture velocityInView:nil];
 
-    // 锁定为右侧拉伸计算
-    CGFloat stretch = -translation.x;
+    // --- 动态方向感知拉伸计算 ---
+    UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+    CGFloat stretch = 0;
+    CGFloat vel = 0;
+
+    switch (orientation) {
+        case UIInterfaceOrientationLandscapeLeft:
+            stretch = translation.y; // 下划
+            vel = velocity.y;
+            break;
+        case UIInterfaceOrientationLandscapeRight:
+            stretch = -translation.y; // 上划
+            vel = -velocity.y;
+            break;
+        case UIInterfaceOrientationPortraitUpsideDown:
+            stretch = translation.x; // 右划 (左边缘)
+            vel = velocity.x;
+            break;
+        case UIInterfaceOrientationPortrait:
+        default:
+            stretch = -translation.x; // 左划 (右边缘)
+            vel = -velocity.x;
+            break;
+    }
 
     if (gesture.state == UIGestureRecognizerStateBegan) {
         if (!self.isPanelShowing) {
@@ -549,9 +572,8 @@ struct {
             [self.selectionFeedback prepare];
             self.lastHapticX = 0;
             self.bezierContainer.alpha = 1.0;
-            self.dimmingView.alpha = 0; // 初始透明
+            self.dimmingView.alpha = 0; 
             
-            // 为贝塞尔层增加发光效果 (Glow)
             self.bezierLayer.shadowColor = [UIColor whiteColor].CGColor;
             self.bezierLayer.shadowOffset = CGSizeZero;
             self.bezierLayer.shadowRadius = 10.0;
@@ -559,26 +581,19 @@ struct {
         }
     } else if (gesture.state == UIGestureRecognizerStateChanged) {
         if (self.bezierContainer.alpha > 0) {
-            // 恢复使用屏幕物理边缘作为贝塞尔曲线起点
-            CGFloat edgeX = self.bounds.size.width;
-            
-            self.bezierLayer.path = [self pathForStretch:MAX(0, stretch) atPoint:location velocity:velocity edgeX:edgeX].CGPath;
+            self.bezierLayer.path = [self pathForStretch:MAX(0, stretch) atPoint:location velocity:velocity orientation:orientation].CGPath;
 
-            // 动态调整背景变暗程度与发光强度 (Progress: 0.0 -> 1.0)
             CGFloat progress = MIN(stretch / 45.0, 1.0);
             self.dimmingView.alpha = progress;
             self.bezierLayer.shadowOpacity = progress * 0.6;
 
             CGFloat currentInterval = MAX(10.0, 18.0 - (stretch / 45.0) * 8.0);
             if (fabs(stretch - self.lastHapticX) > currentInterval) {
-                // 根据滑动速率动态调整震动强度
-                CGFloat v = fabs(velocity.x);
-                if (v > 800) {
+                if (fabs(vel) > 800) {
                     [self.feedback impactOccurredWithIntensity:0.85];
                 } else {
                     [self.selectionFeedback selectionChanged];
                 }
-                
                 AudioServicesPlaySystemSound(1104); 
                 self.lastHapticX = stretch;
             }
@@ -589,7 +604,7 @@ struct {
             }
         }
     } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
-        if (self.bezierContainer.alpha > 0 && !self.isPanelShowing && velocity.x < -300 && gesture.state != UIGestureRecognizerStateCancelled) {
+        if (self.bezierContainer.alpha > 0 && !self.isPanelShowing && vel > 300 && gesture.state != UIGestureRecognizerStateCancelled) {
             [self animateSpotlight:YES fromPoint:location];
         }
         [UIView animateWithDuration:0.4 animations:^{ 
@@ -600,26 +615,47 @@ struct {
 }
 
 
-- (UIBezierPath *)pathForStretch:(CGFloat)stretch atPoint:(CGPoint)point velocity:(CGPoint)velocity edgeX:(CGFloat)edgeX {
+- (UIBezierPath *)pathForStretch:(CGFloat)stretch atPoint:(CGPoint)point velocity:(CGPoint)velocity orientation:(UIInterfaceOrientation)orientation {
     CGFloat s = MIN(stretch * 0.7, 95); 
     
-    // 引入惯性形变 (Inertial Deformation)
-    CGFloat xInertia = MIN(fabs(velocity.x) / 1000.0 * 15.0, 30.0);
-    CGFloat yInertia = velocity.y / 1000.0 * 25.0;
-    
     UIBezierPath *path = [UIBezierPath bezierPath];
-    
-    CGFloat topY = point.y - 130 + yInertia;
-    CGFloat bottomY = point.y + 130 + yInertia;
-    CGFloat peakX = edgeX - s - xInertia;
-    
-    [path moveToPoint:CGPointMake(edgeX, topY)];
-    [path addCurveToPoint:CGPointMake(peakX, point.y + yInertia) 
-            controlPoint1:CGPointMake(edgeX, point.y - 65 + yInertia) 
-            controlPoint2:CGPointMake(peakX, point.y - 45 + yInertia)];
-    [path addCurveToPoint:CGPointMake(edgeX, bottomY) 
-            controlPoint1:CGPointMake(peakX, point.y + 45 + yInertia) 
-            controlPoint2:CGPointMake(edgeX, point.y + 65 + yInertia)];
+
+    CGRect b = self.bounds;
+
+    if (orientation == UIInterfaceOrientationLandscapeLeft) {
+        // 顶部拉伸 (LandscapeLeft, Home在右)
+        CGFloat leftX = point.x - 130;
+        CGFloat rightX = point.x + 130;
+        CGFloat peakY = s;
+        [path moveToPoint:CGPointMake(leftX, 0)];
+        [path addCurveToPoint:CGPointMake(point.x, peakY) controlPoint1:CGPointMake(point.x - 65, 0) controlPoint2:CGPointMake(point.x - 45, peakY)];
+        [path addCurveToPoint:CGPointMake(rightX, 0) controlPoint1:CGPointMake(point.x + 45, peakY) controlPoint2:CGPointMake(point.x + 65, 0)];
+    } else if (orientation == UIInterfaceOrientationLandscapeRight) {
+        // 底部拉伸 (LandscapeRight, Home在左)
+        CGFloat leftX = point.x - 130;
+        CGFloat rightX = point.x + 130;
+        CGFloat peakY = b.size.height - s;
+        [path moveToPoint:CGPointMake(leftX, b.size.height)];
+        [path addCurveToPoint:CGPointMake(point.x, peakY) controlPoint1:CGPointMake(point.x - 65, b.size.height) controlPoint2:CGPointMake(point.x - 45, peakY)];
+        [path addCurveToPoint:CGPointMake(rightX, b.size.height) controlPoint1:CGPointMake(point.x + 45, peakY) controlPoint2:CGPointMake(point.x + 65, b.size.height)];
+    } else if (orientation == UIInterfaceOrientationPortraitUpsideDown) {
+        // 左边缘拉伸
+        CGFloat topY = point.y - 130;
+        CGFloat bottomY = point.y + 130;
+        CGFloat peakX = s;
+        [path moveToPoint:CGPointMake(0, topY)];
+        [path addCurveToPoint:CGPointMake(peakX, point.y) controlPoint1:CGPointMake(0, point.y - 65) controlPoint2:CGPointMake(peakX, point.y - 45)];
+        [path addCurveToPoint:CGPointMake(0, bottomY) controlPoint1:CGPointMake(peakX, point.y + 45) controlPoint2:CGPointMake(0, point.y + 65)];
+    } else {
+        // 右边缘拉伸 (Portrait)
+        CGFloat topY = point.y - 130;
+        CGFloat bottomY = point.y + 130;
+        CGFloat peakX = b.size.width - s;
+        [path moveToPoint:CGPointMake(b.size.width, topY)];
+        [path addCurveToPoint:CGPointMake(peakX, point.y) controlPoint1:CGPointMake(b.size.width, point.y - 65) controlPoint2:CGPointMake(peakX, point.y - 45)];
+        [path addCurveToPoint:CGPointMake(b.size.width, bottomY) controlPoint1:CGPointMake(peakX, point.y + 45) controlPoint2:CGPointMake(b.size.width, point.y + 65)];
+    }
+
     [path closePath];
     return path;
 }
@@ -795,18 +831,21 @@ struct {
                 for (UIScene *scene in [[UIApplication sharedApplication].connectedScenes allObjects]) {
                     if ([scene isKindOfClass:[UIWindowScene class]]) {
                         NSString *role = scene.session.role;
+                        
+                        // 仅过滤掉明确的系统覆盖层
                         if ([role isEqualToString:@"SBWindowSceneSessionRoleSystemAperture"] ||
                             [role isEqualToString:@"SBWindowSceneSessionRoleSystemApertureCurtain"] ||
                             [role isEqualToString:@"UISceneSessionRolePlaceholder"]) continue;
                         
-                        if (scene.activationState == UISceneActivationStateForegroundActive || 
-                            [role isEqualToString:@"SBWindowSceneSessionRoleHomeScreen"] ||
-                            [role isEqualToString:@"UIWindowSceneSessionRoleApplication"]) {
+                        // 放宽：只要是前台活跃的 UIWindowScene 均可挂载
+                        if (scene.activationState == UISceneActivationStateForegroundActive) {
                             targetScene = (UIWindowScene *)scene;
+                            break; // 找到第一个活跃场景即可
                         }
                     }
                 }
             }
+
 
             if (targetScene) {
                 if (self.windowScene != targetScene) self.windowScene = targetScene;
@@ -858,55 +897,26 @@ struct {
         }
         return nil;
     }
-    
-    // 拦截热区：根据当前方向动态判断边缘
-    UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
-    BOOL inHotzone = NO;
-    
-    CGRect currentBounds = self.bounds;
-    CGFloat w = currentBounds.size.width;
-    CGFloat h = currentBounds.size.height;
-    UIEdgeInsets safe = self.safeAreaInsets;
 
+    // 终极绑定逻辑：不再手动计算坐标，直接判断触点是否落在视觉触发层 (edgeTriggerView) 内
+    // 这保证了拦截层 (hitTest) 永远与视觉层 (edgeTriggerView) 物理重合
+    CGPoint pointInRoot = [self convertPoint:point toView:self.rootViewController.view];
+    if (CGRectContainsPoint(self.edgeTriggerView.frame, pointInRoot)) {
 
-    switch (orientation) {
-        case UIInterfaceOrientationLandscapeLeft:
-            if (point.y <= kChevronLayoutConstants.triggerHotzoneWidth) inHotzone = YES;
-            break;
-        case UIInterfaceOrientationLandscapeRight:
-            if (point.y >= h - kChevronLayoutConstants.triggerHotzoneWidth) inHotzone = YES;
-            break;
-        case UIInterfaceOrientationPortraitUpsideDown:
-            if (point.x <= kChevronLayoutConstants.triggerHotzoneWidth) inHotzone = YES;
-            break;
-        case UIInterfaceOrientationPortrait:
-        default:
-            if (point.x >= w - kChevronLayoutConstants.triggerHotzoneWidth) inHotzone = YES;
-            break;
-    }
-
-
-    if (inHotzone) {
-        CV3LogToFile(@"[Debug] HitTest: point=%@, EdgeFrame=%@, Source: hitTest", NSStringFromCGPoint(point), NSStringFromCGRect(self.edgeTriggerView.frame));
-        
-        // 复用键盘避让逻辑 (仅在竖屏或有意义时)
+        // 保留键盘智能避让
         if (self.isKeyboardVisible) {
-            CGFloat yThreshold = h * 0.4;
-            if (point.y > yThreshold) return nil;
-        }
-        
-        // 避开安全区域触发 (对于左右边缘，检查 Y 轴；对于上下边缘，检查 X 轴)
-        if (orientation == UIInterfaceOrientationPortrait || orientation == UIInterfaceOrientationPortraitUpsideDown) {
-            if (point.y < safe.top || point.y > (h - safe.bottom)) return nil;
-        } else {
-            if (point.x < safe.left || point.x > (w - safe.right)) return nil;
+            // 在当前 frame 的局部坐标系中判断
+            CGPoint pInTrigger = [self.rootViewController.view convertPoint:pointInRoot toView:self.edgeTriggerView];
+            if (pInTrigger.y > self.edgeTriggerView.bounds.size.height * 0.4) return nil;
         }
 
+        CV3LogToFile(@"[Debug] HitTest 命中绑定区域: point=%@, EdgeFrame=%@", NSStringFromCGPoint(pointInRoot), NSStringFromCGRect(self.edgeTriggerView.frame));
         return self;
     }
-    
+
     return nil;
 }
+
 @end
 
 static NSTimeInterval lastLogTime = 0;
