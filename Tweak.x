@@ -177,8 +177,8 @@
 - (void)startPulse {
     [self.iconHighlight removeAnimationForKey:@"pulse"];
     CABasicAnimation *pulse = [CABasicAnimation animationWithKeyPath:@"opacity"];
-    pulse.fromValue = @(0.1);
-    pulse.toValue = @(0.6);
+    pulse.fromValue = @(0.05);
+    pulse.toValue = @(0.25);
     pulse.duration = 2.0 + (arc4random_uniform(10) / 10.0);
     pulse.autoreverses = YES;
     pulse.repeatCount = HUGE_VALF;
@@ -283,6 +283,8 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, strong) UIScrollView *categoryBar; // 新增：分类导航栏
 @property (nonatomic, copy) NSString *selectedCategory; // 当前选中的分类
 @property (nonatomic, assign) CGAffineTransform baseRotationTransform; // 新增：存储基础旋转变换
+@property (nonatomic, strong) UIView *contrastBackdrop; // 新增：对比度增强层
+@property (nonatomic, strong) CALayer *innerGlowLayer; // 新增：内发光边框层
 
 - (void)show;
 - (void)loadAppsAsync;
@@ -860,14 +862,30 @@ struct {
     self.appPanel.layer.borderWidth = 0.4;
     self.appPanel.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.2].CGColor;
     
+    // 1. 对比度增强层 (Contrast Booster): 极淡的黑色，用于压住背景杂色，让 App 图标更浮出
+    self.contrastBackdrop = [[UIView alloc] initWithFrame:self.appPanel.bounds];
+    self.contrastBackdrop.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.025];
+    self.contrastBackdrop.userInteractionEnabled = NO;
+    [self.appPanel.contentView addSubview:self.contrastBackdrop];
+
+    // 2. 冰川蓝注入层 (Ice Tint): 抵消毛玻璃自带的脏灰感，提升视觉通透度
     self.whiteFilter = [[UIView alloc] initWithFrame:self.appPanel.bounds];
-    self.whiteFilter.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.04];
+    self.whiteFilter.backgroundColor = [UIColor colorWithRed:0.0 green:0.8 blue:1.0 alpha:0.012];
     self.whiteFilter.userInteractionEnabled = NO;
     [self.appPanel.contentView addSubview:self.whiteFilter];
 
+    // 3. 极致精致感：0.3pt 白色内发光 (Inner Glow)
+    // 这种极细的高亮边框能赋予面板物理实体的“边缘折射”感
+    self.innerGlowLayer = [CALayer layer];
+    self.innerGlowLayer.frame = self.appPanel.bounds;
+    self.innerGlowLayer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.45].CGColor;
+    self.innerGlowLayer.borderWidth = 0.3;
+    self.innerGlowLayer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+    [self.appPanel.layer addSublayer:self.innerGlowLayer];
+
     self.specularHighlight = [CAGradientLayer layer];
     self.specularHighlight.frame = self.appPanel.bounds;
-    self.specularHighlight.colors = @[(id)[[UIColor whiteColor] colorWithAlphaComponent:0.0].CGColor, (id)[[UIColor whiteColor] colorWithAlphaComponent:0.12].CGColor, (id)[[UIColor whiteColor] colorWithAlphaComponent:0.0].CGColor];
+    self.specularHighlight.colors = @[(id)[[UIColor whiteColor] colorWithAlphaComponent:0.0].CGColor, (id)[[UIColor whiteColor] colorWithAlphaComponent:0.07].CGColor, (id)[[UIColor whiteColor] colorWithAlphaComponent:0.0].CGColor];
     [self.appPanel.layer addSublayer:self.specularHighlight];
 
     self.dispersionContainer = [[UIView alloc] initWithFrame:self.appPanel.bounds];
@@ -1074,7 +1092,7 @@ struct {
                         CV3AppCell *appCell = (CV3AppCell *)cell;
                         [CATransaction begin];
                         [CATransaction setDisableActions:YES];
-                        appCell.iconHighlight.opacity = smoothRatio * 0.8;
+                        appCell.iconHighlight.opacity = smoothRatio * 0.4;
                         // 根据手指偏移量计算高光倾角
                         CGFloat offsetX = dx / radius;
                         CGFloat offsetY = dy / radius;
@@ -1464,7 +1482,9 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     
+    self.contrastBackdrop.frame = self.appPanel.bounds;
     self.whiteFilter.frame = self.appPanel.bounds;
+    self.innerGlowLayer.frame = self.appPanel.bounds;
     self.dispersionContainer.frame = self.appPanel.bounds;
     self.specularHighlight.frame = self.appPanel.bounds;
     self.cyanLayer.frame = CGRectInset(self.dispersionContainer.bounds, -0.3, -0.3);
@@ -1632,7 +1652,9 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
+            self.contrastBackdrop.frame = self.appPanel.bounds;
             self.whiteFilter.frame = self.appPanel.bounds;
+            self.innerGlowLayer.frame = self.appPanel.bounds;
             self.dispersionContainer.frame = self.appPanel.bounds;
             self.specularHighlight.frame = self.appPanel.bounds;
             self.cyanLayer.frame = CGRectInset(self.appPanel.bounds, -0.3, -0.3);
@@ -1891,6 +1913,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         
         self.trafficCapsule.frame = CGRectMake(16, 14, kChevronLayoutConstants.trafficCapsuleW, kChevronLayoutConstants.trafficCapsuleH);
         [self updateResizingHandleFrame];
+        self.contrastBackdrop.frame = self.appPanel.bounds;
+        self.innerGlowLayer.frame = self.appPanel.bounds;
         self.specularHighlight.frame = self.appPanel.bounds;
         self.cyanLayer.frame = CGRectInset(self.appPanel.bounds, -0.3, -0.3);
         self.magentaLayer.frame = CGRectInset(self.appPanel.bounds, 0.3, 0.3);
