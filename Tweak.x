@@ -224,6 +224,9 @@ struct {
     CGFloat safeAreaBreath;
     CGFloat cornerRadius;
     CGFloat minHeight;
+    CGFloat trafficCapsuleW;
+    CGFloat trafficCapsuleH;
+    CGFloat trafficDotSize;
 } static const kChevronLayoutConstants = {
     .panelW = 370.0,
     .panelH = 520.0,
@@ -232,7 +235,10 @@ struct {
     .triggerBottomOffset = 100.0,
     .safeAreaBreath = 10.0,
     .cornerRadius = 28.0,
-    .minHeight = 300.0
+    .minHeight = 300.0,
+    .trafficCapsuleW = 64.0,
+    .trafficCapsuleH = 24.0,
+    .trafficDotSize = 8.0
 };
 
 
@@ -432,22 +438,30 @@ struct {
 
     [self.panelContainer addSubview:self.appPanel];
 
-    self.trafficCapsule = [[UIView alloc] initWithFrame:CGRectMake(16, 14, 64, 24)];
+    self.trafficCapsule = [[UIView alloc] initWithFrame:CGRectMake(16, 14, kChevronLayoutConstants.trafficCapsuleW, kChevronLayoutConstants.trafficCapsuleH)];
     self.trafficCapsule.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.08];
-    self.trafficCapsule.layer.cornerRadius = 12;
+    self.trafficCapsule.layer.cornerRadius = kChevronLayoutConstants.trafficCapsuleH / 2.0;
     [self.panelContainer addSubview:self.trafficCapsule];
     
     NSMutableArray *dots = [NSMutableArray array];
     NSArray *tc = @[[UIColor colorWithRed:1.00 green:0.37 blue:0.33 alpha:1.0], [UIColor colorWithRed:1.00 green:0.75 blue:0.18 alpha:1.0], [UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:1.0]];
     for (int i = 0; i < 3; i++) {
-        UIButton *dot = [UIButton buttonWithType:UIButtonTypeCustom];
-        dot.frame = CGRectMake(10 + i * 16, 8, 8, 8);
-        dot.backgroundColor = tc[i];
-        dot.layer.cornerRadius = 4;
-        dot.tag = i;
-        [dot addTarget:self action:@selector(handleTrafficLight:) forControlEvents:UIControlEventTouchUpInside];
-        [self.trafficCapsule addSubview:dot];
-        [dots addObject:dot];
+        UIButton *dotBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+        // 扩展热区：每个按钮占据更大的点击范围 (约 17.3x24)
+        CGFloat btnW = (kChevronLayoutConstants.trafficCapsuleW - 12) / 3.0;
+        dotBtn.frame = CGRectMake(6 + i * btnW, 0, btnW, kChevronLayoutConstants.trafficCapsuleH);
+        
+        // 视觉圆点作为子视图，保持原有 8x8 外观
+        UIView *visualDot = [[UIView alloc] initWithFrame:CGRectMake((btnW - kChevronLayoutConstants.trafficDotSize)/2, (kChevronLayoutConstants.trafficCapsuleH - kChevronLayoutConstants.trafficDotSize)/2, kChevronLayoutConstants.trafficDotSize, kChevronLayoutConstants.trafficDotSize)];
+        visualDot.backgroundColor = tc[i];
+        visualDot.layer.cornerRadius = kChevronLayoutConstants.trafficDotSize / 2.0;
+        visualDot.userInteractionEnabled = NO;
+        [dotBtn addSubview:visualDot];
+        
+        dotBtn.tag = i;
+        [dotBtn addTarget:self action:@selector(handleTrafficLight:) forControlEvents:UIControlEventTouchUpInside];
+        [self.trafficCapsule addSubview:dotBtn];
+        [dots addObject:visualDot]; // 存储视觉圆点用于颜色更新
     }
     self.trafficDots = dots;
 
