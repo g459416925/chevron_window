@@ -204,22 +204,35 @@ struct {
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
     if (gesture == self.systemEdgePan) {
+        UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+        CGFloat w = self.bounds.size.width;
+        CGFloat h = self.bounds.size.height;
+        UIEdgeInsets safe = self.safeAreaInsets;
+        
         // 键盘可见时限制区域
         if (self.isKeyboardVisible) {
-            CGPoint p = [gesture locationInView:nil];
-            CGFloat yThreshold = self.bounds.size.height * 0.4;
-            if (p.y > yThreshold) return NO;
+            CGPoint pInWindow = [gesture locationInView:nil];
+            CGFloat yThreshold = h * 0.4;
+            if (pInWindow.y > yThreshold) return NO;
         }
         
         // 限制在安全区域范围内触发
-        UIEdgeInsets safe = self.safeAreaInsets;
         CGPoint p = [gesture locationInView:self];
-        if (p.y < safe.top || p.y > (self.bounds.size.height - safe.bottom)) {
-            return NO;
+        if (orientation == UIInterfaceOrientationPortrait || orientation == UIInterfaceOrientationPortraitUpsideDown) {
+            if (p.y < safe.top || p.y > (h - safe.bottom)) {
+                CV3LogToFile(@"[Debug] Gesture 被拒绝: 竖屏安全区域限制 (y=%f)", p.y);
+                return NO;
+            }
+        } else {
+            if (p.x < safe.left || p.x > (w - safe.right)) {
+                CV3LogToFile(@"[Debug] Gesture 被拒绝: 横屏安全区域限制 (x=%f)", p.x);
+                return NO;
+            }
         }
     }
     return YES;
 }
+
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     if (gestureRecognizer == self.systemEdgePan && [otherGestureRecognizer isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) {
@@ -627,33 +640,45 @@ struct {
         CGFloat leftX = point.x - 130;
         CGFloat rightX = point.x + 130;
         CGFloat peakY = s;
-        [path moveToPoint:CGPointMake(leftX, 0)];
+        [path moveToPoint:CGPointMake(0, 0)]; // 从左上角开始
+        [path addLineToPoint:CGPointMake(leftX, 0)]; // 直线到左边起点
         [path addCurveToPoint:CGPointMake(point.x, peakY) controlPoint1:CGPointMake(point.x - 65, 0) controlPoint2:CGPointMake(point.x - 45, peakY)];
         [path addCurveToPoint:CGPointMake(rightX, 0) controlPoint1:CGPointMake(point.x + 45, peakY) controlPoint2:CGPointMake(point.x + 65, 0)];
+        [path addLineToPoint:CGPointMake(b.size.width, 0)]; // 直线到右上角
+        [path addLineToPoint:CGPointMake(0, 0)]; // 闭合
     } else if (orientation == UIInterfaceOrientationLandscapeRight) {
         // 底部拉伸 (LandscapeRight, Home在左)
         CGFloat leftX = point.x - 130;
         CGFloat rightX = point.x + 130;
         CGFloat peakY = b.size.height - s;
-        [path moveToPoint:CGPointMake(leftX, b.size.height)];
+        [path moveToPoint:CGPointMake(0, b.size.height)]; // 左下角
+        [path addLineToPoint:CGPointMake(leftX, b.size.height)];
         [path addCurveToPoint:CGPointMake(point.x, peakY) controlPoint1:CGPointMake(point.x - 65, b.size.height) controlPoint2:CGPointMake(point.x - 45, peakY)];
         [path addCurveToPoint:CGPointMake(rightX, b.size.height) controlPoint1:CGPointMake(point.x + 45, peakY) controlPoint2:CGPointMake(point.x + 65, b.size.height)];
+        [path addLineToPoint:CGPointMake(b.size.width, b.size.height)]; // 右下角
+        [path addLineToPoint:CGPointMake(0, b.size.height)]; // 闭合
     } else if (orientation == UIInterfaceOrientationPortraitUpsideDown) {
         // 左边缘拉伸
         CGFloat topY = point.y - 130;
         CGFloat bottomY = point.y + 130;
         CGFloat peakX = s;
-        [path moveToPoint:CGPointMake(0, topY)];
+        [path moveToPoint:CGPointMake(0, 0)]; // 左上角
+        [path addLineToPoint:CGPointMake(0, topY)];
         [path addCurveToPoint:CGPointMake(peakX, point.y) controlPoint1:CGPointMake(0, point.y - 65) controlPoint2:CGPointMake(peakX, point.y - 45)];
         [path addCurveToPoint:CGPointMake(0, bottomY) controlPoint1:CGPointMake(peakX, point.y + 45) controlPoint2:CGPointMake(0, point.y + 65)];
+        [path addLineToPoint:CGPointMake(0, b.size.height)]; // 左下角
+        [path addLineToPoint:CGPointMake(0, 0)]; // 闭合
     } else {
         // 右边缘拉伸 (Portrait)
         CGFloat topY = point.y - 130;
         CGFloat bottomY = point.y + 130;
         CGFloat peakX = b.size.width - s;
-        [path moveToPoint:CGPointMake(b.size.width, topY)];
+        [path moveToPoint:CGPointMake(b.size.width, 0)]; // 右上角
+        [path addLineToPoint:CGPointMake(b.size.width, topY)];
         [path addCurveToPoint:CGPointMake(peakX, point.y) controlPoint1:CGPointMake(b.size.width, point.y - 65) controlPoint2:CGPointMake(peakX, point.y - 45)];
         [path addCurveToPoint:CGPointMake(b.size.width, bottomY) controlPoint1:CGPointMake(peakX, point.y + 45) controlPoint2:CGPointMake(b.size.width, point.y + 65)];
+        [path addLineToPoint:CGPointMake(b.size.width, b.size.height)]; // 右下角
+        [path addLineToPoint:CGPointMake(b.size.width, 0)]; // 闭合
     }
 
     [path closePath];
