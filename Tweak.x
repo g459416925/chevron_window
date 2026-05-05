@@ -779,35 +779,12 @@ struct {
 - (BOOL)_shouldAutorotateToInterfaceOrientation:(long long)orientation { return NO; }
 
 - (void)attachToCurrentActiveScene {
-    // 异步获取方向并分发，确保不在敏感的系统转换周期内执行同步 UI 操作
+    // 异步确保不在敏感的系统转换周期内执行同步 UI 操作
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIInterfaceOrientation orientation = self.targetOrientation;
-        
-        // 只有在从未设定过方向（Unknown）时，才尝试向 SBMainWorkspace 获取初始方向
-        if (orientation == UIInterfaceOrientationUnknown) {
-            orientation = UIInterfaceOrientationPortrait; // 默认 fallback
-            Class workspaceClass = NSClassFromString(@"SBMainWorkspace");
-            if (workspaceClass && [workspaceClass respondsToSelector:@selector(sharedInstance)]) {
-                id workspace = [workspaceClass performSelector:@selector(sharedInstance)];
-                if (workspace && [workspace respondsToSelector:@selector(activeInterfaceOrientation)]) {
-                    orientation = (UIInterfaceOrientation)[workspace activeInterfaceOrientation];
-                }
-            }
-        }
-        [self attachToCurrentActiveSceneWithOrientation:orientation];
-    });
-}
+        // 增加内部保护，防止异步任务堆叠
+        if (self.isProcessing) return;
+        self.isProcessing = YES;
 
-
-- (void)attachToCurrentActiveSceneWithOrientation:(UIInterfaceOrientation)orientation {
-    // 记录目标方向，供 layoutSubviews 使用
-    self.targetOrientation = orientation;
-    
-    // 增加内部保护，防止异步任务堆叠
-    if (self.isProcessing) return;
-    self.isProcessing = YES;
-
-    dispatch_async(dispatch_get_main_queue(), ^{
         @try {
             UIWindowScene *targetScene = nil;
             if ([NSClassFromString(@"SBWindowScene") respondsToSelector:@selector(mainDisplayWindowScene)]) {
@@ -846,7 +823,6 @@ struct {
         self.isProcessing = NO;
     });
 }
-
 
 - (void)applyAdaptiveLevel {
     // 锁定在控制中心下方，但在所有 App 之上
@@ -937,6 +913,7 @@ static NSTimeInterval lastLogTime = 0;
 
 %hook UIWindow
 - (void)layoutSubviews {
+
     %orig;
 
     // 增加递归保护：如果是 CV3Window 自身的 layoutSubviews，或者已经在处理中，则跳过
@@ -945,21 +922,39 @@ static NSTimeInterval lastLogTime = 0;
 
     // 仅监控处于前台且已激活的窗口场景
     if (self.windowScene && self.windowScene.activationState == UISceneActivationStateForegroundActive) {
-        
+
+        NSString *role = self.windowScene.session.role;
+
+        // 终极白名单：在越狱环境下，仅有 _UIScreenBasedSceneSession 会报告真实的物理旋转方向。
+        // 其他所有 Application 或系统覆盖层，在下拉通知栏/控制中心时都会被强制报告为竖屏。
+        if (![role isEqualToString:@"_UIScreenBasedSceneSession"]) {
+            return;
+        }
+
         UIInterfaceOrientation currentOrientation = self.windowScene.interfaceOrientation;
-        
-        // 关键逻辑：如果 windowScene 的方向与当前设定的方向一致，直接跳过，防止重算导致的“回跳”
+
+        // 如果获取到了无效方向，直接忽略
+        if (currentOrientation == UIInterfaceOrientationUnknown || currentOrientation == 0) {
+            return;
+        }
+
+        // 如果 windowScene 的方向与当前设定的方向一致，直接跳过，防止重算导致的“回跳”
         if (sharedWindow && sharedWindow.targetOrientation == currentOrientation) return;
 
         NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
 
-        if (currentOrientation != UIInterfaceOrientationUnknown && (currentTime - lastLogTime > 0.5)) {
+        if (currentTime - lastLogTime > 0.5) {
             lastLogTime = currentTime;
-            
+
+            CV3LogToFile(@"[Debug] 采信并应用方向改变: %ld, 来源 Role: %@", (long)currentOrientation, role);
+
             isUpdating = YES;
             // 使用异步确保当前 layout 周期执行完毕，避免重入导致的错位
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (sharedWindow) [sharedWindow attachToCurrentActiveSceneWithOrientation:currentOrientation];
+                if (sharedWindow) {
+                    sharedWindow.targetOrientation = currentOrientation;
+                    [sharedWindow attachToCurrentActiveScene];
+                }
             });
             isUpdating = NO;
         }
