@@ -220,6 +220,13 @@ static void CV3LogToFile(NSString *format, ...) {
 
             if (![fm fileExistsAtPath:logPath]) {
                 [fm createFileAtPath:logPath contents:nil attributes:nil];
+            } else {
+                // 建议3：日志轮转 (Log Rotation) - 限制在 5MB 以内
+                unsigned long long fileSize = [[fm attributesOfItemAtPath:logPath error:nil] fileSize];
+                if (fileSize > 5 * 1024 * 1024) {
+                    [fm removeItemAtPath:logPath error:nil];
+                    [fm createFileAtPath:logPath contents:nil attributes:nil];
+                }
             }
             
             NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:logPath];
@@ -257,6 +264,7 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, assign) BOOL isAnimating;
 @property (nonatomic, assign) BOOL isProcessing; 
 @property (nonatomic, assign) BOOL launchDebounce;
+@property (nonatomic, assign) BOOL needsFullReload; // 建议1：增量更新标志位
 @property (nonatomic, strong) NSMutableArray<CV3AppInfo *> *apps;
 
 @property (nonatomic, strong) UIImpactFeedbackGenerator *feedback;
@@ -351,22 +359,24 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
 
 - (void)applicationsDidInstall:(NSArray *)applications {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (sharedWindow && sharedWindow.isPanelShowing) {
-            [sharedWindow loadAppsAsync];
+        if (sharedWindow) {
+            sharedWindow.needsFullReload = YES;
+            if (sharedWindow.isPanelShowing) [sharedWindow loadAppsAsync];
         }
     });
 }
 
 - (void)applicationsDidUninstall:(NSArray *)applications {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (sharedWindow && sharedWindow.isPanelShowing) {
-            [sharedWindow loadAppsAsync];
+        if (sharedWindow) {
+            sharedWindow.needsFullReload = YES;
+            if (sharedWindow.isPanelShowing) [sharedWindow loadAppsAsync];
         }
     });
 }
 @end
 
-// --- Layout Constants ---
+// --- Layout & Physics Constants ---
 struct {
     CGFloat panelW;
     CGFloat panelH;
@@ -391,6 +401,24 @@ struct {
     .trafficCapsuleW = 64.0,
     .trafficCapsuleH = 24.0,
     .trafficDotSize = 8.0
+};
+
+struct {
+    CGFloat parallaxPanelFactor;
+    CGFloat parallaxDecoFactor;
+    CGFloat lerpFactor;
+    CGFloat hapticThreshold;
+    CGFloat tiltMaxAngle;
+    CGFloat scrollTiltFactor;
+    CGFloat momentumDamping;
+} static const kChevronPhysicsConstants = {
+    .parallaxPanelFactor = 8.0,
+    .parallaxDecoFactor = 11.0,
+    .lerpFactor = 0.15,
+    .hapticThreshold = 0.6,
+    .tiltMaxAngle = 0.12,
+    .scrollTiltFactor = 0.0015,
+    .momentumDamping = 0.92
 };
 
 
@@ -2086,31 +2114,27 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         self.cyanLayer.transform = CATransform3DMakeTranslation(-dx, -dy, 0);
         self.magentaLayer.transform = CATransform3DMakeTranslation(dx, dy, 0);
 
-        // 建议2：视差解耦 (Parallax Decoupling) - 增强为层级视差 (Layered Parallax)
-        // 面板主体移动系数为 8.0
-        CGFloat panelDX = m.attitude.roll * 8.0;
-        CGFloat panelDY = m.attitude.pitch * 8.0;
+        // 建议2：视差解耦 (Parallax Decoupling) - 使用定义的系数
+        CGFloat panelDX = m.attitude.roll * kChevronPhysicsConstants.parallaxPanelFactor;
+        CGFloat panelDY = m.attitude.pitch * kChevronPhysicsConstants.parallaxPanelFactor;
         self.appPanel.transform = CGAffineTransformMakeTranslation(panelDX, panelDY);
 
-        // 建议：装饰件深度视差 (Layered Decoration Parallax) + 惯性衰减 (Inertial Damping)
-        // 目标位移系数为 11.0
-        CGFloat targetDecoDX = m.attitude.roll * 11.0;
-        CGFloat targetDecoDY = m.attitude.pitch * 11.0;
+        // 装饰件深度视差 (Layered Decoration Parallax) + 惯性衰减 (Inertial Damping)
+        CGFloat targetDecoDX = m.attitude.roll * kChevronPhysicsConstants.parallaxDecoFactor;
+        CGFloat targetDecoDY = m.attitude.pitch * kChevronPhysicsConstants.parallaxDecoFactor;
 
         // 惯性平滑逻辑：使用插值 (Lerp) 实现物理质量感
-        // 系数 0.15 表示每一帧向目标位置靠近 15%，产生一种“沉重”的滞后感
         CGFloat oldDecoDX = self.currentDecoDX;
         CGFloat oldDecoDY = self.currentDecoDY;
-        self.currentDecoDX += (targetDecoDX - self.currentDecoDX) * 0.15;
-        self.currentDecoDY += (targetDecoDY - self.currentDecoDY) * 0.15;
+        self.currentDecoDX += (targetDecoDX - self.currentDecoDX) * kChevronPhysicsConstants.lerpFactor;
+        self.currentDecoDY += (targetDecoDY - self.currentDecoDY) * kChevronPhysicsConstants.lerpFactor;
 
         // 建议：触觉阻尼 (Haptic Damping Feedback)
-        // 计算本帧位移的变化量 (Friction Delta)
         CGFloat frameDisplacement = hypot(self.currentDecoDX - oldDecoDX, self.currentDecoDY - oldDecoDY);
-        if (frameDisplacement > 0.6) { // 设定剧烈晃动的物理阈值
+        if (frameDisplacement > kChevronPhysicsConstants.hapticThreshold) { 
             static NSTimeInterval lastHapticTime = 0;
             NSTimeInterval now = CACurrentMediaTime();
-            if (now - lastHapticTime > 0.1) { // 限制触觉触发频率（10Hz max）防止震动过载
+            if (now - lastHapticTime > 0.1) { 
                 [self.selectionFeedback selectionChanged];
                 lastHapticTime = now;
             }
@@ -2120,19 +2144,17 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         self.trafficCapsule.transform = decoParallax;
         self.resizingHandle.transform = decoParallax;
 
-        // 建议：边缘折射干扰 (Edge Refraction Flicker)        // 模拟真实高品质玻璃在侧向极限角度下产生的“全反射”增强
+        // 建议：边缘折射干扰 (Edge Refraction Flicker)
         CGFloat tilt = sqrt(m.attitude.roll * m.attitude.roll + m.attitude.pitch * m.attitude.pitch);
         if (tilt > 1.1) { 
-            CGFloat flicker = 0.15 * sin(CACurrentMediaTime() * 18.0); // 18Hz 微颤感
+            CGFloat flicker = 0.15 * sin(CACurrentMediaTime() * 18.0); 
             CGFloat boost = (tilt - 1.1) * 0.6 + flicker;
 
-            // 动态增强色散层不透明度与内发光亮度
             self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:MIN(0.6, 0.12 + MAX(0, boost))].CGColor;
             self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:MIN(0.6, 0.12 + MAX(0, boost))].CGColor;
             self.innerGlowLayer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:MIN(1.0, 0.45 + MAX(0, boost))].CGColor;
             self.innerGlowLayer.borderWidth = 0.3 + MAX(0, boost) * 1.5;
         } else {
-            // 恢复基础状态
             self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.12].CGColor;
             self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:0.12].CGColor;
             self.innerGlowLayer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.45].CGColor;
@@ -2141,7 +2163,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
         [CATransaction commit];
     }];
-}- (void)stopLiquidMotion { [self.motionManager stopDeviceMotionUpdates]; }
+}
+- (void)stopLiquidMotion { [self.motionManager stopDeviceMotionUpdates]; }
 
 - (BOOL)shouldIncludeApp:(id)appProxy {
     // 1. 必须是用户应用
@@ -2167,153 +2190,121 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 }
 
 - (void)loadAppsAsync {
-    [cv3IconCache removeAllObjects]; // 确保每次加载时图标缓存是空的，避免显示旧图标
     dispatch_async(dispatch_get_global_queue(0,0), ^{
-        NSMutableArray *temp = [NSMutableArray array];
-        
-        // 尝试从 SpringBoard 获取真正的桌面可见图标模型
-        id iconController = [NSClassFromString(@"SBIconController") sharedInstance];
-        id iconModel = nil;
-        if ([iconController respondsToSelector:@selector(iconManager)]) {
-            id iconManager = [iconController performSelector:@selector(iconManager)];
-            if ([iconManager respondsToSelector:@selector(model)]) {
-                iconModel = [iconManager performSelector:@selector(model)];
-            }
-        }
-        if (!iconModel && [iconController respondsToSelector:@selector(model)]) {
-            iconModel = [iconController performSelector:@selector(model)];
-        }
-        
-        if (iconModel && [iconModel respondsToSelector:@selector(leafIcons)]) {
-            id leafIcons = [iconModel performSelector:@selector(leafIcons)];
-            CV3LogToFile(@"[Debug] 成功获取 SBIconModel，leafIcons 数量: %lu", (unsigned long)[leafIcons count]);
+        // 建议1：增量更新机制。如果不需要全量重载且列表不为空，则跳过重型资源获取过程
+        if (!self.needsFullReload && self.apps.count > 0) {
+            CV3LogToFile(@"[Debug] 命中增量更新，仅刷新置顶与排序状态");
+        } else {
+            CV3LogToFile(@"[Debug] 执行全量应用资源同步 (needsFullReload=%d)", self.needsFullReload);
+            [cv3IconCache removeAllObjects];
             
-            for (id icon in leafIcons) {
-                // 过滤：必须是 ApplicationIcon
-                if ([icon respondsToSelector:@selector(isApplicationIcon)] && [icon performSelector:@selector(isApplicationIcon)]) {
-                    NSString *bundleId = nil;
-                    if ([icon respondsToSelector:@selector(applicationBundleID)]) {
-                        bundleId = [icon performSelector:@selector(applicationBundleID)];
-                    } else if ([icon respondsToSelector:@selector(leafIdentifier)]) {
-                        bundleId = [icon performSelector:@selector(leafIdentifier)];
+            NSMutableArray *temp = [NSMutableArray array];
+            // 尝试从 SpringBoard 获取真正的桌面可见图标模型
+            id iconController = [NSClassFromString(@"SBIconController") sharedInstance];
+            id iconModel = nil;
+            if ([iconController respondsToSelector:@selector(iconManager)]) {
+                id iconManager = [iconController performSelector:@selector(iconManager)];
+                if ([iconManager respondsToSelector:@selector(model)]) {
+                    iconModel = [iconManager performSelector:@selector(model)];
+                }
+            }
+            if (!iconModel && [iconController respondsToSelector:@selector(model)]) {
+                iconModel = [iconController performSelector:@selector(model)];
+            }
+            
+            if (iconModel && [iconModel respondsToSelector:@selector(leafIcons)]) {
+                id leafIcons = [iconModel performSelector:@selector(leafIcons)];
+                for (id icon in leafIcons) {
+                    if ([icon respondsToSelector:@selector(isApplicationIcon)] && [icon performSelector:@selector(isApplicationIcon)]) {
+                        NSString *bundleId = nil;
+                        if ([icon respondsToSelector:@selector(applicationBundleID)]) {
+                            bundleId = [icon performSelector:@selector(applicationBundleID)];
+                        } else if ([icon respondsToSelector:@selector(leafIdentifier)]) {
+                            bundleId = [icon performSelector:@selector(leafIdentifier)];
+                        }
+                        
+                        NSString *name = nil;
+                        if ([icon respondsToSelector:@selector(displayNameForLocation:)]) {
+                            name = [icon performSelector:@selector(displayNameForLocation:) withObject:nil];
+                        }
+                        if (!name && [icon respondsToSelector:@selector(displayName)]) {
+                            name = [icon performSelector:@selector(displayName)];
+                        }
+                        
+                        if (!bundleId || !name) continue;
+                        
+                        CV3AppInfo *info = [[CV3AppInfo alloc] init];
+                        info.name = name;
+                        info.bundleId = bundleId;
+                        info.sbIcon = icon; 
+                        [info generatePinyin];
+                        
+                        @try {
+                            Class LSAP = NSClassFromString(@"LSApplicationProxy");
+                            id proxy = nil;
+                            if ([LSAP respondsToSelector:@selector(applicationProxyForIdentifier:)]) {
+                                proxy = [LSAP performSelector:@selector(applicationProxyForIdentifier:) withObject:bundleId];
+                            } else if ([LSAP respondsToSelector:@selector(applicationProxyForBundleIdentifier:)]) {
+                                proxy = [LSAP performSelector:@selector(applicationProxyForBundleIdentifier:) withObject:bundleId];
+                            }
+                            if (proxy && [proxy respondsToSelector:@selector(genre)]) {
+                                info.category = [proxy performSelector:@selector(genre)];
+                            }
+                        } @catch (NSException *e) {}
+                        if (!info.category) info.category = @"其他";
+                        
+                        info.icon = [UIImage _applicationIconImageForBundleIdentifier:bundleId format:10 scale:[UIScreen mainScreen].scale];
+                        if (info.icon) {
+                            [cv3IconCache setObject:info.icon forKey:bundleId];
+                            [temp addObject:info];
+                        }
                     }
-                    
-                    NSString *name = nil;
-                    if ([icon respondsToSelector:@selector(displayNameForLocation:)]) {
-                        name = [icon performSelector:@selector(displayNameForLocation:) withObject:nil];
-                    }
-                    if (!name && [icon respondsToSelector:@selector(displayName)]) {
-                        name = [icon performSelector:@selector(displayName)];
-                    }
-                    
-                    if (!bundleId || !name) continue;
-                    
+                }
+            }
+            
+            if (temp.count == 0) {
+                id ws = [NSClassFromString(@"LSApplicationWorkspace") defaultWorkspace];
+                for (id p in [ws performSelector:@selector(allInstalledApplications)]) {
+                    if (![self shouldIncludeApp:p]) continue;
+                    NSString *bundleId = [p performSelector:@selector(bundleIdentifier)];
+                    NSString *name = [p performSelector:@selector(localizedName)];
                     CV3AppInfo *info = [[CV3AppInfo alloc] init];
                     info.name = name;
                     info.bundleId = bundleId;
-                    info.sbIcon = icon; // 存储 SBIcon 引用
-                    [info generatePinyin]; // 预生成拼音首字母
-                    
-                    // 提取应用分类 (Genre)
-                    @try {
-                        Class LSAP = NSClassFromString(@"LSApplicationProxy");
-                        id proxy = nil;
-                        if ([LSAP respondsToSelector:@selector(applicationProxyForIdentifier:)]) {
-                            proxy = [LSAP performSelector:@selector(applicationProxyForIdentifier:) withObject:bundleId];
-                        } else if ([LSAP respondsToSelector:@selector(applicationProxyForBundleIdentifier:)]) {
-                            proxy = [LSAP performSelector:@selector(applicationProxyForBundleIdentifier:) withObject:bundleId];
-                        }
-                        
-                        if (proxy) {
-                            if ([proxy respondsToSelector:@selector(genre)]) {
-                                info.category = [proxy performSelector:@selector(genre)];
-                            }
-                        }
-                    } @catch (NSException *e) {}
-                    if (!info.category) info.category = @"其他";
-                    
-                    UIImage *cachedIcon = [cv3IconCache objectForKey:bundleId];
-                    if (cachedIcon) {
-                        info.icon = cachedIcon;
-                    } else {
-                        info.icon = [UIImage _applicationIconImageForBundleIdentifier:bundleId format:10 scale:[UIScreen mainScreen].scale];
-                        if (info.icon) [cv3IconCache setObject:info.icon forKey:bundleId];
-                    }
-
+                    info.icon = [UIImage _applicationIconImageForBundleIdentifier:bundleId format:10 scale:[UIScreen mainScreen].scale];
                     if (info.icon) {
-                        info.isPinned = [self.pinnedBundleIDs containsObject:bundleId];
+                        [cv3IconCache setObject:info.icon forKey:bundleId];
                         [temp addObject:info];
                     }
                 }
             }
+            self.apps = temp;
+            self.needsFullReload = NO;
         }
-        
-        // 如果上面获取失败，回退到原有的 Workspace 方法
-        if (temp.count == 0) {
-            CV3LogToFile(@"[Debug] 警告：无法获取 SBIconModel，回退至 LSApplicationWorkspace");
-            id ws = [NSClassFromString(@"LSApplicationWorkspace") defaultWorkspace];
-            for (id p in [ws performSelector:@selector(allInstalledApplications)]) {
-                if (![self shouldIncludeApp:p]) continue;
-                
-                NSString *bundleId = [p performSelector:@selector(bundleIdentifier)];
-                NSString *name = [p performSelector:@selector(localizedName)];
-                
-                CV3AppInfo *info = [[CV3AppInfo alloc] init];
-                info.name = name;
-                info.bundleId = bundleId;
-                info.isPinned = [self.pinnedBundleIDs containsObject:bundleId];
-                
-                UIImage *cachedIcon = [cv3IconCache objectForKey:bundleId];
-                if (cachedIcon) {
-                    info.icon = cachedIcon;
-                } else {
-                    info.icon = [UIImage _applicationIconImageForBundleIdentifier:bundleId format:10 scale:[UIScreen mainScreen].scale];
-                    if (info.icon) [cv3IconCache setObject:info.icon forKey:bundleId];
-                }
 
-                if (info.name && info.bundleId && info.icon) [temp addObject:info];
-            }
-        }
-        
-        // 获取使用频率数据 (时间衰减逻辑)
+        // 始终刷新置顶状态与使用频率排序
         NSDictionary *usageData = [[NSUserDefaults standardUserDefaults] dictionaryForKey:@"CV3AppUsageData"];
         NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
         NSTimeInterval sevenDaysInSeconds = 7 * 24 * 3600;
-        
-        // 排序逻辑：
-        // 1. 置顶应用 (isPinned) 绝对优先
-        // 2. 仅统计最近 7 天内的点击次数作为活跃权重
-        // 3. 权重相同则按字母排序
-        [temp sortUsingComparator:^NSComparisonResult(CV3AppInfo *obj1, CV3AppInfo *obj2) {
-            if (obj1.isPinned != obj2.isPinned) {
-                return obj1.isPinned ? NSOrderedAscending : NSOrderedDescending;
-            }
 
+        for (CV3AppInfo *info in self.apps) {
+            info.isPinned = [self.pinnedBundleIDs containsObject:info.bundleId];
+        }
+
+        [self.apps sortUsingComparator:^NSComparisonResult(CV3AppInfo *obj1, CV3AppInfo *obj2) {
+            if (obj1.isPinned != obj2.isPinned) return obj1.isPinned ? NSOrderedAscending : NSOrderedDescending;
             NSArray *ts1 = usageData[obj1.bundleId];
             NSArray *ts2 = usageData[obj2.bundleId];
-            
-            NSInteger count1 = 0;
-            for (NSNumber *ts in ts1) {
-                if (now - [ts doubleValue] < sevenDaysInSeconds) count1++;
-            }
-            
-            NSInteger count2 = 0;
-            for (NSNumber *ts in ts2) {
-                if (now - [ts doubleValue] < sevenDaysInSeconds) count2++;
-            }
-            
-            if (count1 != count2) {
-                return count1 > count2 ? NSOrderedAscending : NSOrderedDescending;
-            }
+            NSInteger c1 = 0; for (NSNumber *ts in ts1) { if (now - [ts doubleValue] < sevenDaysInSeconds) c1++; }
+            NSInteger c2 = 0; for (NSNumber *ts in ts2) { if (now - [ts doubleValue] < sevenDaysInSeconds) c2++; }
+            if (c1 != c2) return c1 > c2 ? NSOrderedAscending : NSOrderedDescending;
             return [obj1.name localizedCaseInsensitiveCompare:obj2.name];
         }];
         
         dispatch_async(dispatch_get_main_queue(), ^{ 
-            self.apps = temp; 
-            // 提取前 12 个最近使用的应用作为虚拟分类 (在主线程赋值)
-            self.recentlyUsedApps = [temp subarrayWithRange:NSMakeRange(0, MIN(12, temp.count))];
-            [self updateCategoryBar]; // 刷新分类栏
-            [self filterApps]; // 初始化过滤列表
+            self.recentlyUsedApps = [self.apps subarrayWithRange:NSMakeRange(0, MIN(12, self.apps.count))];
+            [self updateCategoryBar]; 
+            [self filterApps]; 
             [self animateIconsStaggered]; 
         });
     });
@@ -2356,33 +2347,29 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     double duration = [userInfo[UIKeyboardAnimationDurationUserInfoKey] doubleValue];
     UIViewAnimationOptions options = [userInfo[UIKeyboardAnimationCurveUserInfoKey] unsignedIntegerValue] << 16;
     
-    // 计算面板底部与键盘顶部的重叠情况
-    // 注意：keyboardFrame 是物理屏幕坐标系
-    CGRect panelFrameInScreen = [self.panelContainer.superview convertRect:self.panelContainer.frame toView:nil];
-    CGFloat overlap = CGRectGetMaxY(panelFrameInScreen) - keyboardFrame.origin.y;
+    // 建议2：最小化键盘避让 (Minimized Displacement)
+    // 不再以面板底部为基准，而是以“搜索框 + 关键结果区”的可见性为基准
+    UIView *searchContainer = self.searchField.superview;
+    // 计算搜索框底部在屏幕坐标系中的位置 (额外预留 60pt 给顶部几条搜索结果)
+    CGRect searchFrameInScreen = [searchContainer.superview convertRect:searchContainer.frame toView:nil];
+    CGFloat criticalBottom = CGRectGetMaxY(searchFrameInScreen) + 60.0;
+    CGFloat keyboardTop = keyboardFrame.origin.y;
     
-    if (overlap > -10.0) { // 如果重叠或距离太近（预留 10pt 呼吸间距）
-        CGFloat offset = overlap + 20.0; // 额外向上推移 20pt 以确保舒适感
+    CGFloat overlap = criticalBottom - keyboardTop;
+    
+    if (overlap > 0) { // 仅当搜索框或关键区域被遮挡时才移动
+        CGFloat offset = overlap + 10.0; // 仅推移刚好避开的距离，增加 10pt 呼吸间距
         
         [UIView animateWithDuration:duration delay:0 options:options animations:^{
             CGPoint center = self.panelContainer.center;
-            // 根据当前旋转方向计算推移矢量
             UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
             
             switch (orientation) {
-                case UIInterfaceOrientationLandscapeLeft:
-                    center.x += offset; // 横屏下，y轴推移对应x轴变化
-                    break;
-                case UIInterfaceOrientationLandscapeRight:
-                    center.x -= offset;
-                    break;
-                case UIInterfaceOrientationPortraitUpsideDown:
-                    center.y += offset;
-                    break;
+                case UIInterfaceOrientationLandscapeLeft: center.x += offset; break;
+                case UIInterfaceOrientationLandscapeRight: center.x -= offset; break;
+                case UIInterfaceOrientationPortraitUpsideDown: center.y += offset; break;
                 case UIInterfaceOrientationPortrait:
-                default:
-                    center.y -= offset;
-                    break;
+                default: center.y -= offset; break;
             }
             self.panelContainer.center = center;
         } completion:nil];
@@ -2506,6 +2493,37 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     }
     
     return cell;
+}
+
+- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    if (scrollView == self.collectionView) {
+        // 建议2：滚动惯性偏转 (Icon Scrolling Tilt)
+        CGFloat velocity = [scrollView.panGestureRecognizer velocityInView:scrollView].y;
+        CGFloat tilt = velocity * kChevronPhysicsConstants.scrollTiltFactor;
+        tilt = MAX(-kChevronPhysicsConstants.tiltMaxAngle, MIN(kChevronPhysicsConstants.tiltMaxAngle, tilt));
+        
+        for (UICollectionViewCell *cell in self.collectionView.visibleCells) {
+            [UIView animateWithDuration:0.1 delay:0 options:UIViewAnimationOptionAllowUserInteraction animations:^{
+                cell.contentView.transform = CGAffineTransformMakeRotation(tilt);
+            } completion:nil];
+        }
+    }
+}
+
+- (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {
+    if (!decelerate) [self resetIconTilt];
+}
+
+- (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView {
+    [self resetIconTilt];
+}
+
+- (void)resetIconTilt {
+    [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.6 initialSpringVelocity:0.5 options:UIViewAnimationOptionAllowUserInteraction animations:^{
+        for (UICollectionViewCell *cell in self.collectionView.visibleCells) {
+            cell.contentView.transform = CGAffineTransformIdentity;
+        }
+    } completion:nil];
 }
 
 - (BOOL)_canBecomeKeyWindow { return YES; }
