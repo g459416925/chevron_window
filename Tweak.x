@@ -260,6 +260,7 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, strong) CAShapeLayer *searchBackground;
 @property (nonatomic, strong) UIScrollView *categoryBar; // 新增：分类导航栏
 @property (nonatomic, copy) NSString *selectedCategory; // 当前选中的分类
+@property (nonatomic, assign) CGAffineTransform baseRotationTransform; // 新增：存储基础旋转变换
 
 - (void)show;
 - (void)loadAppsAsync;
@@ -269,6 +270,10 @@ static void CV3LogToFile(NSString *format, ...) {
 
 static NSCache *cv3IconCache = nil; 
 static CV3Window *sharedWindow = nil;
+
+static CGFloat CGPointDistance(CGPoint p1, CGPoint p2) {
+    return sqrt(pow(p1.x - p2.x, 2) + pow(p1.y - p2.y, 2));
+}
 
 // --- Helper: Color Extraction ---
 static UIColor *CV3AverageColorFromImage(UIImage *image) {
@@ -743,6 +748,7 @@ struct {
         CV3RootViewController *rootVC = [[CV3RootViewController alloc] init];
         rootVC.view.backgroundColor = [UIColor clearColor];
         self.rootViewController = rootVC;
+        self.baseRotationTransform = CGAffineTransformIdentity;
         [self setupUI];
         
         // 注册应用安装/卸载观察者
@@ -1368,13 +1374,17 @@ struct {
         case UIInterfaceOrientationPortraitUpsideDown: targetRotation = CGAffineTransformMakeRotation(M_PI); break;
         default: targetRotation = CGAffineTransformIdentity; break;
     }
+
+    // 更新基础变换属性
+    self.baseRotationTransform = targetRotation;
     
     // 只有在未拖动过且非正在动画时，或者旋转方向改变时，才强制同步 bounds
     BOOL orientationChanged = !CGAffineTransformEqualToTransform(self.panelContainer.transform, targetRotation);
     BOOL shouldForceLayout = (!self.hasBeenMoved && !self.isAnimating) || orientationChanged;
 
     if (shouldForceLayout && (!CGRectEqualToRect(self.panelContainer.bounds, panelBounds) || orientationChanged)) {
-        [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:UIViewAnimationOptionCurveEaseInOut animations:^{
+        [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionBeginFromCurrentState animations:^{
+            // 在动画中更新基础旋转，防止重写
             self.panelContainer.transform = targetRotation;
             self.panelContainer.bounds = panelBounds;
             
@@ -1399,19 +1409,25 @@ struct {
             [self.collectionView.collectionViewLayout invalidateLayout];
             
             if (!self.hasBeenMoved) {
-                self.panelContainer.center = CGPointMake(CGRectGetMidX(safeBounds), CGRectGetMidY(safeBounds));
+                CGPoint targetCenter = CGPointMake(CGRectGetMidX(safeBounds), CGRectGetMidY(safeBounds));
+                if (CGPointDistance(self.panelContainer.center, targetCenter) > 0.5) {
+                    self.panelContainer.center = targetCenter;
+                }
             }
         } completion:nil];
     } else {
         // 如果已经拖动过，仅在旋转时更新 transform
-        if (orientationChanged) {
+        if (orientationChanged && !self.isAnimating) {
              [UIView animateWithDuration:0.35 animations:^{
                 self.panelContainer.transform = targetRotation;
              }];
         }
         
         if (!self.isAnimating && !self.hasBeenMoved) {
-            self.panelContainer.center = CGPointMake(CGRectGetMidX(safeBounds), CGRectGetMidY(safeBounds));
+            CGPoint targetCenter = CGPointMake(CGRectGetMidX(safeBounds), CGRectGetMidY(safeBounds));
+            if (CGPointDistance(self.panelContainer.center, targetCenter) > 0.5) {
+                self.panelContainer.center = targetCenter;
+            }
         } else if (self.isPanelShowing && !self.isAnimating) {
             // 保持在屏幕内的钳位逻辑
             CGPoint currentCenter = self.panelContainer.center;
@@ -1422,9 +1438,12 @@ struct {
             CGFloat rootHalfW = sizeInRoot.width / 2.0;
             CGFloat rootHalfH = sizeInRoot.height / 2.0;
 
-            currentCenter.x = MAX(rootHalfW, MIN(w - rootHalfW, currentCenter.x));
-            currentCenter.y = MAX(rootHalfH, MIN(h - rootHalfH, currentCenter.y));
-            self.panelContainer.center = currentCenter;
+            CGFloat clampedX = MAX(rootHalfW, MIN(w - rootHalfW, currentCenter.x));
+            CGFloat clampedY = MAX(rootHalfH, MIN(h - rootHalfH, currentCenter.y));
+            
+            if (fabs(currentCenter.x - clampedX) > 0.5 || fabs(currentCenter.y - clampedY) > 0.5) {
+                self.panelContainer.center = CGPointMake(clampedX, clampedY);
+            }
         }
     }
 
@@ -1709,15 +1728,8 @@ struct {
         CGFloat panelDX = m.attitude.roll * 8.0;
         CGFloat panelDY = m.attitude.pitch * 8.0;
         
-        // 获取当前的基础变换（旋转）
-        UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
-        CGAffineTransform baseRotation = CGAffineTransformIdentity;
-        switch (orientation) {
-            case UIInterfaceOrientationLandscapeLeft: baseRotation = CGAffineTransformMakeRotation(-M_PI_2); break;
-            case UIInterfaceOrientationLandscapeRight: baseRotation = CGAffineTransformMakeRotation(M_PI_2); break;
-            case UIInterfaceOrientationPortraitUpsideDown: baseRotation = CGAffineTransformMakeRotation(M_PI); break;
-            default: baseRotation = CGAffineTransformIdentity; break;
-        }
+        // 使用存储的基础变换，避免 layoutSubviews 冲突
+        CGAffineTransform baseRotation = self.baseRotationTransform;
         
         // 叠加视差位移
         CGAffineTransform parallaxTransform = CGAffineTransformMakeTranslation(panelDX, panelDY);
@@ -1961,32 +1973,41 @@ struct {
                 for (UIScene *scene in [[UIApplication sharedApplication].connectedScenes allObjects]) {
                     if ([scene isKindOfClass:[UIWindowScene class]]) {
                         NSString *role = scene.session.role;
-                        
-                        // 仅过滤掉明确的系统覆盖层
                         if ([role isEqualToString:@"SBWindowSceneSessionRoleSystemAperture"] ||
                             [role isEqualToString:@"SBWindowSceneSessionRoleSystemApertureCurtain"] ||
                             [role isEqualToString:@"UISceneSessionRolePlaceholder"]) continue;
                         
-                        // 放宽：只要是前台活跃的 UIWindowScene 均可挂载
                         if (scene.activationState == UISceneActivationStateForegroundActive) {
                             targetScene = (UIWindowScene *)scene;
-                            break; // 找到第一个活跃场景即可
+                            break;
                         }
                     }
                 }
             }
 
-
             if (targetScene) {
-                if (self.windowScene != targetScene) self.windowScene = targetScene;
-                self.hidden = NO; 
-                [self applyAdaptiveLevel];
+                BOOL needsLayoutUpdate = NO;
+                if (self.windowScene != targetScene) {
+                    self.windowScene = targetScene;
+                    needsLayoutUpdate = YES;
+                }
                 
-                // 使用 targetScene 的 bounds 以保证在不同场景旋转下覆盖整个屏幕
                 CGRect targetBounds = targetScene.coordinateSpace.bounds;
-                self.frame = targetBounds;
+                if (!CGRectEqualToRect(self.frame, targetBounds)) {
+                    self.frame = targetBounds;
+                    needsLayoutUpdate = YES;
+                }
 
-                [self setNeedsLayout];
+                if (self.hidden) {
+                    self.hidden = NO;
+                    needsLayoutUpdate = YES;
+                }
+                
+                [self applyAdaptiveLevel];
+
+                if (needsLayoutUpdate) {
+                    [self setNeedsLayout];
+                }
             }
         } @catch (NSException *e) {}
         self.isProcessing = NO;
@@ -2123,7 +2144,6 @@ static NSTimeInterval lastLogTime = 0;
                     sharedWindow.targetOrientation = currentOrientation;
                     [sharedWindow attachToCurrentActiveScene];
                     [sharedWindow setNeedsLayout];
-                    [sharedWindow layoutIfNeeded];
                 }
             });
             isUpdating = NO;
