@@ -51,6 +51,7 @@
 @property (nonatomic, strong) id sbIcon; 
 @property (nonatomic, copy) NSString *pinyinInitial; // 存储名称的拼音首字母
 @property (nonatomic, copy) NSString *category; // 新增：应用分类名称
+@property (nonatomic, assign) BOOL isPinned;   // 新增：是否已置顶
 - (void)generatePinyin;
 @end
 @implementation CV3AppInfo
@@ -80,6 +81,7 @@
 @property (nonatomic, strong) UIImageView *iconView;
 @property (nonatomic, strong) UILabel *nameLabel;
 @property (nonatomic, strong) CAGradientLayer *iconHighlight;
+@property (nonatomic, strong) UIView *pinnedIndicator; // 新增：置顶角标
 - (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText;
 - (void)startBreathing;
 - (void)startPulse; // 新增：开始高光脉冲
@@ -115,6 +117,19 @@
         self.iconHighlight.opacity = 0; // 初始隐藏，仅在波纹经过时显示
         [self.iconView.layer addSublayer:self.iconHighlight];
 
+        // 置顶状态指示器
+        self.pinnedIndicator = [[UIView alloc] initWithFrame:CGRectMake(iconSize - 12, -4, 16, 16)];
+        self.pinnedIndicator.backgroundColor = [UIColor cyanColor];
+        self.pinnedIndicator.layer.cornerRadius = 8;
+        self.pinnedIndicator.layer.borderWidth = 2.0;
+        self.pinnedIndicator.layer.borderColor = [UIColor whiteColor].CGColor;
+        self.pinnedIndicator.layer.shadowColor = [UIColor cyanColor].CGColor;
+        self.pinnedIndicator.layer.shadowOffset = CGSizeZero;
+        self.pinnedIndicator.layer.shadowOpacity = 0.8;
+        self.pinnedIndicator.layer.shadowRadius = 4.0;
+        self.pinnedIndicator.hidden = YES;
+        [self.iconView addSubview:self.pinnedIndicator];
+
         self.nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(4, iconSize + 14, frame.size.width - 8, 28)];
         self.nameLabel.textColor = [[UIColor whiteColor] colorWithAlphaComponent:0.9];
         self.nameLabel.font = [UIFont systemFontOfSize:10.0 weight:UIFontWeightMedium];
@@ -126,8 +141,11 @@
 }
 - (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText {
     self.iconView.image = info.icon;
-    
+    self.pinnedIndicator.hidden = !info.isPinned;
+    if (info.isPinned) [self.iconView bringSubviewToFront:self.pinnedIndicator];
+
     if (searchText && searchText.length > 0) {
+
         NSMutableAttributedString *as = [[NSMutableAttributedString alloc] initWithString:info.name attributes:@{NSForegroundColorAttributeName: [[UIColor whiteColor] colorWithAlphaComponent:0.9]}];
         NSRange range = [info.name rangeOfString:searchText options:NSCaseInsensitiveSearch];
         if (range.location != NSNotFound) {
@@ -254,6 +272,7 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, strong) UITextField *searchField;
 @property (nonatomic, strong) NSMutableArray<CV3AppInfo *> *filteredApps;
 @property (nonatomic, strong) NSArray<CV3AppInfo *> *recentlyUsedApps; // 新增：存储最近使用的应用
+@property (nonatomic, strong) NSMutableSet *pinnedBundleIDs; // 新增：存储置顶应用的 Bundle ID
 @property (nonatomic, strong) UILabel *noResultsLabel;
 @property (nonatomic, assign) CGFloat lastHapticX;
 @property (nonatomic, strong) UIScreenEdgePanGestureRecognizer *systemEdgePan;
@@ -464,7 +483,8 @@ struct {
     
     BOOL hasSearch = (text && text.length > 0);
     BOOL isRecentlyUsed = [self.selectedCategory isEqualToString:@"最近使用"];
-    BOOL hasCategory = (self.selectedCategory && ![self.selectedCategory isEqualToString:@"全部"] && !isRecentlyUsed);
+    BOOL isPinnedView = [self.selectedCategory isEqualToString:@"置顶"];
+    BOOL hasCategory = (self.selectedCategory && ![self.selectedCategory isEqualToString:@"全部"] && !isRecentlyUsed && !isPinnedView);
 
     NSMutableArray *res = [NSMutableArray array];
     
@@ -475,6 +495,17 @@ struct {
                                [info.bundleId rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
                                (info.pinyinInitial && [info.pinyinInitial rangeOfString:text].location != NSNotFound))) {
                 [res addObject:info];
+            }
+        }
+    } else if (isPinnedView) {
+        // 如果选中“置顶”，显示所有已置顶应用
+        for (CV3AppInfo *info in self.apps) {
+            if (info.isPinned) {
+                if (!hasSearch || ([info.name rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                                   [info.bundleId rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                                   (info.pinyinInitial && [info.pinyinInitial rangeOfString:text].location != NSNotFound))) {
+                    [res addObject:info];
+                }
             }
         }
     } else {
@@ -752,6 +783,11 @@ struct {
         rootVC.view.backgroundColor = [UIColor clearColor];
         self.rootViewController = rootVC;
         self.baseRotationTransform = CGAffineTransformIdentity;
+        
+        // 加载置顶应用数据
+        NSArray *savedPinned = [[NSUserDefaults standardUserDefaults] objectForKey:@"CV3PinnedApps"];
+        self.pinnedBundleIDs = savedPinned ? [NSMutableSet setWithArray:savedPinned] : [NSMutableSet set];
+
         [self setupUI];
         
         // 注册应用安装/卸载观察者
@@ -971,6 +1007,37 @@ struct {
     waveTracker.delegate = self;
     waveTracker.cancelsTouchesInView = NO; // 不拦截点击事件
     [self.collectionView addGestureRecognizer:waveTracker];
+
+    // 增加长按置顶手势
+    UILongPressGestureRecognizer *pinLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleAppLongPress:)];
+    pinLongPress.minimumPressDuration = 0.6;
+    pinLongPress.delegate = self;
+    [self.collectionView addGestureRecognizer:pinLongPress];
+}
+
+- (void)handleAppLongPress:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        CGPoint point = [gesture locationInView:self.collectionView];
+        NSIndexPath *indexPath = [self.collectionView indexPathForItemAtPoint:point];
+        if (indexPath && indexPath.item < self.filteredApps.count) {
+            CV3AppInfo *info = self.filteredApps[indexPath.item];
+            
+            [self.feedback impactOccurredWithIntensity:0.85];
+            
+            if ([self.pinnedBundleIDs containsObject:info.bundleId]) {
+                [self.pinnedBundleIDs removeObject:info.bundleId];
+            } else {
+                [self.pinnedBundleIDs addObject:info.bundleId];
+            }
+            
+            // 持久化
+            [[NSUserDefaults standardUserDefaults] setObject:[self.pinnedBundleIDs allObjects] forKey:@"CV3PinnedApps"];
+            [[NSUserDefaults standardUserDefaults] synchronize];
+            
+            // 重新加载并刷新 UI (带流动感)
+            [self loadAppsAsync];
+        }
+    }
 }
 
 - (void)handleWaveGesture:(UILongPressGestureRecognizer *)gesture {
@@ -1152,9 +1219,12 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         return [c1 localizedCaseInsensitiveCompare:c2];
     }];
     
-    // 3. 始终确保“全部”排在第一位，“最近使用”排在第二位
+    // 3. 始终确保“全部”排在第一位，“置顶”排在第二位，“最近使用”排在第三位
     if (self.recentlyUsedApps.count > 0) {
         [sortedCategories insertObject:@"最近使用" atIndex:0];
+    }
+    if (self.pinnedBundleIDs.count > 0) {
+        [sortedCategories insertObject:@"置顶" atIndex:0];
     }
     [sortedCategories insertObject:@"全部" atIndex:0];
     
@@ -1162,10 +1232,12 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     for (NSString *cat in sortedCategories) {
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
         
-        // 显示分类名和数量，如 "社交 (12)"
+        // 显示分类名和数量
         NSString *displayTitle = cat;
         if ([cat isEqualToString:@"最近使用"]) {
             displayTitle = [NSString stringWithFormat:@"%@ (%ld)", cat, (long)self.recentlyUsedApps.count];
+        } else if ([cat isEqualToString:@"置顶"]) {
+            displayTitle = [NSString stringWithFormat:@"%@ (%ld)", cat, (long)self.pinnedBundleIDs.count];
         } else if (![cat isEqualToString:@"全部"]) {
             displayTitle = [NSString stringWithFormat:@"%@ (%ld)", cat, (long)[counts[cat] integerValue]];
         }
@@ -2006,6 +2078,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
                     }
 
                     if (info.icon) {
+                        info.isPinned = [self.pinnedBundleIDs containsObject:bundleId];
                         [temp addObject:info];
                     }
                 }
@@ -2025,6 +2098,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
                 CV3AppInfo *info = [[CV3AppInfo alloc] init];
                 info.name = name;
                 info.bundleId = bundleId;
+                info.isPinned = [self.pinnedBundleIDs containsObject:bundleId];
                 
                 UIImage *cachedIcon = [cv3IconCache objectForKey:bundleId];
                 if (cachedIcon) {
@@ -2044,9 +2118,14 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         NSTimeInterval sevenDaysInSeconds = 7 * 24 * 3600;
         
         // 排序逻辑：
-        // 1. 仅统计最近 7 天内的点击次数作为活跃权重
-        // 2. 权重相同则按字母排序
+        // 1. 置顶应用 (isPinned) 绝对优先
+        // 2. 仅统计最近 7 天内的点击次数作为活跃权重
+        // 3. 权重相同则按字母排序
         [temp sortUsingComparator:^NSComparisonResult(CV3AppInfo *obj1, CV3AppInfo *obj2) {
+            if (obj1.isPinned != obj2.isPinned) {
+                return obj1.isPinned ? NSOrderedAscending : NSOrderedDescending;
+            }
+
             NSArray *ts1 = usageData[obj1.bundleId];
             NSArray *ts2 = usageData[obj2.bundleId];
             
