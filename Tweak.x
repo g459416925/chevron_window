@@ -1300,9 +1300,42 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             maxH = rootAllowedHalfH * 2.0;
         }
 
+        // --- 智能自动推移 (Auto-Push) ---
+        // 如果想要达到的尺寸超过了当前位置允许的最大尺寸，尝试平移中心点以换取空间
+        CGFloat preferredW = MAX(50.0, rawW);
+        CGFloat preferredH = MAX(50.0, rawH);
+        
+        // 计算投影后的首选尺寸
+        CGRect prefLocalBounds = CGRectMake(0, 0, preferredW, preferredH);
+        CGSize prefSizeInRoot = CGRectApplyAffineTransform(prefLocalBounds, self.baseRotationTransform).size;
+        CGFloat prefHalfW = prefSizeInRoot.width / 2.0;
+        CGFloat prefHalfH = prefSizeInRoot.height / 2.0;
+        
+        // 计算为了容纳这个尺寸，中心点理想的摆放位置（钳位在屏幕内）
+        CGPoint idealCenter = center;
+        idealCenter.x = MAX(safeFrame.origin.x + prefHalfW, MIN(CGRectGetMaxX(safeFrame) - prefHalfW, idealCenter.x));
+        idealCenter.y = MAX(safeFrame.origin.y + prefHalfH, MIN(CGRectGetMaxY(safeFrame) - prefHalfH, idealCenter.y));
+        
+        // 应用中心点位移（推移）
+        if (!CGPointEqualToPoint(center, idealCenter)) {
+            self.panelContainer.center = idealCenter;
+            center = idealCenter; // 更新当前参考中心
+            
+            // 重新计算推移后的可用空间
+            rootAllowedHalfW = MIN(center.x - safeFrame.origin.x, CGRectGetMaxX(safeFrame) - center.x);
+            rootAllowedHalfH = MIN(center.y - safeFrame.origin.y, CGRectGetMaxY(safeFrame) - center.y);
+            if (isLandscape) {
+                maxW = rootAllowedHalfH * 2.0;
+                maxH = rootAllowedHalfW * 2.0;
+            } else {
+                maxW = rootAllowedHalfW * 2.0;
+                maxH = rootAllowedHalfH * 2.0;
+            }
+        }
+
         // 尝试计算新尺寸（带最大值强制钳位）
-        CGFloat targetW = MIN(maxW, MAX(50.0, rawW));
-        CGFloat targetH = MIN(maxH, MAX(50.0, rawH));
+        CGFloat targetW = MIN(maxW, preferredW);
+        CGFloat targetH = MIN(maxH, preferredH);
 
         // --- 最小值与果冻效果逻辑 ---
         CGFloat minW = 175.0;
