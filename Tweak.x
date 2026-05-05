@@ -233,6 +233,8 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, strong) UIVisualEffectView *bezierBlur;
 @property (nonatomic, strong) CALayer *cyanLayer;
 @property (nonatomic, strong) CALayer *magentaLayer;
+@property (nonatomic, strong) UIView *whiteFilter; // 新增：白色滤镜层
+@property (nonatomic, strong) UIView *dispersionContainer; // 新增：色散容器层
 @property (nonatomic, assign) BOOL isPanelShowing;
 @property (nonatomic, assign) BOOL isAnimating;
 @property (nonatomic, assign) BOOL isProcessing; 
@@ -828,33 +830,33 @@ struct {
     self.appPanel.layer.borderWidth = 0.4;
     self.appPanel.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.2].CGColor;
     
-    UIView *whiteFilter = [[UIView alloc] initWithFrame:self.appPanel.bounds];
-    whiteFilter.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.04];
-    whiteFilter.userInteractionEnabled = NO;
-    [self.appPanel.contentView addSubview:whiteFilter];
+    self.whiteFilter = [[UIView alloc] initWithFrame:self.appPanel.bounds];
+    self.whiteFilter.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.04];
+    self.whiteFilter.userInteractionEnabled = NO;
+    [self.appPanel.contentView addSubview:self.whiteFilter];
 
     self.specularHighlight = [CAGradientLayer layer];
     self.specularHighlight.frame = self.appPanel.bounds;
     self.specularHighlight.colors = @[(id)[[UIColor whiteColor] colorWithAlphaComponent:0.0].CGColor, (id)[[UIColor whiteColor] colorWithAlphaComponent:0.12].CGColor, (id)[[UIColor whiteColor] colorWithAlphaComponent:0.0].CGColor];
     [self.appPanel.layer addSublayer:self.specularHighlight];
 
-    UIView *dispersion = [[UIView alloc] initWithFrame:self.appPanel.bounds];
-    dispersion.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
-    dispersion.layer.masksToBounds = YES;
-    dispersion.userInteractionEnabled = NO;
-    [self.appPanel.contentView addSubview:dispersion];
+    self.dispersionContainer = [[UIView alloc] initWithFrame:self.appPanel.bounds];
+    self.dispersionContainer.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+    self.dispersionContainer.layer.masksToBounds = YES;
+    self.dispersionContainer.userInteractionEnabled = NO;
+    [self.appPanel.contentView addSubview:self.dispersionContainer];
     
     self.cyanLayer = [CALayer layer]; 
-    self.cyanLayer.frame = CGRectInset(dispersion.bounds, -0.3, -0.3);
+    self.cyanLayer.frame = CGRectInset(self.dispersionContainer.bounds, -0.3, -0.3);
     self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.12].CGColor; 
     self.cyanLayer.borderWidth = 0.3; 
-    [dispersion.layer addSublayer:self.cyanLayer];
+    [self.dispersionContainer.layer addSublayer:self.cyanLayer];
     
     self.magentaLayer = [CALayer layer]; 
-    self.magentaLayer.frame = CGRectInset(dispersion.bounds, 0.3, 0.3); 
+    self.magentaLayer.frame = CGRectInset(self.dispersionContainer.bounds, 0.3, 0.3); 
     self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:0.12].CGColor; 
     self.magentaLayer.borderWidth = 0.3; 
-    [dispersion.layer addSublayer:self.magentaLayer];
+    [self.dispersionContainer.layer addSublayer:self.magentaLayer];
 
     [self.panelContainer addSubview:self.appPanel];
 
@@ -1260,9 +1262,19 @@ struct {
     self.noResultsLabel.frame = CGRectMake(0, 150, f.size.width, 40);
 
     [self updateResizingHandleFrame];
+
+    // 关键修复：同步更新所有装饰层并禁用隐式动画，消除“追赶感”和“固定宽高”问题
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    
+    self.whiteFilter.frame = self.appPanel.bounds;
+    self.dispersionContainer.frame = self.appPanel.bounds;
     self.specularHighlight.frame = self.appPanel.bounds;
-    self.cyanLayer.frame = CGRectInset(self.appPanel.bounds, -0.3, -0.3);
-    self.magentaLayer.frame = CGRectInset(self.appPanel.bounds, 0.3, 0.3);
+    self.cyanLayer.frame = CGRectInset(self.dispersionContainer.bounds, -0.3, -0.3);
+    self.magentaLayer.frame = CGRectInset(self.dispersionContainer.bounds, 0.3, 0.3);
+    
+    [CATransaction commit];
+
     [self.collectionView.collectionViewLayout invalidateLayout];
 
     if (gesture && (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled)) {
@@ -1403,9 +1415,16 @@ struct {
             
             self.trafficCapsule.frame = CGRectMake(16, 14, kChevronLayoutConstants.trafficCapsuleW, kChevronLayoutConstants.trafficCapsuleH);
             [self updateResizingHandleFrame];
+            
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            self.whiteFilter.frame = self.appPanel.bounds;
+            self.dispersionContainer.frame = self.appPanel.bounds;
             self.specularHighlight.frame = self.appPanel.bounds;
             self.cyanLayer.frame = CGRectInset(self.appPanel.bounds, -0.3, -0.3);
             self.magentaLayer.frame = CGRectInset(self.appPanel.bounds, 0.3, 0.3);
+            [CATransaction commit];
+
             [self.collectionView.collectionViewLayout invalidateLayout];
             
             if (!self.hasBeenMoved) {
