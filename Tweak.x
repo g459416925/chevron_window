@@ -385,7 +385,8 @@ struct {
     [self.panelContainer addSubview:self.resizingHandle];
     
     CAShapeLayer *handleLayer = [CAShapeLayer layer];
-    handleLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(40, 40) radius:18 startAngle:M_PI endAngle:1.5 * M_PI clockwise:YES].CGPath;
+    // 改为朝向右下角（面板圆角处），使用 0 到 M_PI_2 的圆弧
+    handleLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(0, 0) radius:18 startAngle:0 endAngle:M_PI_2 clockwise:YES].CGPath;
     handleLayer.fillColor = [UIColor clearColor].CGColor;
     handleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
     handleLayer.lineWidth = 2.0;
@@ -407,34 +408,53 @@ struct {
 - (void)handlePanelDrag:(UIPanGestureRecognizer *)gesture {
     CGPoint location = [gesture locationInView:self.panelContainer];
     if (gesture.state == UIGestureRecognizerStateBegan) {
-        if (location.y > 45.0) { gesture.enabled = NO; gesture.enabled = YES; return; }
+        if (location.y > 45.0) { return; }
         self.hasBeenMoved = YES;
         [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.5 initialSpringVelocity:1.0 options:0 animations:^{
-            self.panelContainer.transform = CGAffineTransformMakeScale(1.05, 1.05);
+            // 保留当前的旋转状态（transform）只进行缩放
+            CGAffineTransform currentTransform = self.panelContainer.transform;
+            self.panelContainer.transform = CGAffineTransformScale(currentTransform, 1.05, 1.05);
         } completion:nil];
     }
     
-    CGPoint translation = [gesture translationInView:self.rootViewController.view];
+    // 使用 superview 坐标系以确保与父容器内的绝对位置一致
+    CGPoint translation = [gesture translationInView:self.panelContainer.superview];
     CGPoint newCenter = CGPointMake(self.panelContainer.center.x + translation.x, self.panelContainer.center.y + translation.y);
     
-    UIEdgeInsets safe = self.safeAreaInsets;
-    CGFloat halfW = self.panelContainer.frame.size.width / 2.0;
-    CGFloat halfH = self.panelContainer.frame.size.height / 2.0;
+    // 使用物理屏幕边界进行约束，允许超出安全区域
+    CGRect bounds = self.bounds;
     
-    CGFloat minX = safe.left + 10.0 + halfW;
-    CGFloat maxX = self.bounds.size.width - safe.right - 10.0 - halfW;
-    CGFloat minY = safe.top + 10.0 + halfH;
-    CGFloat maxY = self.bounds.size.height - safe.bottom - 10.0 - halfH;
+    // 获取面板在旋转变换前的 bounds
+    CGRect panelBounds = self.panelContainer.bounds;
+    CGFloat halfW = (panelBounds.size.width * 1.05) / 2.0;
+    CGFloat halfH = (panelBounds.size.height * 1.05) / 2.0;
     
-    newCenter.x = MAX(minX, MIN(maxX, newCenter.x));
-    newCenter.y = MAX(minY, MIN(maxY, newCenter.y));
+    // 物理屏幕边缘钳位：允许部分拖出，但必须保留面板的一定可视部分 (这里预留 halfW/halfH，即面板中心不会出屏幕)
+    newCenter.x = MAX(halfW - panelBounds.size.width * 0.4, MIN(bounds.size.width - halfW + panelBounds.size.width * 0.4, newCenter.x));
+    newCenter.y = MAX(halfH - panelBounds.size.height * 0.4, MIN(bounds.size.height - halfH + panelBounds.size.height * 0.4, newCenter.y));
     
     self.panelContainer.center = newCenter;
-    [gesture setTranslation:CGPointZero inView:self.rootViewController.view];
+    [gesture setTranslation:CGPointZero inView:self.panelContainer.superview];
     
     if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        // 恢复原始缩放，但不重置 transform（保留旋转）
+        CGAffineTransform current = self.panelContainer.transform;
         [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.5 initialSpringVelocity:1.0 options:0 animations:^{
-            self.panelContainer.transform = CGAffineTransformIdentity;
+            self.panelContainer.transform = CGAffineTransformScale(current, 1/1.05, 1/1.05);
+            
+            // 自动回弹检测
+            CGRect b = self.bounds;
+            CGRect pb = self.panelContainer.bounds;
+            CGFloat hW = pb.size.width * 0.4;
+            CGFloat hH = pb.size.height * 0.4;
+            
+            CGPoint currentCenter = self.panelContainer.center;
+            CGPoint targetCenter = currentCenter;
+            
+            targetCenter.x = MAX(hW, MIN(b.size.width - hW, targetCenter.x));
+            targetCenter.y = MAX(hH, MIN(b.size.height - hH, targetCenter.y));
+            
+            self.panelContainer.center = targetCenter;
         } completion:nil];
     }
 }
@@ -444,13 +464,34 @@ struct {
 }
 
 - (void)handleResize:(UIPanGestureRecognizer *)gesture {
+    // 增加 resize 锁
+    self.isProcessing = YES; 
+    
+    static CGRect lastValidBounds;
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        lastValidBounds = self.panelContainer.bounds;
+    }
+    
     CGPoint translation = [gesture translationInView:self.panelContainer];
     CGRect f = self.panelContainer.bounds;
     
     CGFloat newWidth = MAX(280, f.size.width + translation.x);
     CGFloat newHeight = MAX(350, f.size.height + translation.y);
     
-    // 注意：拖拽大小的边界控制应该相对于屏幕，这里因为旋转可能会有偏差，但先保持基本逻辑
+    // 获取屏幕和面板在根坐标系下的信息
+    CGRect panelFrameInRoot = [self.panelContainer convertRect:self.panelContainer.bounds toView:self.rootViewController.view];
+    CGFloat screenW = self.bounds.size.width;
+    CGFloat screenH = self.bounds.size.height;
+    
+    // 检查是否越界
+    if (panelFrameInRoot.origin.x + newWidth > screenW || panelFrameInRoot.origin.y + newHeight > screenH) {
+        // 若越界，强制回退至上一次合法尺寸
+        newWidth = lastValidBounds.size.width;
+        newHeight = lastValidBounds.size.height;
+    } else {
+        // 更新缓存
+        lastValidBounds = CGRectMake(0, 0, newWidth, newHeight);
+    }
     
     f.size.width = newWidth;
     f.size.height = newHeight;
@@ -465,6 +506,10 @@ struct {
     self.magentaLayer.frame = CGRectInset(self.appPanel.bounds, 0.3, 0.3);
     
     [self.collectionView.collectionViewLayout invalidateLayout];
+    
+    if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        self.isProcessing = NO;
+    }
 }
 
 - (void)handleTrafficLight:(UIButton *)sender {
@@ -546,21 +591,47 @@ struct {
     targetH = MAX(targetH, kChevronLayoutConstants.minHeight);
     
     CGRect panelBounds = CGRectMake(0, 0, targetW, targetH);
-    if (!CGRectEqualToRect(self.panelContainer.bounds, panelBounds)) {
-        self.panelContainer.bounds = panelBounds;
-        // 调整子组件大小以匹配容器
-        self.appPanel.frame = self.panelContainer.bounds;
-        self.collectionView.frame = CGRectMake(0, 45, targetW, targetH - 45);
-        self.trafficCapsule.frame = CGRectMake(16, 14, 64, 24);
-        self.resizingHandle.frame = CGRectMake(targetW - 40, targetH - 40, 40, 40);
-        self.specularHighlight.frame = self.appPanel.bounds;
-        self.cyanLayer.frame = CGRectInset(self.appPanel.bounds, -0.3, -0.3);
-        self.magentaLayer.frame = CGRectInset(self.appPanel.bounds, 0.3, 0.3);
-        [self.collectionView.collectionViewLayout invalidateLayout];
+    
+    // 计算目标旋转
+    CGAffineTransform targetRotation = CGAffineTransformIdentity;
+    switch (orientation) {
+        case UIInterfaceOrientationLandscapeLeft: targetRotation = CGAffineTransformMakeRotation(-M_PI_2); break;
+        case UIInterfaceOrientationLandscapeRight: targetRotation = CGAffineTransformMakeRotation(M_PI_2); break;
+        case UIInterfaceOrientationPortraitUpsideDown: targetRotation = CGAffineTransformMakeRotation(M_PI); break;
+        default: targetRotation = CGAffineTransformIdentity; break;
     }
-
-    if (!self.isAnimating && !self.hasBeenMoved) {
-        self.panelContainer.center = CGPointMake(CGRectGetMidX(safeBounds), CGRectGetMidY(safeBounds));
+    
+    if (!CGRectEqualToRect(self.panelContainer.bounds, panelBounds) || !CGAffineTransformEqualToTransform(self.panelContainer.transform, targetRotation)) {
+        [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:UIViewAnimationOptionCurveEaseInOut animations:^{
+            self.panelContainer.transform = targetRotation;
+            self.panelContainer.bounds = panelBounds;
+            
+            // 调整子组件大小以匹配容器
+            self.appPanel.frame = self.panelContainer.bounds;
+            self.collectionView.frame = CGRectMake(0, 45, targetW, targetH - 45);
+            self.trafficCapsule.frame = CGRectMake(16, 14, 64, 24);
+            self.resizingHandle.frame = CGRectMake(targetW - 40, targetH - 40, 40, 40);
+            self.specularHighlight.frame = self.appPanel.bounds;
+            self.cyanLayer.frame = CGRectInset(self.appPanel.bounds, -0.3, -0.3);
+            self.magentaLayer.frame = CGRectInset(self.appPanel.bounds, 0.3, 0.3);
+            [self.collectionView.collectionViewLayout invalidateLayout];
+            
+            // 如果面板未被拖动过，居中；如果拖动过，做一次简单的钳位确保它不出界
+            if (!self.isAnimating && !self.hasBeenMoved) {
+                self.panelContainer.center = CGPointMake(CGRectGetMidX(safeBounds), CGRectGetMidY(safeBounds));
+            } else if (self.isPanelShowing) {
+                CGPoint currentCenter = self.panelContainer.center;
+                CGFloat halfW = (panelBounds.size.width) / 2.0;
+                CGFloat halfH = (panelBounds.size.height) / 2.0;
+                currentCenter.x = MAX(halfW - panelBounds.size.width * 0.4, MIN(w - halfW + panelBounds.size.width * 0.4, currentCenter.x));
+                currentCenter.y = MAX(halfH - panelBounds.size.height * 0.4, MIN(h - halfH + panelBounds.size.height * 0.4, currentCenter.y));
+                self.panelContainer.center = currentCenter;
+            }
+        } completion:nil];
+    } else {
+        if (!self.isAnimating && !self.hasBeenMoved) {
+            self.panelContainer.center = CGPointMake(CGRectGetMidX(safeBounds), CGRectGetMidY(safeBounds));
+        }
     }
 
     // 3. 特效层
@@ -1036,6 +1107,8 @@ static NSTimeInterval lastLogTime = 0;
                 if (sharedWindow) {
                     sharedWindow.targetOrientation = currentOrientation;
                     [sharedWindow attachToCurrentActiveScene];
+                    [sharedWindow setNeedsLayout];
+                    [sharedWindow layoutIfNeeded];
                 }
             });
             isUpdating = NO;
