@@ -1257,66 +1257,85 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     // 增加 resize 锁
     self.isProcessing = YES; 
 
-    CGRect f = self.panelContainer.bounds;
+    CGRect currentBounds = self.panelContainer.bounds;
 
     if (gesture) {
-        // 1. 获取屏幕坐标系的平移，规避旋转视图内部坐标漂移
+        // 1. 获取屏幕坐标系的平移，确保拖拽感在所有旋转下保持一致
         CGPoint translation = [gesture translationInView:self];
         
         // 2. 将屏幕位移映射回面板局部坐标系
-        // 使用基础旋转的逆变换
         CGAffineTransform inv = CGAffineTransformInvert(self.baseRotationTransform);
         CGPoint localTranslation = CGPointApplyAffineTransform(translation, inv);
 
-        CGFloat rawW = f.size.width + localTranslation.x;
-        CGFloat rawH = f.size.height + localTranslation.y;
+        CGFloat rawW = currentBounds.size.width + localTranslation.x;
+        CGFloat rawH = currentBounds.size.height + localTranslation.y;
         
-        // 基础防线：严禁尺寸异常（防止彻底消失）
-        rawW = MAX(50.0, rawW);
-        rawH = MAX(50.0, rawH);
-        
-        // --- 动态计算安全边界限制 ---
+        // --- 核心修复：基于 Frame 的全方位边界钳位 (Frame Clamping) ---
         CGRect bounds = self.bounds;
         UIEdgeInsets safe = self.safeAreaInsets;
-        CGPoint center = self.panelContainer.center;
         CGFloat breath = kChevronLayoutConstants.safeAreaBreath;
+        UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+        BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
         
-        // 计算在当前位置下，root 坐标系（屏幕）允许的最大投影尺寸
-        // 确保左右/上下均不越界
-        CGFloat screenMaxW = (MIN(center.x - (safe.left + breath), bounds.size.width - (safe.right + breath) - center.x)) * 2.0;
-        CGFloat screenMaxH = (MIN(center.y - (safe.top + breath), bounds.size.height - (safe.bottom + breath) - center.y)) * 2.0;
-        
-        // 防止计算出负值
-        screenMaxW = MAX(100.0, screenMaxW);
-        screenMaxH = MAX(100.0, screenMaxH);
+        // 定义屏幕内的绝对安全矩形
+        CGRect safeFrame = CGRectMake(safe.left + breath, 
+                                      safe.top + breath, 
+                                      bounds.size.width - safe.left - safe.right - 2*breath, 
+                                      bounds.size.height - safe.top - safe.bottom - 2*breath);
 
-        // --- 果冻过冲与安全钳位逻辑 ---
-        CGFloat minW = 175.0, minH = 380.0;
-        CGFloat newWidth = rawW, newHeight = rawH;
+        // --- 动态自适应最小值 ---
+        // 竖屏维持 2x2 (380pt), 横屏允许 2x1 (270pt)
+        CGFloat minW = 175.0;
+        CGFloat minH = isLandscape ? 270.0 : 380.0;
         
-        // A. 最小值限制（带果冻过冲）
+        CGFloat targetW = MAX(50.0, rawW); // 绝对底线防止消失
+        CGFloat targetH = MAX(50.0, rawH);
+
+        // --- 最大值限制逻辑：确保旋转后的投影框完全在安全矩形内 ---
+        // 模拟计算新尺寸投影后的 Frame
+        CGRect testLocalBounds = CGRectMake(0, 0, targetW, targetH);
+        CGRect testRectInRoot = CGRectApplyAffineTransform(testLocalBounds, self.baseRotationTransform);
+        // 加上当前中心点位移
+        testRectInRoot.origin.x += (self.panelContainer.center.x - testRectInRoot.size.width/2.0);
+        testRectInRoot.origin.y += (self.panelContainer.center.y - testRectInRoot.size.height/2.0);
+
+        // 如果投影框超出了安全区域，则按比例缩小尺寸直到刚好卡在边界
+        if (testRectInRoot.origin.x < safeFrame.origin.x) {
+            CGFloat overlap = safeFrame.origin.x - testRectInRoot.origin.x;
+            targetW -= (overlap * 2.0);
+        }
+        if (CGRectGetMaxX(testRectInRoot) > CGRectGetMaxX(safeFrame)) {
+            CGFloat overlap = CGRectGetMaxX(testRectInRoot) - CGRectGetMaxX(safeFrame);
+            targetW -= (overlap * 2.0);
+        }
+        if (testRectInRoot.origin.y < safeFrame.origin.y) {
+            CGFloat overlap = safeFrame.origin.y - testRectInRoot.origin.y;
+            targetH -= (overlap * 2.0);
+        }
+        if (CGRectGetMaxY(testRectInRoot) > CGRectGetMaxY(safeFrame)) {
+            CGFloat overlap = CGRectGetMaxY(testRectInRoot) - CGRectGetMaxY(safeFrame);
+            targetH -= (overlap * 2.0);
+        }
+
+        // --- 最小值与果冻效果逻辑 ---
+        CGFloat finalW = targetW, finalH = targetH;
         if (rawW < minW) {
-            newWidth = minW - ((minW - rawW) * 0.3);
+            finalW = minW - ((minW - rawW) * 0.3);
+        } else {
+            finalW = MAX(minW, targetW);
         }
+
         if (rawH < minH) {
-            newHeight = minH - ((minH - rawH) * 0.3);
+            finalH = minH - ((minH - rawH) * 0.3);
+        } else {
+            finalH = MAX(minH, targetH);
         }
 
-        // B. 最大值限制：确保投影不超标
-        // 映射：计算应用新尺寸后在 root 中的尺寸
-        CGRect nextLocalBounds = CGRectMake(0, 0, newWidth, newHeight);
-        CGSize nextSizeInRoot = CGRectApplyAffineTransform(nextLocalBounds, self.baseRotationTransform).size;
+        // 极限反馈判定
+        BOOL atMinLimit = (rawW < minW || rawH < minH);
+        BOOL atMaxLimit = (targetW < rawW - 1.0 || targetH < rawH - 1.0);
         
-        if (nextSizeInRoot.width > screenMaxW) {
-            newWidth *= (screenMaxW / nextSizeInRoot.width);
-        }
-        if (nextSizeInRoot.height > screenMaxH) {
-            newHeight *= (screenMaxH / nextSizeInRoot.height);
-        }
-
-        // 极限反馈
-        BOOL atLimit = (rawW < minW || rawH < minH || nextSizeInRoot.width >= screenMaxW - 10 || nextSizeInRoot.height >= screenMaxH - 10);
-        if (atLimit && gesture.state == UIGestureRecognizerStateChanged) {
+        if ((atMinLimit || atMaxLimit) && gesture.state == UIGestureRecognizerStateChanged) {
             static BOOL lastAtLimit = NO;
             if (!lastAtLimit) [self.feedback impactOccurredWithIntensity:0.65];
             lastAtLimit = YES;
@@ -1334,26 +1353,29 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             [CATransaction commit];
         }
 
-        f.size.width = newWidth;
-        f.size.height = newHeight;
-        self.panelContainer.bounds = f;
-        
-        // 关键：基于 root 坐标系重置平移
+        self.panelContainer.bounds = CGRectMake(0, 0, finalW, finalH);
         [gesture setTranslation:CGPointZero inView:self];
     }
 
     self.appPanel.frame = self.panelContainer.bounds;
+    CGRect updatedBounds = self.panelContainer.bounds;
     
+    // --- UI 智能自适应逻辑 ---
+    // 如果高度太小（不足以舒适容纳分类栏），则隐藏分类栏并上移 CollectionView
+    BOOL hideCategories = (updatedBounds.size.height < 320.0);
+    self.categoryBar.alpha = hideCategories ? 0 : 1.0;
+    CGFloat collectionViewY = hideCategories ? 96.0 : 140.0;
+
     // 动态调整搜索框和 CollectionView
     UIView *searchContainer = self.searchField.superview;
-    searchContainer.frame = CGRectMake(15, 50, f.size.width - 30, 36);
+    searchContainer.frame = CGRectMake(15, 50, updatedBounds.size.width - 30, 36);
     self.searchField.frame = CGRectInset(searchContainer.bounds, 10, 0);
     self.searchBackground.frame = searchContainer.bounds;
     self.searchBackground.path = [UIBezierPath bezierPathWithRoundedRect:searchContainer.bounds cornerRadius:10].CGPath;
 
-    self.categoryBar.frame = CGRectMake(15, 96, f.size.width - 30, 40);
-    self.collectionView.frame = CGRectMake(0, 140, f.size.width, f.size.height - 140);
-    self.noResultsLabel.frame = CGRectMake(0, 150, f.size.width, 40);
+    self.categoryBar.frame = CGRectMake(15, 96, updatedBounds.size.width - 30, 40);
+    self.collectionView.frame = CGRectMake(0, collectionViewY, updatedBounds.size.width, updatedBounds.size.height - collectionViewY);
+    self.noResultsLabel.frame = CGRectMake(0, 150, updatedBounds.size.width, 40);
 
     [self updateResizingHandleFrame];
 
@@ -1373,9 +1395,13 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
     if (gesture && (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled)) {
         // --- 弹簧回弹 (Snapback) ---
-        CGFloat minW = 175.0, minH = 380.0;
+        UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+        BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
+
+        CGFloat minW = 175.0;
+        CGFloat minH = isLandscape ? 270.0 : 380.0;
         CGRect currentBounds = self.panelContainer.bounds;
-        
+
         if (currentBounds.size.width < minW || currentBounds.size.height < minH) {
             CGRect targetBounds = CGRectMake(0, 0, MAX(minW, currentBounds.size.width), MAX(minH, currentBounds.size.height));
             [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.6 initialSpringVelocity:0.8 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
@@ -1385,7 +1411,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         } else {
             self.isProcessing = NO;
         }
-    } else if (!gesture) {
+    }
+ else if (!gesture) {
         self.isProcessing = NO;
     }
 }
