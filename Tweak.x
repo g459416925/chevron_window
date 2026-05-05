@@ -170,11 +170,50 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, assign) CGPoint lastTriggerPoint;
 
 - (void)show;
+- (void)loadAppsAsync;
 - (NSString *)_role; 
 @end
 
 static NSCache *cv3IconCache = nil; 
 static CV3Window *sharedWindow = nil;
+
+@protocol LSApplicationWorkspaceObserverProtocol <NSObject>
+@optional
+- (void)applicationsDidInstall:(NSArray *)applications;
+- (void)applicationsDidUninstall:(NSArray *)applications;
+@end
+
+@interface CV3AppObserver : NSObject <LSApplicationWorkspaceObserverProtocol>
++ (instancetype)sharedObserver;
+@end
+
+@implementation CV3AppObserver
++ (instancetype)sharedObserver {
+    static CV3AppObserver *observer = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        observer = [[CV3AppObserver alloc] init];
+    });
+    return observer;
+}
+
+- (void)applicationsDidInstall:(NSArray *)applications {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (sharedWindow && sharedWindow.isPanelShowing) {
+            [sharedWindow loadAppsAsync];
+        }
+    });
+}
+
+- (void)applicationsDidUninstall:(NSArray *)applications {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (sharedWindow && sharedWindow.isPanelShowing) {
+            [sharedWindow loadAppsAsync];
+        }
+    });
+}
+@end
+
 // --- Layout Constants ---
 struct {
     CGFloat panelW;
@@ -291,6 +330,12 @@ struct {
         rootVC.view.backgroundColor = [UIColor clearColor];
         self.rootViewController = rootVC;
         [self setupUI];
+        
+        // 注册应用安装/卸载观察者
+        id ws = [NSClassFromString(@"LSApplicationWorkspace") defaultWorkspace];
+        if ([ws respondsToSelector:@selector(addObserver:)]) {
+            [ws performSelector:@selector(addObserver:) withObject:[CV3AppObserver sharedObserver]];
+        }
     }
     return self;
 }
@@ -915,28 +960,116 @@ struct {
 }
 - (void)stopLiquidMotion { [self.motionManager stopDeviceMotionUpdates]; }
 
+- (BOOL)shouldIncludeApp:(id)appProxy {
+    // 1. 必须是用户应用
+    if ([appProxy respondsToSelector:@selector(isUserApplication)] && ![appProxy performSelector:@selector(isUserApplication)]) {
+        return NO;
+    }
+    
+    // 2. 必须有图标
+    NSString *bundleId = [appProxy performSelector:@selector(bundleIdentifier)];
+    UIImage *icon = [UIImage _applicationIconImageForBundleIdentifier:bundleId format:10 scale:[UIScreen mainScreen].scale];
+    if (!icon) return NO;
+
+    // 3. 排除特定系统组件（通过 Bundle ID 前缀）
+    static NSArray *excludedPrefixes = nil;
+    if (!excludedPrefixes) {
+        excludedPrefixes = @[@"com.apple.webapp", @"com.apple.tips", @"com.apple.stocks"];
+    }
+    for (NSString *prefix in excludedPrefixes) {
+        if ([bundleId hasPrefix:prefix]) return NO;
+    }
+
+    return YES;
+}
+
 - (void)loadAppsAsync {
+    [cv3IconCache removeAllObjects]; // 确保每次加载时图标缓存是空的，避免显示旧图标
     dispatch_async(dispatch_get_global_queue(0,0), ^{
         NSMutableArray *temp = [NSMutableArray array];
-        id ws = [NSClassFromString(@"LSApplicationWorkspace") defaultWorkspace];
-        for (id p in [ws performSelector:@selector(allInstalledApplications)]) {
-            NSString *bundleId = [p performSelector:@selector(bundleIdentifier)];
-            NSString *name = [p performSelector:@selector(localizedName)];
-            
-            CV3AppInfo *info = [[CV3AppInfo alloc] init];
-            info.name = name;
-            info.bundleId = bundleId;
-            
-            UIImage *cachedIcon = [cv3IconCache objectForKey:bundleId];
-            if (cachedIcon) {
-                info.icon = cachedIcon;
-            } else {
-                info.icon = [UIImage _applicationIconImageForBundleIdentifier:bundleId format:10 scale:[UIScreen mainScreen].scale];
-                if (info.icon) [cv3IconCache setObject:info.icon forKey:bundleId];
+        
+        // 尝试从 SpringBoard 获取真正的桌面可见图标模型
+        id iconController = [NSClassFromString(@"SBIconController") sharedInstance];
+        id iconModel = nil;
+        if ([iconController respondsToSelector:@selector(iconManager)]) {
+            id iconManager = [iconController performSelector:@selector(iconManager)];
+            if ([iconManager respondsToSelector:@selector(model)]) {
+                iconModel = [iconManager performSelector:@selector(model)];
             }
-
-            if (info.name && info.bundleId) [temp addObject:info];
         }
+        if (!iconModel && [iconController respondsToSelector:@selector(model)]) {
+            iconModel = [iconController performSelector:@selector(model)];
+        }
+        
+        if (iconModel && [iconModel respondsToSelector:@selector(leafIcons)]) {
+            id leafIcons = [iconModel performSelector:@selector(leafIcons)];
+            CV3LogToFile(@"[Debug] 成功获取 SBIconModel，leafIcons 数量: %lu", (unsigned long)[leafIcons count]);
+            
+            for (id icon in leafIcons) {
+                // 过滤：必须是 ApplicationIcon
+                if ([icon respondsToSelector:@selector(isApplicationIcon)] && [icon performSelector:@selector(isApplicationIcon)]) {
+                    NSString *bundleId = nil;
+                    if ([icon respondsToSelector:@selector(applicationBundleID)]) {
+                        bundleId = [icon performSelector:@selector(applicationBundleID)];
+                    } else if ([icon respondsToSelector:@selector(leafIdentifier)]) {
+                        bundleId = [icon performSelector:@selector(leafIdentifier)];
+                    }
+                    
+                    NSString *name = nil;
+                    if ([icon respondsToSelector:@selector(displayNameForLocation:)]) {
+                        name = [icon performSelector:@selector(displayNameForLocation:) withObject:nil];
+                    }
+                    if (!name && [icon respondsToSelector:@selector(displayName)]) {
+                        name = [icon performSelector:@selector(displayName)];
+                    }
+                    
+                    if (!bundleId || !name) continue;
+                    
+                    CV3AppInfo *info = [[CV3AppInfo alloc] init];
+                    info.name = name;
+                    info.bundleId = bundleId;
+                    
+                    UIImage *cachedIcon = [cv3IconCache objectForKey:bundleId];
+                    if (cachedIcon) {
+                        info.icon = cachedIcon;
+                    } else {
+                        info.icon = [UIImage _applicationIconImageForBundleIdentifier:bundleId format:10 scale:[UIScreen mainScreen].scale];
+                        if (info.icon) [cv3IconCache setObject:info.icon forKey:bundleId];
+                    }
+
+                    if (info.icon) {
+                        [temp addObject:info];
+                    }
+                }
+            }
+        }
+        
+        // 如果上面获取失败，回退到原有的 Workspace 方法
+        if (temp.count == 0) {
+            CV3LogToFile(@"[Debug] 警告：无法获取 SBIconModel，回退至 LSApplicationWorkspace");
+            id ws = [NSClassFromString(@"LSApplicationWorkspace") defaultWorkspace];
+            for (id p in [ws performSelector:@selector(allInstalledApplications)]) {
+                if (![self shouldIncludeApp:p]) continue;
+                
+                NSString *bundleId = [p performSelector:@selector(bundleIdentifier)];
+                NSString *name = [p performSelector:@selector(localizedName)];
+                
+                CV3AppInfo *info = [[CV3AppInfo alloc] init];
+                info.name = name;
+                info.bundleId = bundleId;
+                
+                UIImage *cachedIcon = [cv3IconCache objectForKey:bundleId];
+                if (cachedIcon) {
+                    info.icon = cachedIcon;
+                } else {
+                    info.icon = [UIImage _applicationIconImageForBundleIdentifier:bundleId format:10 scale:[UIScreen mainScreen].scale];
+                    if (info.icon) [cv3IconCache setObject:info.icon forKey:bundleId];
+                }
+
+                if (info.name && info.bundleId && info.icon) [temp addObject:info];
+            }
+        }
+        
         dispatch_async(dispatch_get_main_queue(), ^{ self.apps = temp; [self.collectionView reloadData]; [self.collectionView layoutIfNeeded]; [self animateIconsStaggered]; });
     });
 }
