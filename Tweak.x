@@ -167,6 +167,7 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, assign) CGFloat lastHapticX;
 @property (nonatomic, strong) UIScreenEdgePanGestureRecognizer *systemEdgePan;
 @property (nonatomic, assign) UIInterfaceOrientation targetOrientation;
+@property (nonatomic, assign) CGPoint lastTriggerPoint;
 
 - (void)show;
 - (NSString *)_role; 
@@ -845,6 +846,7 @@ struct {
     if (self.isAnimating) return;
     self.isPanelShowing = visible; self.isAnimating = YES;
     if (visible) {
+        self.lastTriggerPoint = point;
         [self loadAppsAsync];
         [self updateTrafficLightsFocus:YES];
         self.dimmingView.userInteractionEnabled = YES; // 显示时开启拦截
@@ -877,7 +879,7 @@ struct {
         [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:1 options:0 animations:^{ 
             self.dimmingView.alpha = 0;
             self.panelContainer.alpha = 0; 
-            self.panelContainer.center = point; // 回退到触发点
+            self.panelContainer.center = self.lastTriggerPoint; // 回退到存储的触发点
             self.panelContainer.transform = CGAffineTransformScale(currentRotation, 0.01, 0.01);
         } completion:^(BOOL f){ self.isAnimating = NO; self.panelContainer.hidden = YES; }];
     }
