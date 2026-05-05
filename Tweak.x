@@ -440,6 +440,7 @@ struct {
     UIView *dispersion = [[UIView alloc] initWithFrame:self.appPanel.bounds];
     dispersion.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
     dispersion.layer.masksToBounds = YES;
+    dispersion.userInteractionEnabled = NO;
     [self.appPanel.contentView addSubview:dispersion];
     
     self.cyanLayer = [CALayer layer]; 
@@ -1272,6 +1273,23 @@ struct {
     CV3AppCell *cell = [c dequeueReusableCellWithReuseIdentifier:@"C" forIndexPath:i];
     [cell configureWithInfo:self.apps[[(NSIndexPath *)i item]]];
     return cell;
+}
+
+- (void)collectionView:(UICollectionView *)cv didSelectItemAtIndexPath:(NSIndexPath *)indexPath {
+    [self.feedback impactOccurred];
+    if (indexPath.item < self.apps.count) {
+        CV3AppInfo *info = self.apps[indexPath.item];
+        if (info.bundleId) {
+            // 立即开始收起动画，提供即时反馈
+            [self animateSpotlight:NO fromPoint:self.panelContainer.center];
+            
+            // 异步执行启动逻辑，防止阻塞主线程导致的“冻屏”
+            NSString *bid = [info.bundleId copy];
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                [[NSClassFromString(@"LSApplicationWorkspace") defaultWorkspace] openApplicationWithBundleID:bid];
+            });
+        }
+    }
 }
 
 - (BOOL)_canBecomeKeyWindow { return NO; }
