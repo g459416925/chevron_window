@@ -1270,72 +1270,55 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         CGFloat rawW = currentBounds.size.width + localTranslation.x;
         CGFloat rawH = currentBounds.size.height + localTranslation.y;
         
-        // --- 核心修复：基于 Frame 的全方位边界钳位 (Frame Clamping) ---
-        CGRect bounds = self.bounds;
+        // --- 核心修复：基于投影的全方位边界钳位 ---
+        CGRect screenBounds = self.bounds;
         UIEdgeInsets safe = self.safeAreaInsets;
         CGFloat breath = kChevronLayoutConstants.safeAreaBreath;
         UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
         BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
         
-        // 定义屏幕内的绝对安全矩形
+        // 定义屏幕内的绝对安全矩形边界
         CGRect safeFrame = CGRectMake(safe.left + breath, 
                                       safe.top + breath, 
-                                      bounds.size.width - safe.left - safe.right - 2*breath, 
-                                      bounds.size.height - safe.top - safe.bottom - 2*breath);
+                                      screenBounds.size.width - safe.left - safe.right - 2*breath, 
+                                      screenBounds.size.height - safe.top - safe.bottom - 2*breath);
 
-        // --- 动态自适应最小值 ---
-        // 竖屏维持 2x2 (380pt), 横屏允许 2x1 (270pt)
+        CGPoint center = self.panelContainer.center;
+        
+        // 计算屏幕安全区域内允许的最大半宽高 (相对于中心点)
+        CGFloat rootAllowedHalfW = MIN(center.x - safeFrame.origin.x, CGRectGetMaxX(safeFrame) - center.x);
+        CGFloat rootAllowedHalfH = MIN(center.y - safeFrame.origin.y, CGRectGetMaxY(safeFrame) - center.y);
+        
+        // 将屏幕限制映射回面板本地坐标
+        // 关键点：横屏下，屏幕宽度限制 (rootAllowedHalfW) 对应面板高度限制 (maxH)
+        CGFloat maxW, maxH;
+        if (isLandscape) {
+            maxW = rootAllowedHalfH * 2.0;
+            maxH = rootAllowedHalfW * 2.0;
+        } else {
+            maxW = rootAllowedHalfW * 2.0;
+            maxH = rootAllowedHalfH * 2.0;
+        }
+
+        // 尝试计算新尺寸（带最大值强制钳位）
+        CGFloat targetW = MIN(maxW, MAX(50.0, rawW));
+        CGFloat targetH = MIN(maxH, MAX(50.0, rawH));
+
+        // --- 最小值与果冻效果逻辑 ---
         CGFloat minW = 175.0;
         CGFloat minH = isLandscape ? 270.0 : 380.0;
         
-        CGFloat targetW = MAX(50.0, rawW); // 绝对底线防止消失
-        CGFloat targetH = MAX(50.0, rawH);
-
-        // --- 最大值限制逻辑：确保旋转后的投影框完全在安全矩形内 ---
-        // 模拟计算新尺寸投影后的 Frame
-        CGRect testLocalBounds = CGRectMake(0, 0, targetW, targetH);
-        CGRect testRectInRoot = CGRectApplyAffineTransform(testLocalBounds, self.baseRotationTransform);
-        // 加上当前中心点位移
-        testRectInRoot.origin.x += (self.panelContainer.center.x - testRectInRoot.size.width/2.0);
-        testRectInRoot.origin.y += (self.panelContainer.center.y - testRectInRoot.size.height/2.0);
-
-        // 如果投影框超出了安全区域，则按比例缩小尺寸直到刚好卡在边界
-        if (testRectInRoot.origin.x < safeFrame.origin.x) {
-            CGFloat overlap = safeFrame.origin.x - testRectInRoot.origin.x;
-            targetW -= (overlap * 2.0);
-        }
-        if (CGRectGetMaxX(testRectInRoot) > CGRectGetMaxX(safeFrame)) {
-            CGFloat overlap = CGRectGetMaxX(testRectInRoot) - CGRectGetMaxX(safeFrame);
-            targetW -= (overlap * 2.0);
-        }
-        if (testRectInRoot.origin.y < safeFrame.origin.y) {
-            CGFloat overlap = safeFrame.origin.y - testRectInRoot.origin.y;
-            targetH -= (overlap * 2.0);
-        }
-        if (CGRectGetMaxY(testRectInRoot) > CGRectGetMaxY(safeFrame)) {
-            CGFloat overlap = CGRectGetMaxY(testRectInRoot) - CGRectGetMaxY(safeFrame);
-            targetH -= (overlap * 2.0);
-        }
-
-        // --- 最小值与果冻效果逻辑 ---
         CGFloat finalW = targetW, finalH = targetH;
         if (rawW < minW) {
             finalW = minW - ((minW - rawW) * 0.3);
-        } else {
-            finalW = MAX(minW, targetW);
         }
-
         if (rawH < minH) {
             finalH = minH - ((minH - rawH) * 0.3);
-        } else {
-            finalH = MAX(minH, targetH);
         }
 
         // 极限反馈判定
-        BOOL atMinLimit = (rawW < minW || rawH < minH);
-        BOOL atMaxLimit = (targetW < rawW - 1.0 || targetH < rawH - 1.0);
-        
-        if ((atMinLimit || atMaxLimit) && gesture.state == UIGestureRecognizerStateChanged) {
+        BOOL atLimit = (rawW < minW || rawH < minH || rawW > maxW || rawH > maxH);
+        if (atLimit && gesture.state == UIGestureRecognizerStateChanged) {
             static BOOL lastAtLimit = NO;
             if (!lastAtLimit) [self.feedback impactOccurredWithIntensity:0.65];
             lastAtLimit = YES;
