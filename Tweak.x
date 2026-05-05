@@ -16,12 +16,10 @@
 @end
 
 @interface SpringBoard : UIApplication
-- (BOOL)_accessibilityLaunchAppWithBundleID:(id)arg1;
 @end
 
 @interface SBMainWorkspace : NSObject
 + (id)sharedInstance;
-- (UIInterfaceOrientation)activeInterfaceOrientation;
 @end
 
 @interface SBIconController : NSObject
@@ -348,10 +346,6 @@ struct {
     [self.searchField becomeFirstResponder];
 }
 
-- (void)handlePanelTap:(UITapGestureRecognizer *)gesture {
-    // 单击暂不处理
-}
-
 // 统一 App 启动逻辑
 - (void)launchApp:(CV3AppInfo *)info {
     if (self.launchDebounce) return;
@@ -586,7 +580,7 @@ struct {
     CGRect bounds = self.bounds;
 
     self.edgeTriggerView = [[UIView alloc] initWithFrame:CGRectZero];
-    self.edgeTriggerView.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.5]; // 调试可见
+    self.edgeTriggerView.backgroundColor = [UIColor clearColor];
     self.edgeTriggerView.userInteractionEnabled = NO;
     self.edgeTriggerView.autoresizingMask = UIViewAutoresizingNone;
     [self.rootViewController.view addSubview:self.edgeTriggerView];
@@ -624,7 +618,7 @@ struct {
     self.bezierBlur.layer.mask = self.bezierLayer; 
     
     self.panelContainer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kChevronLayoutConstants.panelW, kChevronLayoutConstants.panelH)];
-    self.panelContainer.backgroundColor = [[UIColor blueColor] colorWithAlphaComponent:0.0]; // 调试可见，现在设为透明
+    self.panelContainer.backgroundColor = [UIColor clearColor];
     self.panelContainer.hidden = YES;
     self.panelContainer.layer.shadowColor = [UIColor blackColor].CGColor;
     self.panelContainer.layer.shadowOffset = CGSizeMake(0, 0); // 居中阴影，四周扩散
@@ -637,17 +631,11 @@ struct {
     pan.delegate = self;
     [self.panelContainer addGestureRecognizer:pan];
 
-    // 单击手势：维持原有潜在功能（或留作扩展）
-    UITapGestureRecognizer *panTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handlePanelTap:)];
-    panTap.delegate = self;
-    [self.panelContainer addGestureRecognizer:panTap];
-
     // 添加双击手势用于快速激活搜索
     UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDoubleTap:)];
     doubleTap.numberOfTapsRequired = 2;
     doubleTap.delegate = self;
     [self.panelContainer addGestureRecognizer:doubleTap];
-    [panTap requireGestureRecognizerToFail:doubleTap]; // 确保单击与双击不冲突
 
     self.appPanel = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];    self.appPanel.frame = self.panelContainer.bounds;
     self.appPanel.backgroundColor = [[UIColor clearColor] colorWithAlphaComponent:0.0]; // 移除黄色测试色
@@ -707,7 +695,7 @@ struct {
         [dotBtn addSubview:visualDot];
         
         dotBtn.tag = i;
-        [dotBtn addTarget:self action:@selector(handleTrafficLight:) forControlEvents:UIControlEventTouchUpInside];
+        [dotBtn addTarget:self action:@selector(handleTrafficLight:) forControlEvents:UIControlEventTouchDown];
         [self.trafficCapsule addSubview:dotBtn];
         [dots addObject:visualDot]; // 存储视觉圆点用于颜色更新
     }
@@ -896,21 +884,26 @@ struct {
 }
 
 - (void)handleTrafficLight:(UIButton *)sender {
+    // 立即反馈
     [self.feedback impactOccurred];
+    [self updateTrafficLightsFocus:NO];
+
     if (sender.tag == 0 || sender.tag == 1) {
+        // 直接触发，不再通过 dispatch_after 延迟，以匹配点击背景的极速响应
         [self animateSpotlight:NO fromPoint:self.panelContainer.center];
     } else if (sender.tag == 2) {
-        [UIView animateWithDuration:0.6 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:1 options:0 animations:^{
+        // 最大化/重置逻辑也同步触发
+        [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.8 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
             CGSize maxSize = [self calculateMaxPanelSize];
             CGFloat targetW = MIN(kChevronLayoutConstants.panelW, maxSize.width);
             CGFloat targetH = MIN(kChevronLayoutConstants.panelH, maxSize.height);
+            targetH = MAX(targetH, kChevronLayoutConstants.minHeight);
             
             self.panelContainer.bounds = CGRectMake(0, 0, targetW, targetH);
             self.panelContainer.center = CGPointMake(self.bounds.size.width/2, self.bounds.size.height/2);
             [self handleResize:nil];
         } completion:nil];
     }
-
 }
 
 - (void)updateResizingHandleFrame {
@@ -934,7 +927,7 @@ struct {
                                    h - safe.top - safe.bottom - 2 * kChevronLayoutConstants.safeAreaBreath);
 
     // 1. 设置触发区域
-    self.edgeTriggerView.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.5]; // 调试可见
+    self.edgeTriggerView.backgroundColor = [UIColor clearColor];
     UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
     
     switch (orientation) {
@@ -959,13 +952,6 @@ struct {
 
     [self.rootViewController.view bringSubviewToFront:self.edgeTriggerView];
     
-    static NSTimeInterval lastLayoutTime = 0;
-    NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
-    NSTimeInterval interval = (lastLayoutTime > 0) ? (currentTime - lastLayoutTime) : 0;
-    lastLayoutTime = currentTime;
-
-    CV3LogToFile(@"[Debug] Window: %.1fx%.1f, EdgeFrame: %@, Source: layoutSubviews, Interval: %.3fs", w, h, NSStringFromCGRect(self.edgeTriggerView.frame), interval);
-
     // 2. 面板容器
     self.dimmingView.frame = bounds;
     self.panelContainer.backgroundColor = [UIColor clearColor];
@@ -1205,11 +1191,10 @@ struct {
     NSArray *tc = @[[UIColor colorWithRed:1.00 green:0.37 blue:0.33 alpha:1.0], [UIColor colorWithRed:1.00 green:0.75 blue:0.18 alpha:1.0], [UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:1.0]];
     UIColor *gray = [[UIColor whiteColor] colorWithAlphaComponent:0.2];
     
-    [UIView animateWithDuration:0.3 animations:^{
-        for (int i = 0; i < self.trafficDots.count; i++) {
-            self.trafficDots[i].backgroundColor = active ? tc[i] : gray;
-        }
-    }];
+    // 移除嵌套动画，改为直接设置颜色或使用极简动画，防止阻塞主线程交互
+    for (int i = 0; i < self.trafficDots.count; i++) {
+        self.trafficDots[i].backgroundColor = active ? tc[i] : gray;
+    }
 }
 
 - (void)animateSpotlight:(BOOL)visible fromPoint:(CGPoint)point {
@@ -1266,7 +1251,11 @@ struct {
             self.panelContainer.alpha = 1;
         } completion:^(BOOL f){ self.isAnimating = NO; [self startLiquidMotion]; }];
     } else {
-        [self.searchField resignFirstResponder]; // 关闭时自动收起键盘
+        // 关键修复：不要同步收起键盘，因为 resignFirstResponder 是重度同步操作，会阻塞动画开始
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.searchField resignFirstResponder];
+        });
+
         [self updateTrafficLightsFocus:NO];
         [self stopLiquidMotion];
         self.dimmingView.userInteractionEnabled = NO; // 隐藏时关闭拦截
@@ -1274,12 +1263,15 @@ struct {
         // 获取当前的旋转状态
         CGAffineTransform currentRotation = self.panelContainer.transform;
         
-        [UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{ 
+        [UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseIn animations:^{ 
             self.dimmingView.alpha = 0;
             self.panelContainer.alpha = 0; 
             self.panelContainer.center = self.lastTriggerPoint; // 回退到存储的触发点
-            self.panelContainer.transform = CGAffineTransformScale(currentRotation, 0.01, 0.01);
-        } completion:^(BOOL f){ self.isAnimating = NO; self.panelContainer.hidden = YES; }];
+            self.panelContainer.transform = CGAffineTransformScale(currentRotation, 0.05, 0.05);
+        } completion:^(BOOL f){ 
+            self.isAnimating = NO; 
+            self.panelContainer.hidden = YES; 
+        }];
     }
 }
 
@@ -1501,22 +1493,6 @@ struct {
 - (void)monitorState {
     @try {
         [self attachToCurrentActiveScene];
-        
-        NSMutableString *winMap = [NSMutableString stringWithFormat:@"\n    [Hierarchy Map]"];
-        
-        NSArray *windows = nil;
-        UIApplication *app = [UIApplication sharedApplication];
-        if ([app respondsToSelector:@selector(allWindowsIncludingInternalWindows:)]) {
-            windows = [app performSelector:@selector(allWindowsIncludingInternalWindows:) withObject:@YES];
-        } else {
-            windows = app.windows;
-        }
-        
-        for (UIWindow *win in windows) {
-            if (!win) continue;
-            [winMap appendFormat:@"\n    - [%@]: Lvl=%.1f, Alpha=%.2f, Hidden=%d, Scene=%p", 
-                NSStringFromClass([win class]), win.windowLevel, win.alpha, win.hidden, win.windowScene];
-        }
     } @catch (NSException *e) {
     }
 }
