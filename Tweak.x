@@ -469,6 +469,8 @@ struct {
 
     UICollectionViewFlowLayout *layout = [[UICollectionViewFlowLayout alloc] init];
     layout.itemSize = CGSizeMake(80, 100);
+    layout.minimumInteritemSpacing = 5.0;
+    layout.minimumLineSpacing = 10.0;
     self.collectionView = [[UICollectionView alloc] initWithFrame:CGRectMake(0, 45, kChevronLayoutConstants.panelW, kChevronLayoutConstants.panelH-45) collectionViewLayout:layout];
     self.collectionView.dataSource = self; self.collectionView.delegate = self;
     self.collectionView.backgroundColor = [UIColor clearColor];
