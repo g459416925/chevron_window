@@ -1260,33 +1260,41 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     CGRect f = self.panelContainer.bounds;
 
     if (gesture) {
-        CGPoint translation = [gesture translationInView:self.panelContainer];
-        CGRect bounds = self.bounds;
-        UIEdgeInsets safe = self.safeAreaInsets;
+        // 1. 获取屏幕坐标系的平移，规避旋转视图内部坐标漂移
+        CGPoint translation = [gesture translationInView:self];
+        
+        // 2. 将屏幕位移映射回面板局部坐标系
+        // 使用基础旋转的逆变换
+        CGAffineTransform inv = CGAffineTransformInvert(self.baseRotationTransform);
+        CGPoint localTranslation = CGPointApplyAffineTransform(translation, inv);
+
+        CGFloat rawW = f.size.width + localTranslation.x;
+        CGFloat rawH = f.size.height + localTranslation.y;
+        
+        // 基础防线：严禁尺寸异常（防止彻底消失）
+        rawW = MAX(50.0, rawW);
+        rawH = MAX(50.0, rawH);
         
         // --- 动态计算安全边界限制 ---
-        // 获取当前中心点
+        CGRect bounds = self.bounds;
+        UIEdgeInsets safe = self.safeAreaInsets;
         CGPoint center = self.panelContainer.center;
-        
-        // 计算在当前位置下，面板可扩张的最大尺寸，确保不超出 safeAreaInsets + 10pt 呼吸间距
         CGFloat breath = kChevronLayoutConstants.safeAreaBreath;
-        CGFloat maxW = (MIN(center.x - (safe.left + breath), bounds.size.width - (safe.right + breath) - center.x)) * 2.0;
-        CGFloat maxH = (MIN(center.y - (safe.top + breath), bounds.size.height - (safe.bottom + breath) - center.y)) * 2.0;
+        
+        // 计算在当前位置下，root 坐标系（屏幕）允许的最大投影尺寸
+        // 确保左右/上下均不越界
+        CGFloat screenMaxW = (MIN(center.x - (safe.left + breath), bounds.size.width - (safe.right + breath) - center.x)) * 2.0;
+        CGFloat screenMaxH = (MIN(center.y - (safe.top + breath), bounds.size.height - (safe.bottom + breath) - center.y)) * 2.0;
+        
+        // 防止计算出负值
+        screenMaxW = MAX(100.0, screenMaxW);
+        screenMaxH = MAX(100.0, screenMaxH);
 
-        // 获取当前旋转状态对尺寸的影响（如果是横屏旋转，maxW/maxH 需要对调逻辑，这里直接基于 root 坐标系计算更稳健）
-        CGSize sizeInRoot = CGRectApplyAffineTransform(CGRectMake(0,0,f.size.width, f.size.height), self.panelContainer.transform).size;
-        
-        CGFloat rawW = f.size.width + translation.x;
-        CGFloat rawH = f.size.height + translation.y;
-        
-        // --- 果冻过冲与安全钳位逻辑 (Jelly & Safe Clamping) ---
-        CGFloat minW = 280.0, minH = 350.0;
-        // 这里的 maxW/maxH 是基于旋转后在 root 中的限制，需要反向映射回 bounds
-        // 为了简化，我们直接限制 bounds 增长，使其变换后的 sizeInRoot 不超出安全区
-        
+        // --- 果冻过冲与安全钳位逻辑 ---
+        CGFloat minW = 175.0, minH = 380.0;
         CGFloat newWidth = rawW, newHeight = rawH;
         
-        // 1. 最小值限制（带果冻过冲）
+        // A. 最小值限制（带果冻过冲）
         if (rawW < minW) {
             newWidth = minW - ((minW - rawW) * 0.3);
         }
@@ -1294,16 +1302,20 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             newHeight = minH - ((minH - rawH) * 0.3);
         }
 
-        // 2. 最大值限制：严格钳位在安全区域内 (考虑旋转后的投影)
-        // 简单的估算：newSizeInRoot = newWidth * scale_effect
-        CGFloat currentScaleX = sizeInRoot.width / f.size.width;
-        CGFloat currentScaleY = sizeInRoot.height / f.size.height;
+        // B. 最大值限制：确保投影不超标
+        // 映射：计算应用新尺寸后在 root 中的尺寸
+        CGRect nextLocalBounds = CGRectMake(0, 0, newWidth, newHeight);
+        CGSize nextSizeInRoot = CGRectApplyAffineTransform(nextLocalBounds, self.baseRotationTransform).size;
         
-        if (newWidth * currentScaleX > maxW) newWidth = maxW / currentScaleX;
-        if (newHeight * currentScaleY > maxH) newHeight = maxH / currentScaleY;
+        if (nextSizeInRoot.width > screenMaxW) {
+            newWidth *= (screenMaxW / nextSizeInRoot.width);
+        }
+        if (nextSizeInRoot.height > screenMaxH) {
+            newHeight *= (screenMaxH / nextSizeInRoot.height);
+        }
 
         // 极限反馈
-        BOOL atLimit = (rawW < minW || rawH < minH || (newWidth * currentScaleX >= maxW - 2) || (newHeight * currentScaleY >= maxH - 2));
+        BOOL atLimit = (rawW < minW || rawH < minH || nextSizeInRoot.width >= screenMaxW - 10 || nextSizeInRoot.height >= screenMaxH - 10);
         if (atLimit && gesture.state == UIGestureRecognizerStateChanged) {
             static BOOL lastAtLimit = NO;
             if (!lastAtLimit) [self.feedback impactOccurredWithIntensity:0.65];
@@ -1325,7 +1337,9 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         f.size.width = newWidth;
         f.size.height = newHeight;
         self.panelContainer.bounds = f;
-        [gesture setTranslation:CGPointZero inView:self.panelContainer];
+        
+        // 关键：基于 root 坐标系重置平移
+        [gesture setTranslation:CGPointZero inView:self];
     }
 
     self.appPanel.frame = self.panelContainer.bounds;
@@ -1359,7 +1373,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
     if (gesture && (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled)) {
         // --- 弹簧回弹 (Snapback) ---
-        CGFloat minW = 280.0, minH = 350.0;
+        CGFloat minW = 175.0, minH = 380.0;
         CGRect currentBounds = self.panelContainer.bounds;
         
         if (currentBounds.size.width < minW || currentBounds.size.height < minH) {
