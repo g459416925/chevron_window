@@ -78,6 +78,7 @@
 @interface CV3AppCell : UICollectionViewCell
 @property (nonatomic, strong) UIImageView *iconView;
 @property (nonatomic, strong) UILabel *nameLabel;
+@property (nonatomic, strong) CAGradientLayer *iconHighlight;
 - (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText;
 - (void)startBreathing;
 @end
@@ -99,6 +100,18 @@
         self.iconView.layer.cornerRadius = 13;
         self.iconView.clipsToBounds = YES;
         [self.contentView addSubview:self.iconView];
+
+        // 增加图标表面的高光图层 (Specular Highlight)
+        self.iconHighlight = [CAGradientLayer layer];
+        self.iconHighlight.frame = self.iconView.bounds;
+        self.iconHighlight.colors = @[(id)[[UIColor whiteColor] colorWithAlphaComponent:0.0].CGColor,
+                                      (id)[[UIColor whiteColor] colorWithAlphaComponent:0.35].CGColor,
+                                      (id)[[UIColor whiteColor] colorWithAlphaComponent:0.0].CGColor];
+        self.iconHighlight.startPoint = CGPointMake(0, 0);
+        self.iconHighlight.endPoint = CGPointMake(1, 1);
+        self.iconHighlight.opacity = 0; // 初始隐藏，仅在波纹经过时显示
+        [self.iconView.layer addSublayer:self.iconHighlight];
+
         self.nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(4, iconSize + 14, frame.size.width - 8, 28)];
         self.nameLabel.textColor = [[UIColor whiteColor] colorWithAlphaComponent:0.9];
         self.nameLabel.font = [UIFont systemFontOfSize:10.0 weight:UIFontWeightMedium];
@@ -222,6 +235,7 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, strong) UIScreenEdgePanGestureRecognizer *systemEdgePan;
 @property (nonatomic, assign) UIInterfaceOrientation targetOrientation;
 @property (nonatomic, assign) CGPoint lastTriggerPoint;
+@property (nonatomic, strong) NSIndexPath *lastWaveHapticIndexPath;
 
 - (void)show;
 - (void)loadAppsAsync;
@@ -447,6 +461,23 @@ struct {
             container.transform = CGAffineTransformIdentity;
         }];
     }
+}
+
+- (void)collectionView:(UICollectionView *)cv didHighlightItemAtIndexPath:(NSIndexPath *)indexPath {
+    UICollectionViewCell *cell = [cv cellForItemAtIndexPath:indexPath];
+    [UIView animateWithDuration:0.2 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+        // 放大 1.1x 并向上漂浮 5pt，模拟 macOS Dock 的悬停/追踪感
+        cell.transform = CGAffineTransformMakeScale(1.1, 1.1);
+        cell.contentView.transform = CGAffineTransformMakeTranslation(0, -5);
+    } completion:nil];
+}
+
+- (void)collectionView:(UICollectionView *)cv didUnhighlightItemAtIndexPath:(NSIndexPath *)indexPath {
+    UICollectionViewCell *cell = [cv cellForItemAtIndexPath:indexPath];
+    [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.5 initialSpringVelocity:0.5 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+        cell.transform = CGAffineTransformIdentity;
+        cell.contentView.transform = CGAffineTransformIdentity;
+    } completion:nil];
 }
 
 - (void)collectionView:(UICollectionView *)cv didSelectItemAtIndexPath:(NSIndexPath *)indexPath {
@@ -771,9 +802,99 @@ struct {
     self.collectionView = [[UICollectionView alloc] initWithFrame:CGRectMake(0, 96, kChevronLayoutConstants.panelW, kChevronLayoutConstants.panelH-96) collectionViewLayout:layout];
     self.collectionView.dataSource = self; self.collectionView.delegate = self;
     self.collectionView.backgroundColor = [UIColor clearColor];
+    self.collectionView.delaysContentTouches = NO; // 关键：禁用触碰延迟实现即时反馈
     [self.collectionView registerClass:[CV3AppCell class] forCellWithReuseIdentifier:@"C"];
     [self.appPanel.contentView addSubview:self.collectionView];
 
+    // 增加实时波纹追踪手势 (Fish-eye Effect)
+    UILongPressGestureRecognizer *waveTracker = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleWaveGesture:)];
+    waveTracker.minimumPressDuration = 0; // 触碰即开始追踪
+    waveTracker.delegate = self;
+    waveTracker.cancelsTouchesInView = NO; // 不拦截点击事件
+    [self.collectionView addGestureRecognizer:waveTracker];
+}
+
+- (void)handleWaveGesture:(UILongPressGestureRecognizer *)gesture {
+    CGPoint location = [gesture locationInView:self.collectionView];
+    
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        self.lastWaveHapticIndexPath = nil;
+        [self.selectionFeedback prepare];
+    }
+
+    if (gesture.state == UIGestureRecognizerStateBegan || gesture.state == UIGestureRecognizerStateChanged) {
+        NSArray *cells = [self.collectionView visibleCells];
+        UICollectionViewCell *closestCell = nil;
+        CGFloat minDistance = CGFLOAT_MAX;
+
+        for (UICollectionViewCell *cell in cells) {
+            CGPoint cellCenter = cell.center;
+            CGFloat dx = location.x - cellCenter.x;
+            CGFloat dy = location.y - cellCenter.y;
+            CGFloat distance = sqrt(dx*dx + dy*dy);
+            
+            if (distance < minDistance) {
+                minDistance = distance;
+                closestCell = cell;
+            }
+
+            CGFloat radius = 150.0;
+            CGFloat maxScale = 1.25;
+            
+            if (distance < radius) {
+                CGFloat ratio = (radius - distance) / radius;
+                CGFloat smoothRatio = 0.5 * (1.0 + cos(M_PI * (1.0 - ratio))); 
+                CGFloat scale = 1.0 + (maxScale - 1.0) * smoothRatio;
+                
+                [UIView animateWithDuration:0.1 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+                    cell.transform = CGAffineTransformMakeScale(scale, scale);
+                    cell.contentView.transform = CGAffineTransformMakeTranslation(0, -10 * smoothRatio);
+                    
+                    // 动态更新图标表面的高光位移 (Parallax Specular)
+                    if ([cell isKindOfClass:[CV3AppCell class]]) {
+                        CV3AppCell *appCell = (CV3AppCell *)cell;
+                        [CATransaction begin];
+                        [CATransaction setDisableActions:YES];
+                        appCell.iconHighlight.opacity = smoothRatio * 0.8;
+                        // 根据手指偏移量计算高光倾角
+                        CGFloat offsetX = dx / radius;
+                        CGFloat offsetY = dy / radius;
+                        appCell.iconHighlight.startPoint = CGPointMake(0.5 - offsetX, 0.5 - offsetY);
+                        appCell.iconHighlight.endPoint = CGPointMake(1.0 - offsetX, 1.0 - offsetY);
+                        [CATransaction commit];
+                    }
+                } completion:nil];
+            } else {
+                [UIView animateWithDuration:0.2 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+                    cell.transform = CGAffineTransformIdentity;
+                    cell.contentView.transform = CGAffineTransformIdentity;
+                    if ([cell isKindOfClass:[CV3AppCell class]]) {
+                        ((CV3AppCell *)cell).iconHighlight.opacity = 0;
+                    }
+                } completion:nil];
+            }
+        }
+
+        // 触觉反馈逻辑：当手指进入一个新的图标核心区域 (40pt) 时触发
+        if (closestCell && minDistance < 40.0) {
+            NSIndexPath *indexPath = [self.collectionView indexPathForCell:closestCell];
+            if (indexPath && (!self.lastWaveHapticIndexPath || ![indexPath isEqual:self.lastWaveHapticIndexPath])) {
+                [self.selectionFeedback selectionChanged];
+                self.lastWaveHapticIndexPath = indexPath;
+            }
+        }
+    } else {
+        // 手势结束或取消，全部恢复原状
+        [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.6 initialSpringVelocity:0.5 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+            for (UICollectionViewCell *cell in [self.collectionView visibleCells]) {
+                cell.transform = CGAffineTransformIdentity;
+                cell.contentView.transform = CGAffineTransformIdentity;
+                if ([cell isKindOfClass:[CV3AppCell class]]) {
+                    ((CV3AppCell *)cell).iconHighlight.opacity = 0;
+                }
+            }
+        } completion:nil];
+    }
 }
 
 - (void)handlePanelDrag:(UIPanGestureRecognizer *)gesture {
