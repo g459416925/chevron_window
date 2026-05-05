@@ -82,6 +82,8 @@
 @property (nonatomic, strong) CAGradientLayer *iconHighlight;
 - (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText;
 - (void)startBreathing;
+- (void)startPulse; // 新增：开始高光脉冲
+- (void)stopPulse;  // 新增：停止高光脉冲
 @end
 
 @implementation CV3AppCell
@@ -152,6 +154,23 @@
     anim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
     anim.beginTime = CACurrentMediaTime() + (arc4random_uniform(100) / 25.0);
     [self.contentView.layer addAnimation:anim forKey:@"breathing"];
+}
+
+- (void)startPulse {
+    [self.iconHighlight removeAnimationForKey:@"pulse"];
+    CABasicAnimation *pulse = [CABasicAnimation animationWithKeyPath:@"opacity"];
+    pulse.fromValue = @(0.1);
+    pulse.toValue = @(0.6);
+    pulse.duration = 2.0 + (arc4random_uniform(10) / 10.0);
+    pulse.autoreverses = YES;
+    pulse.repeatCount = HUGE_VALF;
+    pulse.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [self.iconHighlight addAnimation:pulse forKey:@"pulse"];
+}
+
+- (void)stopPulse {
+    [self.iconHighlight removeAnimationForKey:@"pulse"];
+    self.iconHighlight.opacity = 0;
 }
 @end
 
@@ -231,6 +250,7 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, strong) NSArray<UIView *> *trafficDots;
 @property (nonatomic, strong) UITextField *searchField;
 @property (nonatomic, strong) NSMutableArray<CV3AppInfo *> *filteredApps;
+@property (nonatomic, strong) NSArray<CV3AppInfo *> *recentlyUsedApps; // 新增：存储最近使用的应用
 @property (nonatomic, strong) UILabel *noResultsLabel;
 @property (nonatomic, assign) CGFloat lastHapticX;
 @property (nonatomic, strong) UIScreenEdgePanGestureRecognizer *systemEdgePan;
@@ -434,29 +454,58 @@ struct {
 - (void)filterApps {
     NSString *text = [self.searchField.text lowercaseString];
     
-    // 如果没有搜索词且没有选分类，显示全部
     BOOL hasSearch = (text && text.length > 0);
-    BOOL hasCategory = (self.selectedCategory && ![self.selectedCategory isEqualToString:@"全部"]);
+    BOOL isRecentlyUsed = [self.selectedCategory isEqualToString:@"最近使用"];
+    BOOL hasCategory = (self.selectedCategory && ![self.selectedCategory isEqualToString:@"全部"] && !isRecentlyUsed);
 
     NSMutableArray *res = [NSMutableArray array];
-    for (CV3AppInfo *info in self.apps) {
-        BOOL matchSearch = YES;
-        if (hasSearch) {
-            matchSearch = ([info.name rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                           [info.bundleId rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                           (info.pinyinInitial && [info.pinyinInitial rangeOfString:text].location != NSNotFound));
+    
+    if (isRecentlyUsed) {
+        // 如果选中“最近使用”，直接使用预存的最近应用列表，并支持搜索过滤
+        for (CV3AppInfo *info in self.recentlyUsedApps) {
+            if (!hasSearch || ([info.name rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                               [info.bundleId rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                               (info.pinyinInitial && [info.pinyinInitial rangeOfString:text].location != NSNotFound))) {
+                [res addObject:info];
+            }
         }
-        
-        BOOL matchCategory = YES;
-        if (hasCategory) {
-            matchCategory = [info.category isEqualToString:self.selectedCategory];
-        }
-        
-        if (matchSearch && matchCategory) {
-            [res addObject:info];
+    } else {
+        for (CV3AppInfo *info in self.apps) {
+            BOOL matchSearch = YES;
+            if (hasSearch) {
+                matchSearch = ([info.name rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                               [info.bundleId rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                               (info.pinyinInitial && [info.pinyinInitial rangeOfString:text].location != NSNotFound));
+            }
+            
+            BOOL matchCategory = YES;
+            if (hasCategory) {
+                matchCategory = [info.category isEqualToString:self.selectedCategory];
+            }
+            
+            if (matchSearch && matchCategory) {
+                [res addObject:info];
+            }
         }
     }
+
+    // 液态流动过渡 (Liquid Flow Transition)
+    NSArray *oldList = [self.filteredApps copy];
     self.filteredApps = res;
+    
+    if (oldList && oldList.count > 0) {
+        // 使用 performBatchUpdates 实现流畅的移动、插入和删除动画
+        [self.collectionView performBatchUpdates:^{
+            // 简单的“全部重排”液态效果：
+            // 我们通过 reloadSection 来触发系统的布局平移动画，这是最稳定的“流动”感来源
+            [self.collectionView reloadSections:[NSIndexSet indexSetWithIndex:0]];
+        } completion:^(BOOL finished) {
+            if (finished) [self animateIconsStaggered];
+        }];
+    } else {
+        [self.collectionView reloadData];
+        [self animateIconsStaggered];
+    }
 
     if (!hasSearch) {
         // 智能辅助：输入为空时，在键盘上方显示 Top 5 常用应用
@@ -473,7 +522,6 @@ struct {
         [self.searchField reloadInputViews];
     }
     self.noResultsLabel.hidden = (self.filteredApps.count > 0);
-    [self.collectionView reloadData];
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField *)textField {
@@ -1051,7 +1099,10 @@ struct {
         return [c1 localizedCaseInsensitiveCompare:c2];
     }];
     
-    // 3. 始终确保“全部”排在第一位
+    // 3. 始终确保“全部”排在第一位，“最近使用”排在第二位
+    if (self.recentlyUsedApps.count > 0) {
+        [sortedCategories insertObject:@"最近使用" atIndex:0];
+    }
     [sortedCategories insertObject:@"全部" atIndex:0];
     
     CGFloat x = 0;
@@ -1059,7 +1110,12 @@ struct {
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
         
         // 显示分类名和数量，如 "社交 (12)"
-        NSString *displayTitle = [cat isEqualToString:@"全部"] ? cat : [NSString stringWithFormat:@"%@ (%ld)", cat, (long)[counts[cat] integerValue]];
+        NSString *displayTitle = cat;
+        if ([cat isEqualToString:@"最近使用"]) {
+            displayTitle = [NSString stringWithFormat:@"%@ (%ld)", cat, (long)self.recentlyUsedApps.count];
+        } else if (![cat isEqualToString:@"全部"]) {
+            displayTitle = [NSString stringWithFormat:@"%@ (%ld)", cat, (long)[counts[cat] integerValue]];
+        }
         [btn setTitle:displayTitle forState:UIControlStateNormal];
         
         btn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
@@ -1830,6 +1886,9 @@ struct {
             return [obj1.name localizedCaseInsensitiveCompare:obj2.name];
         }];
         
+        // 提取前 12 个最近使用的应用作为虚拟分类
+        self.recentlyUsedApps = [temp subarrayWithRange:NSMakeRange(0, MIN(12, temp.count))];
+        
         dispatch_async(dispatch_get_main_queue(), ^{ 
             self.apps = temp; 
             [self updateCategoryBar]; // 刷新分类栏
@@ -1947,7 +2006,24 @@ struct {
 - (NSInteger)collectionView:(id)c numberOfItemsInSection:(NSInteger)s { return self.filteredApps.count; }
 - (id)collectionView:(id)c cellForItemAtIndexPath:(id)i {
     CV3AppCell *cell = [c dequeueReusableCellWithReuseIdentifier:@"C" forIndexPath:i];
-    [cell configureWithInfo:self.filteredApps[[(NSIndexPath *)i item]] searchText:self.searchField.text];
+    CV3AppInfo *info = self.filteredApps[[(NSIndexPath *)i item]];
+    [cell configureWithInfo:info searchText:self.searchField.text];
+    
+    // 关键：为最近使用的应用增加“脉冲呼吸”光效
+    BOOL isRecent = NO;
+    for (CV3AppInfo *recent in self.recentlyUsedApps) {
+        if ([recent.bundleId isEqualToString:info.bundleId]) {
+            isRecent = YES;
+            break;
+        }
+    }
+    
+    if (isRecent) {
+        [cell startPulse];
+    } else {
+        [cell stopPulse];
+    }
+    
     return cell;
 }
 
