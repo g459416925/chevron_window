@@ -50,6 +50,7 @@
 @property (nonatomic, strong) UIImage *icon;
 @property (nonatomic, strong) id sbIcon; 
 @property (nonatomic, copy) NSString *pinyinInitial; // 存储名称的拼音首字母
+@property (nonatomic, copy) NSString *category; // 新增：应用分类名称
 - (void)generatePinyin;
 @end
 @implementation CV3AppInfo
@@ -236,14 +237,45 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, assign) UIInterfaceOrientation targetOrientation;
 @property (nonatomic, assign) CGPoint lastTriggerPoint;
 @property (nonatomic, strong) NSIndexPath *lastWaveHapticIndexPath;
+@property (nonatomic, strong) CAShapeLayer *searchBackground;
+@property (nonatomic, strong) UIScrollView *categoryBar; // 新增：分类导航栏
+@property (nonatomic, copy) NSString *selectedCategory; // 当前选中的分类
 
 - (void)show;
 - (void)loadAppsAsync;
+- (void)applyBackgroundTint:(UIColor *)color;
 - (NSString *)_role; 
 @end
 
 static NSCache *cv3IconCache = nil; 
 static CV3Window *sharedWindow = nil;
+
+// --- Helper: Color Extraction ---
+static UIColor *CV3AverageColorFromImage(UIImage *image) {
+    if (!image) return nil;
+    CGSize size = {1, 1};
+    UIGraphicsBeginImageContext(size);
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    CGContextSetInterpolationQuality(ctx, kCGInterpolationMedium);
+    [image drawInRect:(CGRect){.size = size} blendMode:kCGBlendModeCopy alpha:1];
+    uint8_t *data = (uint8_t *)CGBitmapContextGetData(ctx);
+    UIColor *color = [UIColor colorWithRed:data[0]/255.0 green:data[1]/255.0 blue:data[2]/255.0 alpha:1.0];
+    UIGraphicsEndImageContext();
+    return color;
+}
+
+static void CV3UpdateAdaptiveTint(NSString *bundleId) {
+    if (!sharedWindow || !bundleId) return;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        UIImage *icon = [UIImage _applicationIconImageForBundleIdentifier:bundleId format:10 scale:[UIScreen mainScreen].scale];
+        UIColor *avgColor = CV3AverageColorFromImage(icon);
+        if (avgColor) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [sharedWindow applyBackgroundTint:avgColor];
+            });
+        }
+    });
+}
 
 @protocol LSApplicationWorkspaceObserverProtocol <NSObject>
 @optional
@@ -355,6 +387,13 @@ struct {
 
 @implementation CV3Window
 
+- (void)applyBackgroundTint:(UIColor *)color {
+    [UIView animateWithDuration:0.8 animations:^{
+        // 使用极低的不透明度（6%）注入色彩，保持玻璃质感
+        self.dimmingView.backgroundColor = [color colorWithAlphaComponent:0.06];
+    }];
+}
+
 - (void)handleDoubleTap:(UITapGestureRecognizer *)gesture {
     [self.feedback impactOccurred];
     [self.searchField becomeFirstResponder];
@@ -394,9 +433,32 @@ struct {
 
 - (void)filterApps {
     NSString *text = [self.searchField.text lowercaseString];
-    if (!text || text.length == 0) {
-        self.filteredApps = [self.apps mutableCopy];
+    
+    // 如果没有搜索词且没有选分类，显示全部
+    BOOL hasSearch = (text && text.length > 0);
+    BOOL hasCategory = (self.selectedCategory && ![self.selectedCategory isEqualToString:@"全部"]);
+
+    NSMutableArray *res = [NSMutableArray array];
+    for (CV3AppInfo *info in self.apps) {
+        BOOL matchSearch = YES;
+        if (hasSearch) {
+            matchSearch = ([info.name rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                           [info.bundleId rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                           (info.pinyinInitial && [info.pinyinInitial rangeOfString:text].location != NSNotFound));
+        }
         
+        BOOL matchCategory = YES;
+        if (hasCategory) {
+            matchCategory = [info.category isEqualToString:self.selectedCategory];
+        }
+        
+        if (matchSearch && matchCategory) {
+            [res addObject:info];
+        }
+    }
+    self.filteredApps = res;
+
+    if (!hasSearch) {
         // 智能辅助：输入为空时，在键盘上方显示 Top 5 常用应用
         if (!self.searchField.inputAccessoryView && self.apps.count > 0) {
             NSArray *topApps = [self.apps subarrayWithRange:NSMakeRange(0, MIN(5, self.apps.count))];
@@ -409,16 +471,6 @@ struct {
     } else {
         self.searchField.inputAccessoryView = nil;
         [self.searchField reloadInputViews];
-
-        NSMutableArray *res = [NSMutableArray array];
-        for (CV3AppInfo *info in self.apps) {
-            if ([info.name rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                [info.bundleId rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                (info.pinyinInitial && [info.pinyinInitial rangeOfString:text].location != NSNotFound)) {
-                [res addObject:info];
-            }
-        }
-        self.filteredApps = res;
     }
     self.noResultsLabel.hidden = (self.filteredApps.count > 0);
     [self.collectionView reloadData];
@@ -439,14 +491,47 @@ struct {
 - (void)textFieldDidBeginEditing:(UITextField *)textField {
     if (textField == self.searchField) {
         UIView *container = textField.superview;
+        
+        // 1. 基础缩放与阴影动画
         [UIView animateWithDuration:0.5 delay:0 options:UIViewAnimationOptionAutoreverse | UIViewAnimationOptionRepeat | UIViewAnimationOptionAllowUserInteraction animations:^{
-            container.layer.shadowColor = [UIColor whiteColor].CGColor;
-            container.layer.shadowOffset = CGSizeZero;
-            container.layer.shadowOpacity = 0.4;
-            container.layer.shadowRadius = 8.0;
-            container.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.4].CGColor;
             container.transform = CGAffineTransformMakeScale(1.02, 1.02);
+            self.searchBackground.shadowColor = [UIColor whiteColor].CGColor;
+            self.searchBackground.shadowOffset = CGSizeZero;
+            self.searchBackground.shadowOpacity = 0.4;
+            self.searchBackground.shadowRadius = 8.0;
         } completion:nil];
+
+        // 2. 液态形变路径动画 (Deformation)
+        CGRect b = self.searchBackground.bounds;
+        UIBezierPath *liquidPath = [UIBezierPath bezierPath];
+        CGFloat offset = 4.0;
+        [liquidPath moveToPoint:CGPointMake(10, 0)];
+        [liquidPath addQuadCurveToPoint:CGPointMake(b.size.width-10, 0) controlPoint:CGPointMake(b.size.width/2, -offset)];
+        [liquidPath addQuadCurveToPoint:CGPointMake(b.size.width, 10) controlPoint:CGPointMake(b.size.width+offset, 0)];
+        [liquidPath addQuadCurveToPoint:CGPointMake(b.size.width, b.size.height-10) controlPoint:CGPointMake(b.size.width-offset, b.size.height/2)];
+        [liquidPath addQuadCurveToPoint:CGPointMake(b.size.width-10, b.size.height) controlPoint:CGPointMake(b.size.width, b.size.height+offset)];
+        [liquidPath addQuadCurveToPoint:CGPointMake(10, b.size.height) controlPoint:CGPointMake(b.size.width/2, b.size.height-offset)];
+        [liquidPath addQuadCurveToPoint:CGPointMake(0, b.size.height-10) controlPoint:CGPointMake(-offset, b.size.height)];
+        [liquidPath addQuadCurveToPoint:CGPointMake(0, 10) controlPoint:CGPointMake(offset, b.size.height/2)];
+        [liquidPath addQuadCurveToPoint:CGPointMake(10, 0) controlPoint:CGPointMake(0, -offset)];
+        [liquidPath closePath];
+
+        CABasicAnimation *pathAnim = [CABasicAnimation animationWithKeyPath:@"path"];
+        pathAnim.toValue = (id)liquidPath.CGPath;
+        pathAnim.duration = 0.4;
+        pathAnim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        pathAnim.fillMode = kCAFillModeForwards;
+        pathAnim.removedOnCompletion = NO;
+        [self.searchBackground addAnimation:pathAnim forKey:@"liquidPath"];
+
+        // 3. 边框颜色流转
+        CABasicAnimation *colorAnim = [CABasicAnimation animationWithKeyPath:@"strokeColor"];
+        colorAnim.fromValue = (id)self.searchBackground.strokeColor;
+        colorAnim.toValue = (id)[[UIColor cyanColor] colorWithAlphaComponent:0.6].CGColor;
+        colorAnim.duration = 1.5;
+        colorAnim.autoreverses = YES;
+        colorAnim.repeatCount = HUGE_VALF;
+        [self.searchBackground addAnimation:colorAnim forKey:@"colorFlow"];
     }
 }
 
@@ -454,11 +539,14 @@ struct {
     if (textField == self.searchField) {
         UIView *container = textField.superview;
         [container.layer removeAllAnimations];
+        [self.searchBackground removeAllAnimations];
+
         [UIView animateWithDuration:0.3 animations:^{
-            container.layer.shadowOpacity = 0;
-            container.layer.shadowRadius = 0;
-            container.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.1].CGColor;
             container.transform = CGAffineTransformIdentity;
+            self.searchBackground.shadowOpacity = 0;
+            self.searchBackground.shadowRadius = 0;
+            self.searchBackground.path = [UIBezierPath bezierPathWithRoundedRect:self.searchBackground.bounds cornerRadius:10].CGPath;
+            self.searchBackground.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.1].CGColor;
         }];
     }
 }
@@ -750,11 +838,17 @@ struct {
 
     // --- Search Bar Setup ---
     UIView *searchContainer = [[UIView alloc] initWithFrame:CGRectMake(15, 50, kChevronLayoutConstants.panelW - 30, 36)];
-    searchContainer.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.06];
-    searchContainer.layer.cornerRadius = 10;
-    searchContainer.layer.borderWidth = 0.4;
-    searchContainer.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.1].CGColor;
+    searchContainer.backgroundColor = [UIColor clearColor];
     [self.appPanel.contentView addSubview:searchContainer];
+
+    // 液态背景层
+    self.searchBackground = [CAShapeLayer layer];
+    self.searchBackground.frame = searchContainer.bounds;
+    self.searchBackground.path = [UIBezierPath bezierPathWithRoundedRect:searchContainer.bounds cornerRadius:10].CGPath;
+    self.searchBackground.fillColor = [[UIColor whiteColor] colorWithAlphaComponent:0.06].CGColor;
+    self.searchBackground.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.1].CGColor;
+    self.searchBackground.lineWidth = 0.4;
+    [searchContainer.layer addSublayer:self.searchBackground];
     
     self.searchField = [[UITextField alloc] initWithFrame:CGRectInset(searchContainer.bounds, 10, 0)];
     self.searchField.placeholder = @"搜索应用...";
@@ -778,6 +872,12 @@ struct {
     self.noResultsLabel.hidden = YES;
     [self.appPanel.contentView addSubview:self.noResultsLabel];
 
+    self.selectedCategory = @"全部";
+    self.categoryBar = [[UIScrollView alloc] initWithFrame:CGRectMake(15, 96, kChevronLayoutConstants.panelW - 30, 40)];
+    self.categoryBar.showsHorizontalScrollIndicator = NO;
+    self.categoryBar.backgroundColor = [UIColor clearColor];
+    [self.appPanel.contentView addSubview:self.categoryBar];
+
     self.resizingHandle = [[UIView alloc] initWithFrame:CGRectMake(kChevronLayoutConstants.panelW - 40, kChevronLayoutConstants.panelH - 40, 40, 40)];
     self.resizingHandle.backgroundColor = [UIColor clearColor];
     [self.panelContainer addSubview:self.resizingHandle];
@@ -798,8 +898,8 @@ struct {
     layout.itemSize = CGSizeMake(80, 100);
     layout.minimumInteritemSpacing = 5.0;
     layout.minimumLineSpacing = 10.0;
-    // 调整 CollectionView 的 y 起点以避开搜索框 (从 45 移至 96)
-    self.collectionView = [[UICollectionView alloc] initWithFrame:CGRectMake(0, 96, kChevronLayoutConstants.panelW, kChevronLayoutConstants.panelH-96) collectionViewLayout:layout];
+    // 调整 CollectionView 的 y 起点以避开搜索框和分类栏 (从 96 移至 140)
+    self.collectionView = [[UICollectionView alloc] initWithFrame:CGRectMake(0, 140, kChevronLayoutConstants.panelW, kChevronLayoutConstants.panelH-140) collectionViewLayout:layout];
     self.collectionView.dataSource = self; self.collectionView.delegate = self;
     self.collectionView.backgroundColor = [UIColor clearColor];
     self.collectionView.delaysContentTouches = NO; // 关键：禁用触碰延迟实现即时反馈
@@ -897,6 +997,90 @@ struct {
             }
         } completion:nil];
     }
+}
+
+- (void)handleCategoryTap:(UIButton *)sender {
+    [self.feedback impactOccurred];
+    
+    // 从标题中解析出原始分类名，如从 "社交 (12)" 解析出 "社交"
+    NSString *fullTitle = sender.titleLabel.text;
+    NSString *categoryName = fullTitle;
+    if ([fullTitle containsString:@" ("]) {
+        categoryName = [fullTitle componentsSeparatedByString:@" ("][0];
+    }
+    self.selectedCategory = categoryName;
+    
+    // 更新按钮状态
+    for (UIView *sub in self.categoryBar.subviews) {
+        if ([sub isKindOfClass:[UIButton class]]) {
+            UIButton *btn = (UIButton *)sub;
+            NSString *btnFullTitle = btn.titleLabel.text;
+            NSString *btnCatName = btnFullTitle;
+            if ([btnFullTitle containsString:@" ("]) {
+                btnCatName = [btnFullTitle componentsSeparatedByString:@" ("][0];
+            }
+            
+            BOOL isSelected = [btnCatName isEqualToString:self.selectedCategory];
+            btn.backgroundColor = isSelected ? [[UIColor whiteColor] colorWithAlphaComponent:0.2] : [[UIColor whiteColor] colorWithAlphaComponent:0.06];
+            btn.layer.borderColor = isSelected ? [[UIColor cyanColor] colorWithAlphaComponent:0.5].CGColor : [[UIColor whiteColor] colorWithAlphaComponent:0.1].CGColor;
+        }
+    }
+    
+    [self filterApps];
+}
+
+- (void)updateCategoryBar {
+    for (UIView *sub in self.categoryBar.subviews) [sub removeFromSuperview];
+    
+    // 1. 统计每个分类下的应用数量
+    NSMutableDictionary *counts = [NSMutableDictionary dictionary];
+    for (CV3AppInfo *info in self.apps) {
+        if (info.category) {
+            counts[info.category] = @([counts[info.category] integerValue] + 1);
+        }
+    }
+    
+    // 2. 获取所有分类名称并按应用数量从高到低排序
+    NSMutableArray *sortedCategories = [[counts allKeys] mutableCopy];
+    [sortedCategories sortUsingComparator:^NSComparisonResult(NSString *c1, NSString *c2) {
+        NSInteger count1 = [counts[c1] integerValue];
+        NSInteger count2 = [counts[c2] integerValue];
+        if (count1 != count2) {
+            return count1 > count2 ? NSOrderedAscending : NSOrderedDescending;
+        }
+        return [c1 localizedCaseInsensitiveCompare:c2];
+    }];
+    
+    // 3. 始终确保“全部”排在第一位
+    [sortedCategories insertObject:@"全部" atIndex:0];
+    
+    CGFloat x = 0;
+    for (NSString *cat in sortedCategories) {
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+        
+        // 显示分类名和数量，如 "社交 (12)"
+        NSString *displayTitle = [cat isEqualToString:@"全部"] ? cat : [NSString stringWithFormat:@"%@ (%ld)", cat, (long)[counts[cat] integerValue]];
+        [btn setTitle:displayTitle forState:UIControlStateNormal];
+        
+        btn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+        [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        
+        CGSize size = [displayTitle sizeWithAttributes:@{NSFontAttributeName: btn.titleLabel.font}];
+        CGFloat w = size.width + 24;
+        btn.frame = CGRectMake(x, 5, w, 28);
+        btn.layer.cornerRadius = 14;
+        
+        BOOL isSelected = [cat isEqualToString:self.selectedCategory];
+        btn.backgroundColor = isSelected ? [[UIColor whiteColor] colorWithAlphaComponent:0.2] : [[UIColor whiteColor] colorWithAlphaComponent:0.06];
+        btn.layer.borderWidth = 0.5;
+        btn.layer.borderColor = isSelected ? [[UIColor cyanColor] colorWithAlphaComponent:0.5].CGColor : [[UIColor whiteColor] colorWithAlphaComponent:0.1].CGColor;
+        
+        // 绑定原始分类名到 tag 或关联对象（这里我们直接在点击回调里解析标题）
+        [btn addTarget:self action:@selector(handleCategoryTap:) forControlEvents:UIControlEventTouchUpInside];
+        [self.categoryBar addSubview:btn];
+        x += w + 8;
+    }
+    self.categoryBar.contentSize = CGSizeMake(x, 40);
 }
 
 - (void)handlePanelDrag:(UIPanGestureRecognizer *)gesture {
@@ -1006,7 +1190,11 @@ struct {
     UIView *searchContainer = self.searchField.superview;
     searchContainer.frame = CGRectMake(15, 50, f.size.width - 30, 36);
     self.searchField.frame = CGRectInset(searchContainer.bounds, 10, 0);
-    self.collectionView.frame = CGRectMake(0, 96, f.size.width, f.size.height - 96);
+    self.searchBackground.frame = searchContainer.bounds;
+    self.searchBackground.path = [UIBezierPath bezierPathWithRoundedRect:searchContainer.bounds cornerRadius:10].CGPath;
+
+    self.categoryBar.frame = CGRectMake(15, 96, f.size.width - 30, 40);
+    self.collectionView.frame = CGRectMake(0, 140, f.size.width, f.size.height - 140);
     self.noResultsLabel.frame = CGRectMake(0, 150, f.size.width, 40);
 
     [self updateResizingHandleFrame];
@@ -1140,7 +1328,11 @@ struct {
             UIView *searchContainer = self.searchField.superview;
             searchContainer.frame = CGRectMake(15, 50, targetW - 30, 36);
             self.searchField.frame = CGRectInset(searchContainer.bounds, 10, 0);
-            self.collectionView.frame = CGRectMake(0, 96, targetW, targetH - 96);
+            self.searchBackground.frame = searchContainer.bounds;
+            self.searchBackground.path = [UIBezierPath bezierPathWithRoundedRect:searchContainer.bounds cornerRadius:10].CGPath;
+
+            self.categoryBar.frame = CGRectMake(15, 96, targetW - 30, 40);
+            self.collectionView.frame = CGRectMake(0, 140, targetW, targetH - 140);
             self.noResultsLabel.frame = CGRectMake(0, 150, targetW, 40);
             
             self.trafficCapsule.frame = CGRectMake(16, 14, kChevronLayoutConstants.trafficCapsuleW, kChevronLayoutConstants.trafficCapsuleH);
@@ -1382,7 +1574,11 @@ struct {
         UIView *searchContainer = self.searchField.superview;
         searchContainer.frame = CGRectMake(15, 50, targetW - 30, 36);
         self.searchField.frame = CGRectInset(searchContainer.bounds, 10, 0);
-        self.collectionView.frame = CGRectMake(0, 96, targetW, targetH - 96);
+        self.searchBackground.frame = searchContainer.bounds;
+        self.searchBackground.path = [UIBezierPath bezierPathWithRoundedRect:searchContainer.bounds cornerRadius:10].CGPath;
+
+        self.categoryBar.frame = CGRectMake(15, 96, targetW - 30, 40);
+        self.collectionView.frame = CGRectMake(0, 140, targetW, targetH - 140);
         self.noResultsLabel.frame = CGRectMake(0, 150, targetW, 40);
         
         self.trafficCapsule.frame = CGRectMake(16, 14, kChevronLayoutConstants.trafficCapsuleW, kChevronLayoutConstants.trafficCapsuleH);
@@ -1443,6 +1639,7 @@ struct {
         if (!m) return;
         [CATransaction begin]; [CATransaction setDisableActions:YES];
         
+        // 1. 图标高光与色散层现有的视差逻辑
         self.specularHighlight.startPoint = CGPointMake(0.5 - m.attitude.roll*1.5, 0.5 - m.attitude.pitch*1.5);
         self.specularHighlight.endPoint = CGPointMake(1.5 - m.attitude.roll*1.5, 1.5 - m.attitude.pitch*1.5);
         
@@ -1451,6 +1648,25 @@ struct {
         self.cyanLayer.transform = CATransform3DMakeTranslation(-dx, -dy, 0);
         self.magentaLayer.transform = CATransform3DMakeTranslation(dx, dy, 0);
         
+        // 2. 新增：整个面板容器的 3D 悬浮视差 (Parallax Panel)
+        // 计算最大 +/- 8pt 的位移
+        CGFloat panelDX = m.attitude.roll * 8.0;
+        CGFloat panelDY = m.attitude.pitch * 8.0;
+        
+        // 获取当前的基础变换（旋转）
+        UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+        CGAffineTransform baseRotation = CGAffineTransformIdentity;
+        switch (orientation) {
+            case UIInterfaceOrientationLandscapeLeft: baseRotation = CGAffineTransformMakeRotation(-M_PI_2); break;
+            case UIInterfaceOrientationLandscapeRight: baseRotation = CGAffineTransformMakeRotation(M_PI_2); break;
+            case UIInterfaceOrientationPortraitUpsideDown: baseRotation = CGAffineTransformMakeRotation(M_PI); break;
+            default: baseRotation = CGAffineTransformIdentity; break;
+        }
+        
+        // 叠加视差位移
+        CGAffineTransform parallaxTransform = CGAffineTransformMakeTranslation(panelDX, panelDY);
+        self.panelContainer.transform = CGAffineTransformConcat(baseRotation, parallaxTransform);
+
         [CATransaction commit];
     }];
 }
@@ -1527,6 +1743,24 @@ struct {
                     info.sbIcon = icon; // 存储 SBIcon 引用
                     [info generatePinyin]; // 预生成拼音首字母
                     
+                    // 提取应用分类 (Genre)
+                    @try {
+                        Class LSAP = NSClassFromString(@"LSApplicationProxy");
+                        id proxy = nil;
+                        if ([LSAP respondsToSelector:@selector(applicationProxyForIdentifier:)]) {
+                            proxy = [LSAP performSelector:@selector(applicationProxyForIdentifier:) withObject:bundleId];
+                        } else if ([LSAP respondsToSelector:@selector(applicationProxyForBundleIdentifier:)]) {
+                            proxy = [LSAP performSelector:@selector(applicationProxyForBundleIdentifier:) withObject:bundleId];
+                        }
+                        
+                        if (proxy) {
+                            if ([proxy respondsToSelector:@selector(genre)]) {
+                                info.category = [proxy performSelector:@selector(genre)];
+                            }
+                        }
+                    } @catch (NSException *e) {}
+                    if (!info.category) info.category = @"其他";
+                    
                     UIImage *cachedIcon = [cv3IconCache objectForKey:bundleId];
                     if (cachedIcon) {
                         info.icon = cachedIcon;
@@ -1598,6 +1832,7 @@ struct {
         
         dispatch_async(dispatch_get_main_queue(), ^{ 
             self.apps = temp; 
+            [self updateCategoryBar]; // 刷新分类栏
             [self filterApps]; // 初始化过滤列表
             [self animateIconsStaggered]; 
         });
@@ -1824,7 +2059,21 @@ static NSTimeInterval lastLogTime = 0;
 %hook SBMainWorkspace
 - (void)workspace:(id)arg1 didExecuteTransitionRequest:(id)arg2 {
     %orig;
-    if (sharedWindow) [sharedWindow attachToCurrentActiveScene];
+    if (sharedWindow) {
+        [sharedWindow attachToCurrentActiveScene];
+        
+        // 尝试获取当前活跃应用的 Bundle ID 以进行取色
+        @try {
+            id activeItem = nil;
+            if ([self respondsToSelector:@selector(activeDisplayItem)]) {
+                activeItem = [self performSelector:@selector(activeDisplayItem)];
+            }
+            if (activeItem && [activeItem respondsToSelector:@selector(bundleIdentifier)]) {
+                NSString *bid = [activeItem performSelector:@selector(bundleIdentifier)];
+                CV3UpdateAdaptiveTint(bid);
+            }
+        } @catch (NSException *e) {}
+    }
 }
 %end
 
