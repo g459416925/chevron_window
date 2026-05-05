@@ -244,6 +244,24 @@ struct {
 
 @implementation CV3Window
 
+- (CGSize)calculateMaxPanelSize {
+    UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+    BOOL isLandscape = (orientation == UIInterfaceOrientationLandscapeLeft || orientation == UIInterfaceOrientationLandscapeRight);
+    UIEdgeInsets safe = self.safeAreaInsets;
+    CGFloat w = self.bounds.size.width;
+    CGFloat h = self.bounds.size.height;
+    CGFloat maxW, maxH;
+    
+    if (isLandscape) {
+        maxW = h - (safe.top + safe.bottom + kChevronLayoutConstants.safeAreaBreath * 2);
+        maxH = w - (safe.left + safe.right + kChevronLayoutConstants.safeAreaBreath * 2);
+    } else {
+        maxW = w - (safe.left + safe.right + kChevronLayoutConstants.safeAreaBreath * 2);
+        maxH = h - (safe.top + safe.bottom + kChevronLayoutConstants.safeAreaBreath * 2);
+    }
+    return CGSizeMake(maxW, maxH);
+}
+
 - (NSString *)_role {
     return @"SBWindowRoleFloatingCanHostLaunchpad"; 
 }
@@ -554,54 +572,57 @@ struct {
 - (void)handleResize:(UIPanGestureRecognizer *)gesture {
     // 增加 resize 锁
     self.isProcessing = YES; 
-    
+
     static CGRect lastValidBounds;
-    if (gesture.state == UIGestureRecognizerStateBegan) {
+    if (gesture && gesture.state == UIGestureRecognizerStateBegan) {
         lastValidBounds = self.panelContainer.bounds;
     }
-    
-    CGPoint translation = [gesture translationInView:self.panelContainer];
+
     CGRect f = self.panelContainer.bounds;
-    
-    CGFloat newWidth = MAX(280, f.size.width + translation.x);
-    CGFloat newHeight = MAX(350, f.size.height + translation.y);
-    
-    // 计算新的边界框在根视图中的尺寸和位置
-    CGRect newBounds = CGRectMake(0, 0, newWidth, newHeight);
-    CGSize newSizeInRoot = CGRectApplyAffineTransform(newBounds, self.panelContainer.transform).size;
-    CGRect newFrameInRoot = CGRectMake(self.panelContainer.center.x - newSizeInRoot.width / 2.0,
-                                       self.panelContainer.center.y - newSizeInRoot.height / 2.0,
-                                       newSizeInRoot.width,
-                                       newSizeInRoot.height);
-    
-    CGFloat screenW = self.bounds.size.width;
-    CGFloat screenH = self.bounds.size.height;
-    
-    // 检查是否越界
-    if (CGRectGetMaxX(newFrameInRoot) > screenW || CGRectGetMaxY(newFrameInRoot) > screenH || CGRectGetMinX(newFrameInRoot) < 0 || CGRectGetMinY(newFrameInRoot) < 0) {
-        // 若越界，强制回退至上一次合法尺寸
-        newWidth = lastValidBounds.size.width;
-        newHeight = lastValidBounds.size.height;
-    } else {
-        // 更新缓存
-        lastValidBounds = CGRectMake(0, 0, newWidth, newHeight);
+
+    if (gesture) {
+        CGPoint translation = [gesture translationInView:self.panelContainer];
+        CGFloat newWidth = MAX(280, f.size.width + translation.x);
+        CGFloat newHeight = MAX(350, f.size.height + translation.y);
+
+        // 计算新的边界框在根视图中的尺寸和位置
+        CGRect newBounds = CGRectMake(0, 0, newWidth, newHeight);
+        CGSize newSizeInRoot = CGRectApplyAffineTransform(newBounds, self.panelContainer.transform).size;
+        CGRect newFrameInRoot = CGRectMake(self.panelContainer.center.x - newSizeInRoot.width / 2.0,
+                                           self.panelContainer.center.y - newSizeInRoot.height / 2.0,
+                                           newSizeInRoot.width,
+                                           newSizeInRoot.height);
+
+        CGFloat screenW = self.bounds.size.width;
+        CGFloat screenH = self.bounds.size.height;
+
+        // 检查是否越界
+        if (CGRectGetMaxX(newFrameInRoot) > screenW || CGRectGetMaxY(newFrameInRoot) > screenH || CGRectGetMinX(newFrameInRoot) < 0 || CGRectGetMinY(newFrameInRoot) < 0) {
+            // 若越界，强制回退至上一次合法尺寸
+            newWidth = lastValidBounds.size.width;
+            newHeight = lastValidBounds.size.height;
+        } else {
+            // 更新缓存
+            lastValidBounds = CGRectMake(0, 0, newWidth, newHeight);
+        }
+
+        f.size.width = newWidth;
+        f.size.height = newHeight;
+        self.panelContainer.bounds = f;
+        [gesture setTranslation:CGPointZero inView:self.panelContainer];
     }
-    
-    f.size.width = newWidth;
-    f.size.height = newHeight;
-    self.panelContainer.bounds = f;
-    [gesture setTranslation:CGPointZero inView:self.panelContainer];
-    
+
     self.appPanel.frame = self.panelContainer.bounds;
     self.collectionView.frame = CGRectMake(0, 45, f.size.width, f.size.height - 45);
     [self updateResizingHandleFrame];
     self.specularHighlight.frame = self.appPanel.bounds;
     self.cyanLayer.frame = CGRectInset(self.appPanel.bounds, -0.3, -0.3);
     self.magentaLayer.frame = CGRectInset(self.appPanel.bounds, 0.3, 0.3);
-    
     [self.collectionView.collectionViewLayout invalidateLayout];
-    
-    if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+
+    if (gesture && (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled)) {
+        self.isProcessing = NO;
+    } else if (!gesture) {
         self.isProcessing = NO;
     }
 }
@@ -612,7 +633,11 @@ struct {
         [self animateSpotlight:NO fromPoint:self.panelContainer.center];
     } else if (sender.tag == 2) {
         [UIView animateWithDuration:0.6 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:1 options:0 animations:^{
-            self.panelContainer.bounds = CGRectMake(0, 0, kChevronLayoutConstants.panelW, kChevronLayoutConstants.panelH);
+            CGSize maxSize = [self calculateMaxPanelSize];
+            CGFloat targetW = MIN(kChevronLayoutConstants.panelW, maxSize.width);
+            CGFloat targetH = MIN(kChevronLayoutConstants.panelH, maxSize.height);
+            
+            self.panelContainer.bounds = CGRectMake(0, 0, targetW, targetH);
             self.panelContainer.center = CGPointMake(self.bounds.size.width/2, self.bounds.size.height/2);
             [self handleResize:nil];
         } completion:nil];
@@ -677,17 +702,11 @@ struct {
     self.dimmingView.frame = bounds;
     self.panelContainer.backgroundColor = [UIColor clearColor];
     
-    // 动态计算面板尺寸
-    CGFloat targetW, targetH;
-    if (orientation == UIInterfaceOrientationLandscapeLeft || orientation == UIInterfaceOrientationLandscapeRight) {
-        // 横屏：宽 50% (屏幕高度的50%), 高 70% (屏幕宽度的70%)
-        targetW = h * 0.5;
-        targetH = w * 0.7;
-    } else {
-        // 竖屏：宽 80% (屏幕宽度的80%), 高 70% (屏幕高度的70%)
-        targetW = w * 0.8;
-        targetH = h * 0.7;
-    }
+    // 动态计算面板尺寸 (使用常量并确保不超出安全区域)
+    CGSize maxSize = [self calculateMaxPanelSize];
+    
+    CGFloat targetW = MIN(kChevronLayoutConstants.panelW, maxSize.width);
+    CGFloat targetH = MIN(kChevronLayoutConstants.panelH, maxSize.height);
     targetH = MAX(targetH, kChevronLayoutConstants.minHeight);
     
     CGRect panelBounds = CGRectMake(0, 0, targetW, targetH);
@@ -701,7 +720,11 @@ struct {
         default: targetRotation = CGAffineTransformIdentity; break;
     }
     
-    if (!CGRectEqualToRect(self.panelContainer.bounds, panelBounds) || !CGAffineTransformEqualToTransform(self.panelContainer.transform, targetRotation)) {
+    // 只有在未拖动过且非正在动画时，或者旋转方向改变时，才强制同步 bounds
+    BOOL orientationChanged = !CGAffineTransformEqualToTransform(self.panelContainer.transform, targetRotation);
+    BOOL shouldForceLayout = (!self.hasBeenMoved && !self.isAnimating) || orientationChanged;
+
+    if (shouldForceLayout && (!CGRectEqualToRect(self.panelContainer.bounds, panelBounds) || orientationChanged)) {
         [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:UIViewAnimationOptionCurveEaseInOut animations:^{
             self.panelContainer.transform = targetRotation;
             self.panelContainer.bounds = panelBounds;
@@ -709,28 +732,40 @@ struct {
             // 调整子组件大小以匹配容器
             self.appPanel.frame = self.panelContainer.bounds;
             self.collectionView.frame = CGRectMake(0, 45, targetW, targetH - 45);
-            self.trafficCapsule.frame = CGRectMake(16, 14, 64, 24);
+            self.trafficCapsule.frame = CGRectMake(16, 14, kChevronLayoutConstants.trafficCapsuleW, kChevronLayoutConstants.trafficCapsuleH);
             [self updateResizingHandleFrame];
             self.specularHighlight.frame = self.appPanel.bounds;
             self.cyanLayer.frame = CGRectInset(self.appPanel.bounds, -0.3, -0.3);
             self.magentaLayer.frame = CGRectInset(self.appPanel.bounds, 0.3, 0.3);
             [self.collectionView.collectionViewLayout invalidateLayout];
             
-            // 如果面板未被拖动过，居中；如果拖动过，做一次简单的钳位确保它不出界
-            if (!self.isAnimating && !self.hasBeenMoved) {
+            if (!self.hasBeenMoved) {
                 self.panelContainer.center = CGPointMake(CGRectGetMidX(safeBounds), CGRectGetMidY(safeBounds));
-            } else if (self.isPanelShowing) {
-                CGPoint currentCenter = self.panelContainer.center;
-                CGFloat halfW = (panelBounds.size.width) / 2.0;
-                CGFloat halfH = (panelBounds.size.height) / 2.0;
-                currentCenter.x = MAX(halfW - panelBounds.size.width * 0.4, MIN(w - halfW + panelBounds.size.width * 0.4, currentCenter.x));
-                currentCenter.y = MAX(halfH - panelBounds.size.height * 0.4, MIN(h - halfH + panelBounds.size.height * 0.4, currentCenter.y));
-                self.panelContainer.center = currentCenter;
             }
         } completion:nil];
     } else {
+        // 如果已经拖动过，仅在旋转时更新 transform
+        if (orientationChanged) {
+             [UIView animateWithDuration:0.35 animations:^{
+                self.panelContainer.transform = targetRotation;
+             }];
+        }
+        
         if (!self.isAnimating && !self.hasBeenMoved) {
             self.panelContainer.center = CGPointMake(CGRectGetMidX(safeBounds), CGRectGetMidY(safeBounds));
+        } else if (self.isPanelShowing && !self.isAnimating) {
+            // 保持在屏幕内的钳位逻辑
+            CGPoint currentCenter = self.panelContainer.center;
+            CGRect currentBounds = self.panelContainer.bounds;
+            
+            // 考虑旋转后的实际尺寸
+            CGSize sizeInRoot = CGRectApplyAffineTransform(currentBounds, self.panelContainer.transform).size;
+            CGFloat rootHalfW = sizeInRoot.width / 2.0;
+            CGFloat rootHalfH = sizeInRoot.height / 2.0;
+
+            currentCenter.x = MAX(rootHalfW, MIN(w - rootHalfW, currentCenter.x));
+            currentCenter.y = MAX(rootHalfH, MIN(h - rootHalfH, currentCenter.y));
+            self.panelContainer.center = currentCenter;
         }
     }
 
@@ -913,16 +948,37 @@ struct {
         self.dimmingView.userInteractionEnabled = YES; // 显示时开启拦截
         self.panelContainer.hidden = NO; self.panelContainer.center = point;
         
-        // 预先应用正确的旋转变换
+        // 预先应用正确的旋转变换和尺寸
         CGAffineTransform initialRotation = CGAffineTransformIdentity;
-        switch (self.targetOrientation) {
+        UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+        switch (orientation) {
             case UIInterfaceOrientationLandscapeLeft: initialRotation = CGAffineTransformMakeRotation(-M_PI_2); break;
             case UIInterfaceOrientationLandscapeRight: initialRotation = CGAffineTransformMakeRotation(M_PI_2); break;
             case UIInterfaceOrientationPortraitUpsideDown: initialRotation = CGAffineTransformMakeRotation(M_PI); break;
             default: initialRotation = CGAffineTransformIdentity; break;
         }
-        self.panelContainer.transform = CGAffineTransformScale(initialRotation, 0.01, 0.01);
+
+        // 计算当前环境下合法的尺寸 (同步 layoutSubviews 逻辑)
+        CGSize maxSize = [self calculateMaxPanelSize];
         
+        CGFloat targetW = MIN(kChevronLayoutConstants.panelW, maxSize.width);
+        CGFloat targetH = MIN(kChevronLayoutConstants.panelH, maxSize.height);
+        targetH = MAX(targetH, kChevronLayoutConstants.minHeight);
+        
+        // 设置初始 bounds 和子组件大小，防止在 layoutSubviews 锁定期间出现错位
+        self.panelContainer.bounds = CGRectMake(0, 0, targetW, targetH);
+        self.appPanel.frame = self.panelContainer.bounds;
+        self.collectionView.frame = CGRectMake(0, 45, targetW, targetH - 45);
+        self.trafficCapsule.frame = CGRectMake(16, 14, kChevronLayoutConstants.trafficCapsuleW, kChevronLayoutConstants.trafficCapsuleH);
+        [self updateResizingHandleFrame];
+        self.specularHighlight.frame = self.appPanel.bounds;
+        self.cyanLayer.frame = CGRectInset(self.appPanel.bounds, -0.3, -0.3);
+        self.magentaLayer.frame = CGRectInset(self.appPanel.bounds, 0.3, 0.3);
+        [self.collectionView.collectionViewLayout invalidateLayout];
+
+        self.panelContainer.transform = CGAffineTransformScale(initialRotation, 0.01, 0.01);
+        self.panelContainer.alpha = 0;
+
         [UIView animateWithDuration:0.6 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:1 options:0 animations:^{
             self.dimmingView.alpha = 1.0;
             self.panelContainer.center = CGPointMake(self.bounds.size.width/2, self.bounds.size.height/2);
