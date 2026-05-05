@@ -1261,27 +1261,50 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
     if (gesture) {
         CGPoint translation = [gesture translationInView:self.panelContainer];
+        CGRect bounds = self.bounds;
+        UIEdgeInsets safe = self.safeAreaInsets;
+        
+        // --- 动态计算安全边界限制 ---
+        // 获取当前中心点
+        CGPoint center = self.panelContainer.center;
+        
+        // 计算在当前位置下，面板可扩张的最大尺寸，确保不超出 safeAreaInsets + 10pt 呼吸间距
+        CGFloat breath = kChevronLayoutConstants.safeAreaBreath;
+        CGFloat maxW = (MIN(center.x - (safe.left + breath), bounds.size.width - (safe.right + breath) - center.x)) * 2.0;
+        CGFloat maxH = (MIN(center.y - (safe.top + breath), bounds.size.height - (safe.bottom + breath) - center.y)) * 2.0;
+
+        // 获取当前旋转状态对尺寸的影响（如果是横屏旋转，maxW/maxH 需要对调逻辑，这里直接基于 root 坐标系计算更稳健）
+        CGSize sizeInRoot = CGRectApplyAffineTransform(CGRectMake(0,0,f.size.width, f.size.height), self.panelContainer.transform).size;
+        
         CGFloat rawW = f.size.width + translation.x;
         CGFloat rawH = f.size.height + translation.y;
         
-        // --- 果冻过冲逻辑 (Jelly Overshoot) ---
+        // --- 果冻过冲与安全钳位逻辑 (Jelly & Safe Clamping) ---
         CGFloat minW = 280.0, minH = 350.0;
+        // 这里的 maxW/maxH 是基于旋转后在 root 中的限制，需要反向映射回 bounds
+        // 为了简化，我们直接限制 bounds 增长，使其变换后的 sizeInRoot 不超出安全区
+        
         CGFloat newWidth = rawW, newHeight = rawH;
         
-        // 当超过最小值时，应用阻尼函数，模拟“挤压感”
+        // 1. 最小值限制（带果冻过冲）
         if (rawW < minW) {
-            CGFloat delta = minW - rawW;
-            newWidth = minW - (delta * 0.3); // 只有 30% 的位移生效
+            newWidth = minW - ((minW - rawW) * 0.3);
         }
         if (rawH < minH) {
-            CGFloat delta = minH - rawH;
-            newHeight = minH - (delta * 0.3);
+            newHeight = minH - ((minH - rawH) * 0.3);
         }
 
-        // 极限反馈：基于原始原始坐标判断，但在过冲时也保持视觉高亮
-        BOOL atLimit = (rawW < minW || rawH < minH);
+        // 2. 最大值限制：严格钳位在安全区域内 (考虑旋转后的投影)
+        // 简单的估算：newSizeInRoot = newWidth * scale_effect
+        CGFloat currentScaleX = sizeInRoot.width / f.size.width;
+        CGFloat currentScaleY = sizeInRoot.height / f.size.height;
+        
+        if (newWidth * currentScaleX > maxW) newWidth = maxW / currentScaleX;
+        if (newHeight * currentScaleY > maxH) newHeight = maxH / currentScaleY;
+
+        // 极限反馈
+        BOOL atLimit = (rawW < minW || rawH < minH || (newWidth * currentScaleX >= maxW - 2) || (newHeight * currentScaleY >= maxH - 2));
         if (atLimit && gesture.state == UIGestureRecognizerStateChanged) {
-            // 仅在刚进入极限时震动一次，避免连续震动
             static BOOL lastAtLimit = NO;
             if (!lastAtLimit) [self.feedback impactOccurredWithIntensity:0.65];
             lastAtLimit = YES;
@@ -1297,9 +1320,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             self.resizingHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
             self.resizingHandleLayer.lineWidth = 2.0;
             [CATransaction commit];
-            if (gesture.state == UIGestureRecognizerStateChanged) {
-                // 重置状态
-            }
         }
 
         f.size.width = newWidth;
