@@ -39,6 +39,16 @@
 - (BOOL)openApplicationWithBundleID:(id)arg1;
 @end
 
+@interface SBControlCenterController : NSObject
++ (id)sharedInstance;
+- (BOOL)isPresented;
+@end
+
+@interface SBCoverSheetPresentationManager : NSObject
++ (id)sharedInstance;
+- (BOOL)isAnyCoverSheetVisible;
+@end
+
 @interface UIImage (Private)
 + (UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleIdentifier format:(int)format scale:(CGFloat)scale;
 @end
@@ -265,6 +275,7 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, assign) BOOL isProcessing; 
 @property (nonatomic, assign) BOOL launchDebounce;
 @property (nonatomic, assign) BOOL needsFullReload; // 建议1：增量更新标志位
+@property (nonatomic, assign) BOOL isSuppressedBySystem; // 新增：系统强制压制标志
 @property (nonatomic, strong) NSMutableArray<CV3AppInfo *> *apps;
 
 @property (nonatomic, strong) UIImpactFeedbackGenerator *feedback;
@@ -2404,6 +2415,31 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
 - (BOOL)_shouldAutorotateToInterfaceOrientation:(long long)orientation { return NO; }
 
+- (BOOL)isSystemUIActive {
+    @try {
+        // 检查控制中心 (使用类查找并转换类型)
+        Class ccClass = NSClassFromString(@"SBControlCenterController");
+        if (ccClass && [ccClass respondsToSelector:@selector(sharedInstance)]) {
+            id cc = [ccClass performSelector:@selector(sharedInstance)];
+            if (cc && [cc respondsToSelector:@selector(isPresented)] && [cc isPresented]) {
+                return YES;
+            }
+        }
+        
+        // 检查通知栏/锁屏 (Cover Sheet)
+        Class csClass = NSClassFromString(@"SBCoverSheetPresentationManager");
+        if (csClass && [csClass respondsToSelector:@selector(sharedInstance)]) {
+            id cs = [csClass performSelector:@selector(sharedInstance)];
+            if (cs && [cs respondsToSelector:@selector(isAnyCoverSheetVisible)] && [cs isAnyCoverSheetVisible]) {
+                return YES;
+            }
+        }
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Error] isSystemUIActive 检查失败: %@", e);
+    }
+    return NO;
+}
+
 - (void)attachToCurrentActiveScene {
     // 异步确保不在敏感的系统转换周期内执行同步 UI 操作
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -2446,6 +2482,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
                     needsLayoutUpdate = YES;
                 }
 
+                // 核心修复：调用 setHidden 触发重写后的压制检查
                 if (self.hidden) {
                     self.hidden = NO;
                     needsLayoutUpdate = YES;
@@ -2463,8 +2500,9 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 }
 
 - (void)applyAdaptiveLevel {
-    // 降低层级至 1200，确保在状态栏之上但在键盘和关键系统层级之下
-    CGFloat targetLevel = 1200.0; 
+    // 建议：层级对齐 (Level Alignment)
+    // 根据 GEMINI.md 规范，锁定在 2099 以确保覆盖所有第三方 App，且保持在控制中心（2100）之下
+    CGFloat targetLevel = 2099.0; 
     
     if (self.windowLevel != targetLevel) {
         self.windowLevel = targetLevel;
@@ -2530,6 +2568,27 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 - (BOOL)canBecomeKeyWindow { return YES; }
 - (BOOL)_ignoresHitTest { return NO; }
 - (BOOL)_shouldIsolate { return YES; }
+
+// --- 强制压制逻辑：深度抑制，防止在系统 UI 活跃时出现 ---
+- (void)setHidden:(BOOL)hidden {
+    if (!hidden && self.isSuppressedBySystem) {
+        CV3LogToFile(@"[Debug] 拦截到非法的 unhide 请求 (当前处于系统压制状态)");
+        [super setHidden:YES];
+        self.alpha = 0;
+        self.windowLevel = -1; // 降到最低层
+        return;
+    }
+    
+    [super setHidden:hidden];
+    
+    // 状态同步
+    if (hidden) {
+        self.alpha = 0;
+    } else {
+        self.alpha = 1.0;
+        [self applyAdaptiveLevel];
+    }
+}
 
 // --- 尝试绕过 App 级触控黑洞的私有方法 ---
 - (BOOL)_isSecure { return YES; }
@@ -2663,6 +2722,58 @@ static NSTimeInterval lastLogTime = 0;
 - (void)lockScreenViewControllerDidDismiss {
     %orig;
     if (sharedWindow) sharedWindow.hidden = NO;
+}
+%end
+
+// --- Fix: Auto-hide when Control Center or Notification Center is active ---
+%hook SBControlCenterController
+- (void)_willPresent {
+    %orig;
+    if (sharedWindow) {
+        sharedWindow.isSuppressedBySystem = YES;
+        sharedWindow.hidden = YES;
+    }
+}
+- (void)_didDismiss {
+    %orig;
+    if (sharedWindow) {
+        sharedWindow.isSuppressedBySystem = NO;
+        sharedWindow.hidden = NO;
+    }
+}
+%end
+
+%hook SBCoverSheetPresentationManager
+- (void)setCoverSheetPresented:(BOOL)arg1 animated:(BOOL)arg2 {
+    %orig;
+    if (sharedWindow) {
+        // 关键：同步压制状态，防止滑动 NC 时出现重置
+        sharedWindow.isSuppressedBySystem = arg1;
+        sharedWindow.hidden = arg1;
+    }
+}
+%end
+
+@interface CSCoverSheetViewController : UIViewController
+@end
+
+%hook CSCoverSheetViewController
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    if (sharedWindow) {
+        sharedWindow.isSuppressedBySystem = YES;
+        sharedWindow.hidden = YES;
+    }
+}
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig;
+    if (sharedWindow) {
+        // 只有当没有其他系统 UI 活跃时才解除压制
+        if (![sharedWindow isSystemUIActive]) {
+            sharedWindow.isSuppressedBySystem = NO;
+            sharedWindow.hidden = NO;
+        }
+    }
 }
 %end
 
