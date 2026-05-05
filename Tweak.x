@@ -478,6 +478,10 @@ struct {
     }
 }
 
+- (void)searchTextChanged:(UITextField *)textField {
+    [self filterApps];
+}
+
 - (void)filterApps {
     NSString *text = [self.searchField.text lowercaseString];
     
@@ -489,7 +493,6 @@ struct {
     NSMutableArray *res = [NSMutableArray array];
     
     if (isRecentlyUsed) {
-        // 如果选中“最近使用”，直接使用预存的最近应用列表，并支持搜索过滤
         for (CV3AppInfo *info in self.recentlyUsedApps) {
             if (!hasSearch || ([info.name rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
                                [info.bundleId rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
@@ -498,7 +501,6 @@ struct {
             }
         }
     } else if (isPinnedView) {
-        // 如果选中“置顶”，显示所有已置顶应用
         for (CV3AppInfo *info in self.apps) {
             if (info.isPinned) {
                 if (!hasSearch || ([info.name rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
@@ -528,26 +530,15 @@ struct {
         }
     }
 
-    // 液态流动过渡 (Liquid Flow Transition)
-    NSArray *oldList = [self.filteredApps copy];
     self.filteredApps = res;
     
-    if (oldList && oldList.count > 0) {
-        // 使用 performBatchUpdates 实现流畅的移动、插入和删除动画
-        [self.collectionView performBatchUpdates:^{
-            // 简单的“全部重排”液态效果：
-            // 我们通过 reloadSection 来触发系统的布局平移动画，这是最稳定的“流动”感来源
-            [self.collectionView reloadSections:[NSIndexSet indexSetWithIndex:0]];
-        } completion:^(BOOL finished) {
-            if (finished) [self animateIconsStaggered];
-        }];
-    } else {
-        [self.collectionView reloadData];
-        [self animateIconsStaggered];
-    }
+    // 使用 reloadData 替代 performBatchUpdates 以确保在 SpringBoard 环境下的极致稳定性
+    // 复杂的 batch updates 在频繁搜索时容易产生索引不一致导致的崩溃
+    [self.collectionView reloadData];
+    [self animateIconsStaggered];
 
+    // 优化：仅在必要时刷新 inputAccessoryView
     if (!hasSearch) {
-        // 智能辅助：输入为空时，在键盘上方显示 Top 5 常用应用
         if (!self.searchField.inputAccessoryView && self.apps.count > 0) {
             NSArray *topApps = [self.apps subarrayWithRange:NSMakeRange(0, MIN(5, self.apps.count))];
             __weak typeof(self) weakSelf = self;
@@ -557,8 +548,10 @@ struct {
             [self.searchField reloadInputViews];
         }
     } else {
-        self.searchField.inputAccessoryView = nil;
-        [self.searchField reloadInputViews];
+        if (self.searchField.inputAccessoryView) {
+            self.searchField.inputAccessoryView = nil;
+            [self.searchField reloadInputViews];
+        }
     }
     self.noResultsLabel.hidden = (self.filteredApps.count > 0);
 }
@@ -2145,11 +2138,10 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             return [obj1.name localizedCaseInsensitiveCompare:obj2.name];
         }];
         
-        // 提取前 12 个最近使用的应用作为虚拟分类
-        self.recentlyUsedApps = [temp subarrayWithRange:NSMakeRange(0, MIN(12, temp.count))];
-        
         dispatch_async(dispatch_get_main_queue(), ^{ 
             self.apps = temp; 
+            // 提取前 12 个最近使用的应用作为虚拟分类 (在主线程赋值)
+            self.recentlyUsedApps = [temp subarrayWithRange:NSMakeRange(0, MIN(12, temp.count))];
             [self updateCategoryBar]; // 刷新分类栏
             [self filterApps]; // 初始化过滤列表
             [self animateIconsStaggered]; 
