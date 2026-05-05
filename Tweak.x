@@ -803,6 +803,8 @@ struct {
     self.collectionView.dataSource = self; self.collectionView.delegate = self;
     self.collectionView.backgroundColor = [UIColor clearColor];
     self.collectionView.delaysContentTouches = NO; // 关键：禁用触碰延迟实现即时反馈
+    self.collectionView.showsVerticalScrollIndicator = NO;   // 隐藏纵向滚动条
+    self.collectionView.showsHorizontalScrollIndicator = NO; // 隐藏横向滚动条
     [self.collectionView registerClass:[CV3AppCell class] forCellWithReuseIdentifier:@"C"];
     [self.appPanel.contentView addSubview:self.collectionView];
 
