@@ -286,6 +286,8 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, strong) UIView *contrastBackdrop; // 新增：对比度增强层
 @property (nonatomic, strong) CALayer *innerGlowLayer; // 新增：内发光边框层
 @property (nonatomic, assign) CGPoint cachedTargetCenter; // 建议3：布局预热缓存
+@property (nonatomic, assign) CGFloat currentDecoDX; // 建议：惯性衰减 X
+@property (nonatomic, assign) CGFloat currentDecoDY; // 建议：惯性衰减 Y
 
 - (void)show;
 - (void)loadAppsAsync;
@@ -1004,8 +1006,9 @@ struct {
     [self.panelContainer addSubview:self.resizingHandle];
     
     self.resizingHandleLayer = [CAShapeLayer layer];
-    // 改为朝向右下角（面板圆角处），使用 0 到 M_PI_2 的圆弧
-    self.resizingHandleLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(0, 0) radius:18 startAngle:0 endAngle:M_PI_2 clockwise:YES].CGPath;
+    // 视觉优化：将把手圆弧移动到更靠近圆角的位置
+    // 中心点从 (0,0) 移至 (12, 12)，半径 20，使其更紧贴 28pt 的圆角
+    self.resizingHandleLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(12, 12) radius:20 startAngle:0 endAngle:M_PI_2 clockwise:YES].CGPath;
     self.resizingHandleLayer.fillColor = [UIColor clearColor].CGColor;
     self.resizingHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
     self.resizingHandleLayer.lineWidth = 2.0;
@@ -1403,6 +1406,23 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     // 增加 resize 锁
     self.isProcessing = YES; 
 
+    // 建议：把手动态激活 (Handle Flare)
+    // 根据手势状态切换把手视觉样式
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        [self.feedback impactOccurredWithIntensity:0.5];
+        [CATransaction begin];
+        [CATransaction setAnimationDuration:0.25];
+        self.resizingHandleLayer.strokeColor = [[UIColor cyanColor] colorWithAlphaComponent:0.8].CGColor;
+        self.resizingHandleLayer.lineWidth = 3.5;
+        [CATransaction commit];
+    } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        [CATransaction begin];
+        [CATransaction setAnimationDuration:0.4];
+        self.resizingHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
+        self.resizingHandleLayer.lineWidth = 2.0;
+        [CATransaction commit];
+    }
+
     CGRect currentBounds = self.panelContainer.bounds;
 
     if (gesture) {
@@ -1475,7 +1495,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
                 maxH = rootAllowedHalfW * 2.0;
             } else {
                 maxW = rootAllowedHalfW * 2.0;
-                maxH = rootAllowedHalfH * 2.0;
+                maxH = rootAllowedHalfW * 2.0;
             }
         }
 
@@ -1495,7 +1515,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             finalH = minH - ((minH - rawH) * 0.3);
         }
 
-        // 极限反馈判定
+        // 极限反馈判定（在 Begin/Ended 时已经处理了基础颜色，这里处理 Drag 过程中的 Limit 反馈）
         BOOL atLimit = (rawW < minW || rawH < minH || rawW > maxW || rawH > maxH);
         if (atLimit && gesture.state == UIGestureRecognizerStateChanged) {
             static BOOL lastAtLimit = NO;
@@ -1504,14 +1524,12 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
-            self.resizingHandleLayer.strokeColor = [[UIColor cyanColor] colorWithAlphaComponent:0.8].CGColor;
-            self.resizingHandleLayer.lineWidth = 3.0;
+            self.resizingHandleLayer.strokeColor = [[UIColor redColor] colorWithAlphaComponent:0.8].CGColor; // 触底/触顶变红提示
             [CATransaction commit];
-        } else {
+        } else if (gesture.state == UIGestureRecognizerStateChanged) {
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
-            self.resizingHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
-            self.resizingHandleLayer.lineWidth = 2.0;
+            self.resizingHandleLayer.strokeColor = [[UIColor cyanColor] colorWithAlphaComponent:0.8].CGColor;
             [CATransaction commit];
         }
 
@@ -2011,7 +2029,12 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             self.panelContainer.center = targetCenter;
             self.panelContainer.transform = initialRotation;
             self.panelContainer.alpha = 1;
-        } completion:^(BOOL f){ self.isAnimating = NO; [self startLiquidMotion]; }];
+        } completion:^(BOOL f){ 
+            self.isAnimating = NO; 
+            self.currentDecoDX = 0; // 重置惯性状态
+            self.currentDecoDY = 0;
+            [self startLiquidMotion]; 
+        }];
     } else {
         // 关键修复：不要同步收起键盘，因为 resignFirstResponder 是重度同步操作，会阻塞动画开始
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -2053,26 +2076,72 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     [self.motionManager startDeviceMotionUpdatesToQueue:[NSOperationQueue mainQueue] withHandler:^(CMDeviceMotion *m, NSError *e) {
         if (!m) return;
         [CATransaction begin]; [CATransaction setDisableActions:YES];
-        
+
         // 1. 图标高光与色散层现有的视差逻辑
         self.specularHighlight.startPoint = CGPointMake(0.5 - m.attitude.roll*1.5, 0.5 - m.attitude.pitch*1.5);
         self.specularHighlight.endPoint = CGPointMake(1.5 - m.attitude.roll*1.5, 1.5 - m.attitude.pitch*1.5);
-        
+
         CGFloat dx = m.attitude.roll * 1.2;
         CGFloat dy = m.attitude.pitch * 1.2;
         self.cyanLayer.transform = CATransform3DMakeTranslation(-dx, -dy, 0);
         self.magentaLayer.transform = CATransform3DMakeTranslation(dx, dy, 0);
-        
-        // 建议2：视差解耦 (Parallax Decoupling)
-        // 将位移作用于 appPanel 而不是 panelContainer，物理干扰不影响布局坐标
+
+        // 建议2：视差解耦 (Parallax Decoupling) - 增强为层级视差 (Layered Parallax)
+        // 面板主体移动系数为 8.0
         CGFloat panelDX = m.attitude.roll * 8.0;
         CGFloat panelDY = m.attitude.pitch * 8.0;
         self.appPanel.transform = CGAffineTransformMakeTranslation(panelDX, panelDY);
 
+        // 建议：装饰件深度视差 (Layered Decoration Parallax) + 惯性衰减 (Inertial Damping)
+        // 目标位移系数为 11.0
+        CGFloat targetDecoDX = m.attitude.roll * 11.0;
+        CGFloat targetDecoDY = m.attitude.pitch * 11.0;
+
+        // 惯性平滑逻辑：使用插值 (Lerp) 实现物理质量感
+        // 系数 0.15 表示每一帧向目标位置靠近 15%，产生一种“沉重”的滞后感
+        CGFloat oldDecoDX = self.currentDecoDX;
+        CGFloat oldDecoDY = self.currentDecoDY;
+        self.currentDecoDX += (targetDecoDX - self.currentDecoDX) * 0.15;
+        self.currentDecoDY += (targetDecoDY - self.currentDecoDY) * 0.15;
+
+        // 建议：触觉阻尼 (Haptic Damping Feedback)
+        // 计算本帧位移的变化量 (Friction Delta)
+        CGFloat frameDisplacement = hypot(self.currentDecoDX - oldDecoDX, self.currentDecoDY - oldDecoDY);
+        if (frameDisplacement > 0.6) { // 设定剧烈晃动的物理阈值
+            static NSTimeInterval lastHapticTime = 0;
+            NSTimeInterval now = CACurrentMediaTime();
+            if (now - lastHapticTime > 0.1) { // 限制触觉触发频率（10Hz max）防止震动过载
+                [self.selectionFeedback selectionChanged];
+                lastHapticTime = now;
+            }
+        }
+
+        CGAffineTransform decoParallax = CGAffineTransformMakeTranslation(self.currentDecoDX, self.currentDecoDY);
+        self.trafficCapsule.transform = decoParallax;
+        self.resizingHandle.transform = decoParallax;
+
+        // 建议：边缘折射干扰 (Edge Refraction Flicker)        // 模拟真实高品质玻璃在侧向极限角度下产生的“全反射”增强
+        CGFloat tilt = sqrt(m.attitude.roll * m.attitude.roll + m.attitude.pitch * m.attitude.pitch);
+        if (tilt > 1.1) { 
+            CGFloat flicker = 0.15 * sin(CACurrentMediaTime() * 18.0); // 18Hz 微颤感
+            CGFloat boost = (tilt - 1.1) * 0.6 + flicker;
+
+            // 动态增强色散层不透明度与内发光亮度
+            self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:MIN(0.6, 0.12 + MAX(0, boost))].CGColor;
+            self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:MIN(0.6, 0.12 + MAX(0, boost))].CGColor;
+            self.innerGlowLayer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:MIN(1.0, 0.45 + MAX(0, boost))].CGColor;
+            self.innerGlowLayer.borderWidth = 0.3 + MAX(0, boost) * 1.5;
+        } else {
+            // 恢复基础状态
+            self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.12].CGColor;
+            self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:0.12].CGColor;
+            self.innerGlowLayer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.45].CGColor;
+            self.innerGlowLayer.borderWidth = 0.3;
+        }
+
         [CATransaction commit];
     }];
-}
-- (void)stopLiquidMotion { [self.motionManager stopDeviceMotionUpdates]; }
+}- (void)stopLiquidMotion { [self.motionManager stopDeviceMotionUpdates]; }
 
 - (BOOL)shouldIncludeApp:(id)appProxy {
     // 1. 必须是用户应用
@@ -2460,11 +2529,14 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         }
 
         // 2. 检查面板区域
+        // 核心修复：移除严格的 bounds 检查，允许点击因视差（Parallax）而超出容器物理边界的组件
         CGPoint p = [self convertPoint:point toView:self.panelContainer];
+        UIView *hit = [self.panelContainer hitTest:p withEvent:e];
+        if (hit) return hit;
+
+        // 如果点中了面板物理边界内但没有具体子视图响应，返回面板容器以便处理拖拽
         if (CGRectContainsPoint(self.panelContainer.bounds, p)) {
-            UIView *hit = [self.panelContainer hitTest:p withEvent:e];
-            // 如果点中了面板但没有具体子视图响应，返回面板容器以便处理拖拽
-            return hit ?: self.panelContainer;
+            return self.panelContainer;
         }
         
         // 检查遮罩层
