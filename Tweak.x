@@ -247,10 +247,34 @@ struct {
     return NO;
 }
 
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
-    return YES; 
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    // 允许调整大小手势
+    if (gestureRecognizer.view == self.resizingHandle) {
+        return YES;
+    }
+    
+    // 拦截面板移动手势
+    if (gestureRecognizer.view == self.panelContainer) {
+        CGPoint location = [touch locationInView:self.panelContainer];
+        // 限制：仅标题栏（顶部 45pt）且不在调整大小把手区域内才允许触发
+        BOOL isHeader = (location.y <= 45.0);
+        BOOL isHandle = CGRectContainsPoint(self.resizingHandle.frame, location);
+        
+        if (!isHeader || isHandle) {
+            return NO;
+        }
+    }
+    return YES;
 }
 
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    // 禁止拖拽手势与调整大小手势同时发生
+    if (([gestureRecognizer.view isKindOfClass:[NSClassFromString(@"UIPanGestureRecognizer") class]] && otherGestureRecognizer.view == self.resizingHandle) ||
+        (gestureRecognizer.view == self.resizingHandle && [otherGestureRecognizer.view isKindOfClass:[NSClassFromString(@"UIPanGestureRecognizer") class]])) {
+        return NO;
+    }
+    return YES;
+}
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
@@ -322,6 +346,7 @@ struct {
     [self.rootViewController.view addSubview:self.panelContainer];
     
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePanelDrag:)];
+    pan.delegate = self;
     [self.panelContainer addGestureRecognizer:pan];
     
     self.appPanel = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
@@ -393,6 +418,7 @@ struct {
     [self.resizingHandle.layer addSublayer:handleLayer];
     
     UIPanGestureRecognizer *resizePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleResize:)];
+    resizePan.delegate = self;
     [self.resizingHandle addGestureRecognizer:resizePan];
 
     UICollectionViewFlowLayout *layout = [[UICollectionViewFlowLayout alloc] init];
@@ -478,13 +504,19 @@ struct {
     CGFloat newWidth = MAX(280, f.size.width + translation.x);
     CGFloat newHeight = MAX(350, f.size.height + translation.y);
     
-    // 获取屏幕和面板在根坐标系下的信息
-    CGRect panelFrameInRoot = [self.panelContainer convertRect:self.panelContainer.bounds toView:self.rootViewController.view];
+    // 计算新的边界框在根视图中的尺寸和位置
+    CGRect newBounds = CGRectMake(0, 0, newWidth, newHeight);
+    CGSize newSizeInRoot = CGRectApplyAffineTransform(newBounds, self.panelContainer.transform).size;
+    CGRect newFrameInRoot = CGRectMake(self.panelContainer.center.x - newSizeInRoot.width / 2.0,
+                                       self.panelContainer.center.y - newSizeInRoot.height / 2.0,
+                                       newSizeInRoot.width,
+                                       newSizeInRoot.height);
+    
     CGFloat screenW = self.bounds.size.width;
     CGFloat screenH = self.bounds.size.height;
     
     // 检查是否越界
-    if (panelFrameInRoot.origin.x + newWidth > screenW || panelFrameInRoot.origin.y + newHeight > screenH) {
+    if (CGRectGetMaxX(newFrameInRoot) > screenW || CGRectGetMaxY(newFrameInRoot) > screenH || CGRectGetMinX(newFrameInRoot) < 0 || CGRectGetMinY(newFrameInRoot) < 0) {
         // 若越界，强制回退至上一次合法尺寸
         newWidth = lastValidBounds.size.width;
         newHeight = lastValidBounds.size.height;
@@ -500,7 +532,7 @@ struct {
     
     self.appPanel.frame = self.panelContainer.bounds;
     self.collectionView.frame = CGRectMake(0, 45, f.size.width, f.size.height - 45);
-    self.resizingHandle.frame = CGRectMake(f.size.width - 40, f.size.height - 40, 40, 40);
+    [self updateResizingHandleFrame];
     self.specularHighlight.frame = self.appPanel.bounds;
     self.cyanLayer.frame = CGRectInset(self.appPanel.bounds, -0.3, -0.3);
     self.magentaLayer.frame = CGRectInset(self.appPanel.bounds, 0.3, 0.3);
@@ -524,6 +556,12 @@ struct {
         } completion:nil];
     }
 
+}
+
+- (void)updateResizingHandleFrame {
+    // 确保把手始终在面板的右下角
+    CGRect bounds = self.panelContainer.bounds;
+    self.resizingHandle.frame = CGRectMake(bounds.size.width - 40, bounds.size.height - 40, 40, 40);
 }
 
 - (void)layoutSubviews {
@@ -610,7 +648,7 @@ struct {
             self.appPanel.frame = self.panelContainer.bounds;
             self.collectionView.frame = CGRectMake(0, 45, targetW, targetH - 45);
             self.trafficCapsule.frame = CGRectMake(16, 14, 64, 24);
-            self.resizingHandle.frame = CGRectMake(targetW - 40, targetH - 40, 40, 40);
+            [self updateResizingHandleFrame];
             self.specularHighlight.frame = self.appPanel.bounds;
             self.cyanLayer.frame = CGRectInset(self.appPanel.bounds, -0.3, -0.3);
             self.magentaLayer.frame = CGRectInset(self.appPanel.bounds, 0.3, 0.3);
