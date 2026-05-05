@@ -2262,9 +2262,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 }
 
 - (void)applyAdaptiveLevel {
-    // 锁定在控制中心下方，但在所有 App 之上
-    // UIWindowLevelStatusBar 是 1000，2099 通常足以覆盖所有三方 App
-    CGFloat targetLevel = 2099.0; 
+    // 降低层级至 1200，确保在状态栏之上但在键盘和关键系统层级之下
+    CGFloat targetLevel = 1200.0; 
     
     if (self.windowLevel != targetLevel) {
         self.windowLevel = targetLevel;
@@ -2295,7 +2294,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     return cell;
 }
 
-- (BOOL)_canBecomeKeyWindow { return NO; }
+- (BOOL)_canBecomeKeyWindow { return YES; }
+- (BOOL)canBecomeKeyWindow { return YES; }
 - (BOOL)_ignoresHitTest { return NO; }
 - (BOOL)_shouldIsolate { return YES; }
 
