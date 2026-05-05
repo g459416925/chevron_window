@@ -248,6 +248,7 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, assign) BOOL hasBeenMoved;
 @property (nonatomic, strong) UIView *dimmingView;
 @property (nonatomic, strong) UIView *resizingHandle;
+@property (nonatomic, strong) CAShapeLayer *resizingHandleLayer; // 新增：存储把手形状层
 @property (nonatomic, strong) UIView *trafficCapsule;
 @property (nonatomic, strong) NSArray<UIView *> *trafficDots;
 @property (nonatomic, strong) UITextField *searchField;
@@ -938,13 +939,13 @@ struct {
     self.resizingHandle.backgroundColor = [UIColor clearColor];
     [self.panelContainer addSubview:self.resizingHandle];
     
-    CAShapeLayer *handleLayer = [CAShapeLayer layer];
+    self.resizingHandleLayer = [CAShapeLayer layer];
     // 改为朝向右下角（面板圆角处），使用 0 到 M_PI_2 的圆弧
-    handleLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(0, 0) radius:18 startAngle:0 endAngle:M_PI_2 clockwise:YES].CGPath;
-    handleLayer.fillColor = [UIColor clearColor].CGColor;
-    handleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
-    handleLayer.lineWidth = 2.0;
-    [self.resizingHandle.layer addSublayer:handleLayer];
+    self.resizingHandleLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(0, 0) radius:18 startAngle:0 endAngle:M_PI_2 clockwise:YES].CGPath;
+    self.resizingHandleLayer.fillColor = [UIColor clearColor].CGColor;
+    self.resizingHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
+    self.resizingHandleLayer.lineWidth = 2.0;
+    [self.resizingHandle.layer addSublayer:self.resizingHandleLayer];
     
     UIPanGestureRecognizer *resizePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleResize:)];
     resizePan.delegate = self;
@@ -1085,6 +1086,46 @@ struct {
     [self filterApps];
 }
 
+// --- Helper: Time-based Category Priority ---
+static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
+    NSDateComponents *components = [[NSCalendar currentCalendar] components:NSCalendarUnitHour fromDate:[NSDate date]];
+    NSInteger hour = [components hour];
+    
+    // 定义关键字与时段的匹配权重
+    // 0: 默认, 100: 高优
+    
+    // 早上 (6-12): 办公、效率、新闻、财务
+    if (hour >= 6 && hour < 12) {
+        if ([cat containsString:@"Efficiency"] || [cat containsString:@"效率"] || 
+            [cat containsString:@"Productivity"] || [cat containsString:@"生产力"] ||
+            [cat containsString:@"News"] || [cat containsString:@"新闻"] ||
+            [cat containsString:@"Finance"] || [cat containsString:@"财务"]) return 100;
+    }
+    // 下午 (12-18): 购物、食物、工具、生活
+    else if (hour >= 12 && hour < 18) {
+        if ([cat containsString:@"Shopping"] || [cat containsString:@"购物"] || 
+            [cat containsString:@"Food"] || [cat containsString:@"美食"] ||
+            [cat containsString:@"Utilities"] || [cat containsString:@"工具"] ||
+            [cat containsString:@"Lifestyle"] || [cat containsString:@"生活"]) return 100;
+    }
+    // 晚上 (18-23): 社交、游戏、娱乐、视频、音乐
+    else if (hour >= 18 && hour < 23) {
+        if ([cat containsString:@"Social"] || [cat containsString:@"社交"] || 
+            [cat containsString:@"Game"] || [cat containsString:@"游戏"] ||
+            [cat containsString:@"Entertainment"] || [cat containsString:@"娱乐"] ||
+            [cat containsString:@"Video"] || [cat containsString:@"视频"] ||
+            [cat containsString:@"Music"] || [cat containsString:@"音乐"]) return 100;
+    }
+    // 深夜 (23-6): 健康、天气、图书
+    else {
+        if ([cat containsString:@"Health"] || [cat containsString:@"健康"] || 
+            [cat containsString:@"Weather"] || [cat containsString:@"天气"] ||
+            [cat containsString:@"Book"] || [cat containsString:@"图书"]) return 100;
+    }
+    
+    return 0;
+}
+
 - (void)updateCategoryBar {
     for (UIView *sub in self.categoryBar.subviews) [sub removeFromSuperview];
     
@@ -1096,14 +1137,18 @@ struct {
         }
     }
     
-    // 2. 获取所有分类名称并按应用数量从高到低排序
+    // 2. 排序逻辑：时间权重 > 应用数量 > 字母
     NSMutableArray *sortedCategories = [[counts allKeys] mutableCopy];
     [sortedCategories sortUsingComparator:^NSComparisonResult(NSString *c1, NSString *c2) {
+        NSInteger p1 = CV3GetTimePriorityForCategory(c1);
+        NSInteger p2 = CV3GetTimePriorityForCategory(c2);
+        
+        if (p1 != p2) return p1 > p2 ? NSOrderedAscending : NSOrderedDescending;
+        
         NSInteger count1 = [counts[c1] integerValue];
         NSInteger count2 = [counts[c2] integerValue];
-        if (count1 != count2) {
-            return count1 > count2 ? NSOrderedAscending : NSOrderedDescending;
-        }
+        if (count1 != count2) return count1 > count2 ? NSOrderedAscending : NSOrderedDescending;
+        
         return [c1 localizedCaseInsensitiveCompare:c2];
     }];
     
@@ -1129,6 +1174,9 @@ struct {
         btn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
         [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
         
+        // 如果是当前时段推荐的分类，增加一个微弱的发光边框暗示
+        BOOL isSuggested = CV3GetTimePriorityForCategory(cat) > 0;
+        
         CGSize size = [displayTitle sizeWithAttributes:@{NSFontAttributeName: btn.titleLabel.font}];
         CGFloat w = size.width + 24;
         btn.frame = CGRectMake(x, 5, w, 28);
@@ -1136,10 +1184,10 @@ struct {
         
         BOOL isSelected = [cat isEqualToString:self.selectedCategory];
         btn.backgroundColor = isSelected ? [[UIColor whiteColor] colorWithAlphaComponent:0.2] : [[UIColor whiteColor] colorWithAlphaComponent:0.06];
-        btn.layer.borderWidth = 0.5;
-        btn.layer.borderColor = isSelected ? [[UIColor cyanColor] colorWithAlphaComponent:0.5].CGColor : [[UIColor whiteColor] colorWithAlphaComponent:0.1].CGColor;
+        btn.layer.borderWidth = isSuggested ? 1.0 : 0.5;
+        btn.layer.borderColor = isSelected ? [[UIColor cyanColor] colorWithAlphaComponent:0.5].CGColor : 
+                                (isSuggested ? [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor : [[UIColor whiteColor] colorWithAlphaComponent:0.1].CGColor);
         
-        // 绑定原始分类名到 tag 或关联对象（这里我们直接在点击回调里解析标题）
         [btn addTarget:self action:@selector(handleCategoryTap:) forControlEvents:UIControlEventTouchUpInside];
         [self.categoryBar addSubview:btn];
         x += w + 8;
@@ -1209,37 +1257,49 @@ struct {
     // 增加 resize 锁
     self.isProcessing = YES; 
 
-    static CGRect lastValidBounds;
-    if (gesture && gesture.state == UIGestureRecognizerStateBegan) {
-        lastValidBounds = self.panelContainer.bounds;
-    }
-
     CGRect f = self.panelContainer.bounds;
 
     if (gesture) {
         CGPoint translation = [gesture translationInView:self.panelContainer];
-        CGFloat newWidth = MAX(280, f.size.width + translation.x);
-        CGFloat newHeight = MAX(350, f.size.height + translation.y);
+        CGFloat rawW = f.size.width + translation.x;
+        CGFloat rawH = f.size.height + translation.y;
+        
+        // --- 果冻过冲逻辑 (Jelly Overshoot) ---
+        CGFloat minW = 280.0, minH = 350.0;
+        CGFloat newWidth = rawW, newHeight = rawH;
+        
+        // 当超过最小值时，应用阻尼函数，模拟“挤压感”
+        if (rawW < minW) {
+            CGFloat delta = minW - rawW;
+            newWidth = minW - (delta * 0.3); // 只有 30% 的位移生效
+        }
+        if (rawH < minH) {
+            CGFloat delta = minH - rawH;
+            newHeight = minH - (delta * 0.3);
+        }
 
-        // 计算新的边界框在根视图中的尺寸和位置
-        CGRect newBounds = CGRectMake(0, 0, newWidth, newHeight);
-        CGSize newSizeInRoot = CGRectApplyAffineTransform(newBounds, self.panelContainer.transform).size;
-        CGRect newFrameInRoot = CGRectMake(self.panelContainer.center.x - newSizeInRoot.width / 2.0,
-                                           self.panelContainer.center.y - newSizeInRoot.height / 2.0,
-                                           newSizeInRoot.width,
-                                           newSizeInRoot.height);
-
-        CGFloat screenW = self.bounds.size.width;
-        CGFloat screenH = self.bounds.size.height;
-
-        // 检查是否越界
-        if (CGRectGetMaxX(newFrameInRoot) > screenW || CGRectGetMaxY(newFrameInRoot) > screenH || CGRectGetMinX(newFrameInRoot) < 0 || CGRectGetMinY(newFrameInRoot) < 0) {
-            // 若越界，强制回退至上一次合法尺寸
-            newWidth = lastValidBounds.size.width;
-            newHeight = lastValidBounds.size.height;
+        // 极限反馈：基于原始原始坐标判断，但在过冲时也保持视觉高亮
+        BOOL atLimit = (rawW < minW || rawH < minH);
+        if (atLimit && gesture.state == UIGestureRecognizerStateChanged) {
+            // 仅在刚进入极限时震动一次，避免连续震动
+            static BOOL lastAtLimit = NO;
+            if (!lastAtLimit) [self.feedback impactOccurredWithIntensity:0.65];
+            lastAtLimit = YES;
+            
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            self.resizingHandleLayer.strokeColor = [[UIColor cyanColor] colorWithAlphaComponent:0.8].CGColor;
+            self.resizingHandleLayer.lineWidth = 3.0;
+            [CATransaction commit];
         } else {
-            // 更新缓存
-            lastValidBounds = CGRectMake(0, 0, newWidth, newHeight);
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            self.resizingHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
+            self.resizingHandleLayer.lineWidth = 2.0;
+            [CATransaction commit];
+            if (gesture.state == UIGestureRecognizerStateChanged) {
+                // 重置状态
+            }
         }
 
         f.size.width = newWidth;
@@ -1278,7 +1338,19 @@ struct {
     [self.collectionView.collectionViewLayout invalidateLayout];
 
     if (gesture && (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled)) {
-        self.isProcessing = NO;
+        // --- 弹簧回弹 (Snapback) ---
+        CGFloat minW = 280.0, minH = 350.0;
+        CGRect currentBounds = self.panelContainer.bounds;
+        
+        if (currentBounds.size.width < minW || currentBounds.size.height < minH) {
+            CGRect targetBounds = CGRectMake(0, 0, MAX(minW, currentBounds.size.width), MAX(minH, currentBounds.size.height));
+            [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.6 initialSpringVelocity:0.8 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
+                self.panelContainer.bounds = targetBounds;
+                [self handleResize:nil]; // 触发内部层同步
+            } completion:^(BOOL f){ self.isProcessing = NO; }];
+        } else {
+            self.isProcessing = NO;
+        }
     } else if (!gesture) {
         self.isProcessing = NO;
     }
