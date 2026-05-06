@@ -91,11 +91,13 @@
 @property (nonatomic, strong) UIImageView *iconView;
 @property (nonatomic, strong) UILabel *nameLabel;
 @property (nonatomic, strong) CAGradientLayer *iconHighlight;
-@property (nonatomic, strong) UIView *pinnedIndicator; // 新增：置顶角标
-- (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText;
+@property (nonatomic, strong) UIView *pinnedIndicator; 
+@property (nonatomic, assign) CGPoint iconOffset; // 新增：图标视差偏移
+@property (nonatomic, assign) BOOL isFirstResult; // 新增：是否为搜索首项
+- (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst;
 - (void)startBreathing;
-- (void)startPulse; // 新增：开始高光脉冲
-- (void)stopPulse;  // 新增：停止高光脉冲
+- (void)startPulse; 
+- (void)stopPulse;  
 @end
 
 @implementation CV3AppCell
@@ -111,12 +113,12 @@
         ivBack.layer.shadowOpacity = 0.3;
         ivBack.layer.shadowRadius = 5.0;
         [self.contentView addSubview:ivBack];
+        
         self.iconView = [[UIImageView alloc] initWithFrame:ivBack.frame];
         self.iconView.layer.cornerRadius = 13;
         self.iconView.clipsToBounds = YES;
         [self.contentView addSubview:self.iconView];
 
-        // 增加图标表面的高光图层 (Specular Highlight)
         self.iconHighlight = [CAGradientLayer layer];
         self.iconHighlight.frame = self.iconView.bounds;
         self.iconHighlight.colors = @[(id)[[UIColor labelColor] colorWithAlphaComponent:0.0].CGColor,
@@ -124,10 +126,9 @@
                                       (id)[[UIColor labelColor] colorWithAlphaComponent:0.0].CGColor];
         self.iconHighlight.startPoint = CGPointMake(0, 0);
         self.iconHighlight.endPoint = CGPointMake(1, 1);
-        self.iconHighlight.opacity = 0; // 初始隐藏，仅在波纹经过时显示
+        self.iconHighlight.opacity = 0; 
         [self.iconView.layer addSublayer:self.iconHighlight];
 
-        // 置顶状态指示器
         self.pinnedIndicator = [[UIView alloc] initWithFrame:CGRectMake(iconSize - 12, -4, 16, 16)];
         self.pinnedIndicator.backgroundColor = [UIColor cyanColor];
         self.pinnedIndicator.layer.cornerRadius = 8;
@@ -149,25 +150,43 @@
     }
     return self;
 }
-- (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText {
+
+- (void)setIconOffset:(CGPoint)offset {
+    _iconOffset = offset;
+    // 应用反向视差位移，模拟物理深度
+    CGAffineTransform t = CGAffineTransformMakeTranslation(offset.x, offset.y);
+    self.iconView.transform = t;
+}
+
+- (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst {
     self.iconView.image = info.icon;
     self.pinnedIndicator.hidden = !info.isPinned;
+    self.isFirstResult = isFirst;
     if (info.isPinned) [self.iconView bringSubviewToFront:self.pinnedIndicator];
 
     if (searchText && searchText.length > 0) {
-
         NSMutableAttributedString *as = [[NSMutableAttributedString alloc] initWithString:info.name attributes:@{NSForegroundColorAttributeName: [UIColor labelColor]}];
         NSRange range = [info.name rangeOfString:searchText options:NSCaseInsensitiveSearch];
         if (range.location != NSNotFound) {
-            // 高亮颜色：使用与绿色交通灯一致的绿色
             [as addAttribute:NSForegroundColorAttributeName value:[UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:1.0] range:range];
             [as addAttribute:NSFontAttributeName value:[UIFont systemFontOfSize:10.0 weight:UIFontWeightBold] range:range];
         }
         self.nameLabel.attributedText = as;
+        
+        // 如果是首选结果，开启强烈脉冲
+        if (isFirst) {
+            [self startPulse];
+            self.iconView.layer.borderWidth = 1.5;
+            self.iconView.layer.borderColor = [[UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:0.6] CGColor];
+        } else {
+            [self stopPulse];
+            self.iconView.layer.borderWidth = 0;
+        }
     } else {
         self.nameLabel.attributedText = nil;
         self.nameLabel.text = info.name;
         self.nameLabel.textColor = [UIColor labelColor];
+        self.iconView.layer.borderWidth = 0;
     }
 
     [self startBreathing];
@@ -489,6 +508,13 @@ struct {
 }
 
 - (void)handleDoubleTap:(UITapGestureRecognizer *)gesture {
+    // 建议 5：搜索极速启动
+    // 如果搜索框有内容且有结果，双击面板直接启动第一个
+    if (self.searchField.text.length > 0 && self.filteredApps.count > 0) {
+        [self launchApp:self.filteredApps[0]];
+        return;
+    }
+    
     [self.feedback impactOccurred];
     [self.searchField becomeFirstResponder];
 }
@@ -579,10 +605,15 @@ struct {
 
     self.filteredApps = res;
     
-    // 使用 reloadData 替代 performBatchUpdates 以确保在 SpringBoard 环境下的极致稳定性
-    // 复杂的 batch updates 在频繁搜索时容易产生索引不一致导致的崩溃
     [self.collectionView reloadData];
-    [self animateIconsStaggered];
+    
+    // 建议 4 & 5：涟漪动效与首项吸附
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.01 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self animateIconsStaggered];
+        if (hasSearch && self.filteredApps.count > 0) {
+            [self.feedback impactOccurredWithIntensity:0.75];
+        }
+    });
 
     // 优化：仅在必要时刷新 inputAccessoryView
     if (!hasSearch) {
@@ -1146,17 +1177,28 @@ struct {
                 CGFloat smoothRatio = 0.5 * (1.0 + cos(M_PI * (1.0 - ratio))); 
                 CGFloat scale = 1.0 + (maxScale - 1.0) * smoothRatio;
                 
+                // 建议 1：Dynamic Lean (3D 鱼眼姿态偏移)
+                // 增加 M34 透视感
+                CATransform3D transform = CATransform3DIdentity;
+                transform.m34 = -1.0 / 500.0;
+                
+                // 根据手指偏移量计算旋转角度（最大 25 度）
+                CGFloat angleX = (dy / radius) * (M_PI / 7.0) * smoothRatio;
+                CGFloat angleY = -(dx / radius) * (M_PI / 7.0) * smoothRatio;
+                
+                transform = CATransform3DRotate(transform, angleX, 1, 0, 0);
+                transform = CATransform3DRotate(transform, angleY, 0, 1, 0);
+                transform = CATransform3DScale(transform, scale, scale, 1.0);
+
                 [UIView animateWithDuration:0.1 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
-                    cell.transform = CGAffineTransformMakeScale(scale, scale);
+                    cell.layer.transform = transform;
                     cell.contentView.transform = CGAffineTransformMakeTranslation(0, -10 * smoothRatio);
                     
-                    // 动态更新图标表面的高光位移 (Parallax Specular)
                     if ([cell isKindOfClass:[CV3AppCell class]]) {
                         CV3AppCell *appCell = (CV3AppCell *)cell;
                         [CATransaction begin];
                         [CATransaction setDisableActions:YES];
                         appCell.iconHighlight.opacity = smoothRatio * 0.4;
-                        // 根据手指偏移量计算高光倾角
                         CGFloat offsetX = dx / radius;
                         CGFloat offsetY = dy / radius;
                         appCell.iconHighlight.startPoint = CGPointMake(0.5 - offsetX, 0.5 - offsetY);
@@ -1166,7 +1208,7 @@ struct {
                 } completion:nil];
             } else {
                 [UIView animateWithDuration:0.2 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
-                    cell.transform = CGAffineTransformIdentity;
+                    cell.layer.transform = CATransform3DIdentity;
                     cell.contentView.transform = CGAffineTransformIdentity;
                     if ([cell isKindOfClass:[CV3AppCell class]]) {
                         ((CV3AppCell *)cell).iconHighlight.opacity = 0;
@@ -1175,7 +1217,6 @@ struct {
             }
         }
 
-        // 触觉反馈逻辑：当手指进入一个新的图标核心区域 (40pt) 时触发
         if (closestCell && minDistance < 40.0) {
             NSIndexPath *indexPath = [self.collectionView indexPathForCell:closestCell];
             if (indexPath && (!self.lastWaveHapticIndexPath || ![indexPath isEqual:self.lastWaveHapticIndexPath])) {
@@ -1184,10 +1225,9 @@ struct {
             }
         }
     } else {
-        // 手势结束或取消，全部恢复原状
         [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.6 initialSpringVelocity:0.5 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
             for (UICollectionViewCell *cell in [self.collectionView visibleCells]) {
-                cell.transform = CGAffineTransformIdentity;
+                cell.layer.transform = CATransform3DIdentity;
                 cell.contentView.transform = CGAffineTransformIdentity;
                 if ([cell isKindOfClass:[CV3AppCell class]]) {
                     ((CV3AppCell *)cell).iconHighlight.opacity = 0;
@@ -1922,13 +1962,14 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             self.dimmingView.alpha = progress;
             self.bezierLayer.shadowOpacity = progress * 0.6;
 
-            CGFloat currentInterval = MAX(10.0, 18.0 - (stretch / 45.0) * 8.0);
-            if (fabs(stretch - self.lastHapticX) > currentInterval) {
-                if (fabs(vel) > 800) {
-                    [self.feedback impactOccurredWithIntensity:0.85];
-                } else {
-                    [self.selectionFeedback selectionChanged];
-                }
+            // 建议 3：Tactile Granularity (触觉颗粒感)
+            // 随着拉伸距离增加，震动频率变快，模拟张力感
+            CGFloat hapticInterval = MAX(8.0, 20.0 - (stretch / 45.0) * 12.0);
+            if (fabs(stretch - self.lastHapticX) > hapticInterval) {
+                // 使用 Rigid 风格模拟物理阻尼感
+                UIImpactFeedbackGenerator *rigid = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid];
+                [rigid impactOccurredWithIntensity:0.3 + (stretch / 45.0) * 0.4];
+                
                 AudioServicesPlaySystemSound(1104); 
                 self.lastHapticX = stretch;
             }
@@ -2166,6 +2207,16 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         CGFloat panelDX = deltaRoll * kChevronPhysicsConstants.parallaxPanelFactor;
         CGFloat panelDY = deltaPitch * kChevronPhysicsConstants.parallaxPanelFactor;
         self.appPanel.transform = CGAffineTransformMakeTranslation(panelDX, panelDY);
+
+        // 建议 2：Gravity-Aware Icons (重力图标视差)
+        // 遍历可见 cell，应用反向视差
+        NSArray *visibleCells = [self.collectionView visibleCells];
+        for (UICollectionViewCell *cell in visibleCells) {
+            if ([cell isKindOfClass:[CV3AppCell class]]) {
+                // 图标向相反方向移动，产生深度感 (2.5x 系数实现更明显的视差)
+                ((CV3AppCell *)cell).iconOffset = CGPointMake(-deltaRoll * 2.5, -deltaPitch * 2.5);
+            }
+        }
 
         // 装饰件深度视差 (Layered Decoration Parallax) + 惯性衰减 (Inertial Damping)
         CGFloat targetDecoDX = deltaRoll * kChevronPhysicsConstants.parallaxDecoFactor;
@@ -2549,8 +2600,12 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 - (NSInteger)collectionView:(id)c numberOfItemsInSection:(NSInteger)s { return self.filteredApps.count; }
 - (id)collectionView:(id)c cellForItemAtIndexPath:(id)i {
     CV3AppCell *cell = [c dequeueReusableCellWithReuseIdentifier:@"C" forIndexPath:i];
-    CV3AppInfo *info = self.filteredApps[[(NSIndexPath *)i item]];
-    [cell configureWithInfo:info searchText:self.searchField.text];
+    NSInteger index = [(NSIndexPath *)i item];
+    CV3AppInfo *info = self.filteredApps[index];
+    
+    // 增加首项判断逻辑，用于开启搜索首项高亮
+    BOOL isFirst = (index == 0 && self.searchField.text.length > 0);
+    [cell configureWithInfo:info searchText:self.searchField.text isFirst:isFirst];
     
     // 关键：为最近使用的应用增加“脉冲呼吸”光效
     BOOL isRecent = NO;
