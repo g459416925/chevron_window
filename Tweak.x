@@ -2097,7 +2097,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             [self.selectionFeedback prepare];
             self.lastHapticX = 0;
             self.bezierContainer.alpha = 1.0;
-            self.dimmingView.alpha = 0; 
+            // 彻底移除 dimmingView 的预加载
             
             self.bezierLayer.shadowColor = [UIColor labelColor].CGColor;
             self.bezierLayer.shadowOffset = CGSizeZero;
@@ -2108,15 +2108,10 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         if (self.bezierContainer.alpha > 0) {
             self.bezierLayer.path = [self pathForStretch:MAX(0, stretch) atPoint:location velocity:velocity orientation:orientation].CGPath;
 
-            CGFloat progress = MIN(stretch / 45.0, 1.0);
-            self.dimmingView.alpha = progress;
-            self.bezierLayer.shadowOpacity = progress * 0.6;
-
+            // 仅进行手势拉伸图形绘制，延迟 dimmingView 等呈现准备工作至阈值触发后
             // 建议 3：Tactile Granularity (触觉颗粒感)
-            // 随着拉伸距离增加，震动频率变快，模拟张力感
             CGFloat hapticInterval = MAX(8.0, 20.0 - (stretch / 45.0) * 12.0);
             if (fabs(stretch - self.lastHapticX) > hapticInterval) {
-                // 使用 Rigid 风格模拟物理阻尼感
                 UIImpactFeedbackGenerator *rigid = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid];
                 [rigid impactOccurredWithIntensity:0.3 + (stretch / 45.0) * 0.4];
                 
@@ -2132,6 +2127,14 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
         if (self.bezierContainer.alpha > 0 && !self.isPanelShowing && vel > 300 && gesture.state != UIGestureRecognizerStateCancelled) {
             [self animateSpotlight:YES fromPoint:location velocity:vel];
+        } else if (!self.isPanelShowing) {
+            // 修复：确保中断时重置所有状态
+            [UIView animateWithDuration:0.4 animations:^{
+                self.panelContainer.hidden = YES;
+                self.panelContainer.alpha = 0;
+                self.dimmingView.alpha = 0;
+                self.isAnimating = NO;
+            }];
         }
         [UIView animateWithDuration:0.4 animations:^{ 
             self.bezierContainer.alpha = 0; 
@@ -2212,6 +2215,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     if (self.isAnimating) return;
     self.isPanelShowing = visible; self.isAnimating = YES;
     if (visible) {
+        self.dimmingView.alpha = 1.0; // 阈值触发时同步显示遮罩
         self.lastTriggerPoint = point;
         self.hasCapturedBaseline = NO; // 重置基准姿态捕获标志
         [self loadAppsAsync];
@@ -2478,11 +2482,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         // 探测靠近边界的行为（1cm 距离阈值）
         if ([touch locationInView:self].x > self.bounds.size.width - 50) {
             self.isInPredictiveMode = YES;
-            [UIView animateWithDuration:0.2 animations:^{
-                self.panelContainer.hidden = NO;
-                self.panelContainer.alpha = 0.5;
-                self.panelContainer.transform = CGAffineTransformScale(CGAffineTransformIdentity, 0.8, 0.8);
-            }];
+            // 移除 panelContainer.hidden = NO 和 alpha 设置
         }
     }
 }
