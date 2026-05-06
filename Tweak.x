@@ -59,9 +59,10 @@
 @property (nonatomic, copy) NSString *bundleId;
 @property (nonatomic, strong) UIImage *icon;
 @property (nonatomic, strong) id sbIcon; 
-@property (nonatomic, copy) NSString *pinyinInitial; // 存储名称的拼音首字母
-@property (nonatomic, copy) NSString *category; // 新增：应用分类名称
-@property (nonatomic, assign) BOOL isPinned;   // 新增：是否已置顶
+@property (nonatomic, copy) NSString *pinyinInitial;
+@property (nonatomic, copy) NSString *category; 
+@property (nonatomic, assign) BOOL isPinned;
+@property (nonatomic, assign) NSTimeInterval lastUsedDate; // 熵减逻辑：最后使用时间
 - (void)generatePinyin;
 @end
 @implementation CV3AppInfo
@@ -339,9 +340,10 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, assign) BOOL isMagneticLayoutActive; // 引力布局状态
 
 // 建议 1-3：主动交互系统 (Active Interactive System)
-@property (nonatomic, strong) CAShapeLayer *trailLayer; // 流体留存层
-@property (nonatomic, strong) UIView *lightWaveView; // 光照探测层
-@property (nonatomic, strong) NSTimer *entropyTimer; // 熵增演化定时器
+@property (nonatomic, strong) CAShapeLayer *trailLayer; 
+@property (nonatomic, strong) UIView *lightWaveView;
+@property (nonatomic, strong) NSTimer *entropyTimer;
+@property (nonatomic, assign) NSInteger interactionCount; 
 
 - (void)show;
 - (void)loadAppsAsync;
@@ -349,8 +351,9 @@ static void CV3LogToFile(NSString *format, ...) {
 - (NSString *)_role; 
 - (void)triggerCollisionImpulse; 
 - (void)updateMagneticLayout;
-- (void)emitLightWaveFromPoint:(CGPoint)point; // 建议 2：光照波
-- (void)startEntropicEvolution; // 建议 3：熵增演化
+- (void)emitLightWaveFromPoint:(CGPoint)point;
+- (void)startEntropicEvolution;
+- (void)applyAgingEffectToCell:(CV3AppCell *)cell withInfo:(CV3AppInfo *)info; 
 @end
 
 static NSCache *cv3IconCache = nil; 
@@ -572,7 +575,33 @@ struct {
     [self filterApps];
 }
 
+// 建议 2：透视穿孔效果 (Holographic Punch-through)
+- (void)updateRefractionEffect {
+    if (!self.isPanelShowing) return;
+    // 使用 CIFilter 模拟光学穿孔效果
+    self.distortionFilter = [CIFilter filterWithName:@"CIDisplacementDistortion"];
+    [self.distortionFilter setValue:[CIImage imageWithColor:[CIColor colorWithRed:0 green:0 blue:0]] forKey:kCIInputImageKey];
+    // 动态调整畸变参数
+    self.refractionView.layer.filters = @[self.distortionFilter];
+}
+
+// 建议 2：应用“衰老”效果 (Entropy Archive)
+- (void)applyAgingEffectToCell:(CV3AppCell *)cell withInfo:(CV3AppInfo *)info {
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    NSTimeInterval age = now - info.lastUsedDate;
+    
+    // 超过 7 天未使用的应用变灰
+    if (age > 7 * 24 * 3600) {
+        cell.alpha = 0.6;
+        cell.iconView.layer.borderColor = [UIColor grayColor].CGColor;
+    } else {
+        cell.alpha = 1.0;
+    }
+}
+
 - (void)filterApps {
+    self.interactionCount++;
+    
     NSString *text = [self.searchField.text lowercaseString];
     
     BOOL hasSearch = (text && text.length > 0);
@@ -615,6 +644,8 @@ struct {
             }
             
             if (matchSearch && matchCategory) {
+                // 应用衰老效果
+                [self applyAgingEffectToCell:nil withInfo:info];
                 [res addObject:info];
             }
         }
