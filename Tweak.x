@@ -2570,36 +2570,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     return cell;
 }
 
-- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
-    if (scrollView == self.collectionView) {
-        // 建议2：滚动惯性偏转 (Icon Scrolling Tilt)
-        CGFloat velocity = [scrollView.panGestureRecognizer velocityInView:scrollView].y;
-        CGFloat tilt = velocity * kChevronPhysicsConstants.scrollTiltFactor;
-        tilt = MAX(-kChevronPhysicsConstants.tiltMaxAngle, MIN(kChevronPhysicsConstants.tiltMaxAngle, tilt));
-        
-        for (UICollectionViewCell *cell in self.collectionView.visibleCells) {
-            [UIView animateWithDuration:0.1 delay:0 options:UIViewAnimationOptionAllowUserInteraction animations:^{
-                cell.contentView.transform = CGAffineTransformMakeRotation(tilt);
-            } completion:nil];
-        }
-    }
-}
-
-- (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {
-    if (!decelerate) [self resetIconTilt];
-}
-
-- (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView {
-    [self resetIconTilt];
-}
-
-- (void)resetIconTilt {
-    [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.6 initialSpringVelocity:0.5 options:UIViewAnimationOptionAllowUserInteraction animations:^{
-        for (UICollectionViewCell *cell in self.collectionView.visibleCells) {
-            cell.contentView.transform = CGAffineTransformIdentity;
-        }
-    } completion:nil];
-}
 
 - (BOOL)_canBecomeKeyWindow { return YES; }
 - (BOOL)canBecomeKeyWindow { return YES; }
