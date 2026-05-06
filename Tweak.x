@@ -287,14 +287,14 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, strong) UIVisualEffectView *bezierBlur;
 @property (nonatomic, strong) CALayer *cyanLayer;
 @property (nonatomic, strong) CALayer *magentaLayer;
-@property (nonatomic, strong) UIView *whiteFilter; // 新增：白色滤镜层
-@property (nonatomic, strong) UIView *dispersionContainer; // 新增：色散容器层
+@property (nonatomic, strong) UIView *whiteFilter; 
+@property (nonatomic, strong) UIView *dispersionContainer; 
 @property (nonatomic, assign) BOOL isPanelShowing;
 @property (nonatomic, assign) BOOL isAnimating;
 @property (nonatomic, assign) BOOL isProcessing; 
 @property (nonatomic, assign) BOOL launchDebounce;
-@property (nonatomic, assign) BOOL needsFullReload; // 建议1：增量更新标志位
-@property (nonatomic, assign) BOOL isSuppressedBySystem; // 新增：系统强制压制标志
+@property (nonatomic, assign) BOOL needsFullReload; 
+@property (nonatomic, assign) BOOL isSuppressedBySystem; 
 @property (nonatomic, strong) NSMutableArray<CV3AppInfo *> *apps;
 
 @property (nonatomic, strong) UIImpactFeedbackGenerator *feedback;
@@ -304,13 +304,13 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, assign) BOOL hasBeenMoved;
 @property (nonatomic, strong) UIView *dimmingView;
 @property (nonatomic, strong) UIView *resizingHandle;
-@property (nonatomic, strong) CAShapeLayer *resizingHandleLayer; // 新增：存储把手形状层
+@property (nonatomic, strong) CAShapeLayer *resizingHandleLayer; 
 @property (nonatomic, strong) UIView *trafficCapsule;
 @property (nonatomic, strong) NSArray<UIView *> *trafficDots;
 @property (nonatomic, strong) UITextField *searchField;
 @property (nonatomic, strong) NSMutableArray<CV3AppInfo *> *filteredApps;
-@property (nonatomic, strong) NSArray<CV3AppInfo *> *recentlyUsedApps; // 新增：存储最近使用的应用
-@property (nonatomic, strong) NSMutableSet *pinnedBundleIDs; // 新增：存储置顶应用的 Bundle ID
+@property (nonatomic, strong) NSArray<CV3AppInfo *> *recentlyUsedApps; 
+@property (nonatomic, strong) NSMutableSet *pinnedBundleIDs; 
 @property (nonatomic, strong) UILabel *noResultsLabel;
 @property (nonatomic, assign) CGFloat lastHapticX;
 @property (nonatomic, strong) UIScreenEdgePanGestureRecognizer *systemEdgePan;
@@ -318,22 +318,26 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, assign) CGPoint lastTriggerPoint;
 @property (nonatomic, strong) NSIndexPath *lastWaveHapticIndexPath;
 @property (nonatomic, strong) CAShapeLayer *searchBackground;
-@property (nonatomic, strong) UIScrollView *categoryBar; // 新增：分类导航栏
-@property (nonatomic, copy) NSString *selectedCategory; // 当前选中的分类
-@property (nonatomic, assign) CGAffineTransform baseRotationTransform; // 新增：存储基础旋转变换
-@property (nonatomic, strong) UIView *contrastBackdrop; // 新增：对比度增强层
-@property (nonatomic, strong) CALayer *innerGlowLayer; // 新增：内发光边框层
-@property (nonatomic, assign) CGPoint cachedTargetCenter; // 建议3：布局预热缓存
-@property (nonatomic, assign) CGFloat currentDecoDX; // 建议：惯性衰减 X
-@property (nonatomic, assign) CGFloat currentDecoDY; // 建议：惯性衰减 Y
-@property (nonatomic, assign) CGFloat baseRoll; // 建议：基准 Roll (用于解耦绝对姿态)
-@property (nonatomic, assign) CGFloat basePitch; // 建议：基准 Pitch
-@property (nonatomic, assign) BOOL hasCapturedBaseline; // 建议：是否已捕获基准姿态
+@property (nonatomic, strong) UIScrollView *categoryBar; 
+@property (nonatomic, copy) NSString *selectedCategory; 
+@property (nonatomic, assign) CGAffineTransform baseRotationTransform; 
+@property (nonatomic, strong) UIView *contrastBackdrop; 
+@property (nonatomic, strong) CALayer *innerGlowLayer; 
+@property (nonatomic, assign) CGPoint cachedTargetCenter; 
+@property (nonatomic, assign) CGFloat currentDecoDX; 
+@property (nonatomic, assign) CGFloat currentDecoDY; 
+@property (nonatomic, assign) CGFloat baseRoll; 
+@property (nonatomic, assign) CGFloat basePitch; 
+@property (nonatomic, assign) BOOL hasCapturedBaseline; 
+
+// 建议 1：光纤导光图层 (Fiber-Optic Glows)
+@property (nonatomic, strong) CAGradientLayer *redGlow, *yellowGlow, *greenGlow;
 
 - (void)show;
 - (void)loadAppsAsync;
 - (void)applyBackgroundTint:(UIColor *)color;
 - (NSString *)_role; 
+- (void)triggerCollisionImpulse; // 建议 3：碰撞脉冲
 @end
 
 static NSCache *cv3IconCache = nil; 
@@ -1000,6 +1004,25 @@ struct {
 
     [self.panelContainer addSubview:self.appPanel];
 
+    // 建议 1：初始化光纤导光图层 (Fiber-Optic Setup)
+    // 这些光晕位于最底层，用于模拟玻璃内部的导光效果
+    NSArray *glowColors = @[[UIColor colorWithRed:1.00 green:0.37 blue:0.33 alpha:1.0], 
+                           [UIColor colorWithRed:1.00 green:0.75 blue:0.18 alpha:1.0], 
+                           [UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:1.0]];
+    for (int i = 0; i < 3; i++) {
+        CAGradientLayer *glow = [CAGradientLayer layer];
+        glow.frame = CGRectMake(0, 0, 150, 150);
+        glow.type = kCAGradientLayerRadial;
+        glow.colors = @[(id)[glowColors[i] colorWithAlphaComponent:0.08].CGColor, (id)[UIColor clearColor].CGColor];
+        glow.startPoint = CGPointMake(0.5, 0.5);
+        glow.endPoint = CGPointMake(1.0, 1.0);
+        glow.hidden = YES; // 初始隐藏，仅在面板显示时激活
+        [self.appPanel.layer insertSublayer:glow atIndex:0];
+        if (i == 0) self.redGlow = glow;
+        else if (i == 1) self.yellowGlow = glow;
+        else self.greenGlow = glow;
+    }
+
     self.trafficCapsule = [[UIView alloc] initWithFrame:CGRectMake(16, 14, kChevronLayoutConstants.trafficCapsuleW, kChevronLayoutConstants.trafficCapsuleH)];
     self.trafficCapsule.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.08];
     self.trafficCapsule.layer.cornerRadius = kChevronLayoutConstants.trafficCapsuleH / 2.0;
@@ -1120,6 +1143,34 @@ struct {
     [self.collectionView addGestureRecognizer:pinLongPress];
 }
 
+- (void)triggerCollisionImpulse {
+    // 建议 3：Chromatic Collision Impulse (边缘色散碰撞脉冲)
+    // 模拟物理冲击导致的镜头组瞬时偏移
+    [CATransaction begin];
+    [CATransaction setAnimationDuration:0.12];
+    [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut]];
+    
+    // 青色/品红层向相反方向剧烈抖动后回弹
+    CAKeyframeAnimation *cyanAnim = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation"];
+    cyanAnim.values = @[[NSValue valueWithCGPoint:CGPointMake(-4, -4)], [NSValue valueWithCGPoint:CGPointZero]];
+    [self.cyanLayer addAnimation:cyanAnim forKey:@"collision"];
+    
+    CAKeyframeAnimation *magAnim = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation"];
+    magAnim.values = @[[NSValue valueWithCGPoint:CGPointMake(4, 4)], [NSValue valueWithCGPoint:CGPointZero]];
+    [self.magentaLayer addAnimation:magAnim forKey:@"collision"];
+    
+    // 内发光瞬间增强，模拟碰撞火花
+    CAKeyframeAnimation *glowAnim = [CAKeyframeAnimation animationWithKeyPath:@"borderWidth"];
+    glowAnim.values = @[@2.0, @0.3];
+    [self.innerGlowLayer addAnimation:glowAnim forKey:@"collision"];
+    
+    [CATransaction commit];
+    
+    // 触觉反馈：刚性碰撞
+    UIImpactFeedbackGenerator *rigid = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid];
+    [rigid impactOccurredWithIntensity:1.0];
+}
+
 - (void)handleAppLongPress:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
         CGPoint point = [gesture locationInView:self.collectionView];
@@ -1190,9 +1241,16 @@ struct {
                 transform = CATransform3DRotate(transform, angleY, 0, 1, 0);
                 transform = CATransform3DScale(transform, scale, scale, 1.0);
 
+                // 建议 4：Pressure Wavefronts (触控压感波动 - 物理推开效果)
+                // 计算远离手指的推力位移
+                CGFloat pushAmount = 18.0 * smoothRatio;
+                CGFloat pushX = (distance > 0) ? -(dx / distance) * pushAmount : 0;
+                CGFloat pushY = (distance > 0) ? -(dy / distance) * pushAmount : 0;
+
                 [UIView animateWithDuration:0.1 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
                     cell.layer.transform = transform;
-                    cell.contentView.transform = CGAffineTransformMakeTranslation(0, -10 * smoothRatio);
+                    // 应用“推开”位移 + 基础浮动偏移
+                    cell.contentView.transform = CGAffineTransformMakeTranslation(pushX, pushY - 10 * smoothRatio);
                     
                     if ([cell isKindOfClass:[CV3AppCell class]]) {
                         CV3AppCell *appCell = (CV3AppCell *)cell;
@@ -1466,10 +1524,9 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         targetCenter.y = MAX(hH, MIN(b.size.height - hH, targetCenter.y));
 
         // 建议1：触觉反馈深度耦合 (Haptic Coupling)
-        // 如果检测到位置发生了磁吸偏移，触发一次刚性震动
+        // 如果检测到位置发生了磁吸偏移，触发一次刚性震动和碰撞脉冲 (C3)
         if (!CGPointEqualToPoint(currentCenter, targetCenter)) {
-            UIImpactFeedbackGenerator *rigid = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid];
-            [rigid impactOccurred];
+            [self triggerCollisionImpulse];
         }
 
         [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.6 initialSpringVelocity:1.0 options:0 animations:^{
@@ -2181,20 +2238,28 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     [self.motionManager startDeviceMotionUpdatesToQueue:[NSOperationQueue mainQueue] withHandler:^(CMDeviceMotion *m, NSError *e) {
         if (!m) return;
         
-        // 捕获首次启动时的基准姿态，实现相对视差 (Relative Parallax)
         if (!self.hasCapturedBaseline) {
             self.baseRoll = m.attitude.roll;
             self.basePitch = m.attitude.pitch;
             self.hasCapturedBaseline = YES;
+            // 面板显示时激活光效
+            [CATransaction begin]; [CATransaction setDisableActions:YES];
+            self.redGlow.hidden = NO; self.yellowGlow.hidden = NO; self.greenGlow.hidden = NO;
+            [CATransaction commit];
         }
         
-        // 计算相对于面板呼出时的相对倾斜量
         CGFloat deltaRoll = m.attitude.roll - self.baseRoll;
         CGFloat deltaPitch = m.attitude.pitch - self.basePitch;
 
         [CATransaction begin]; [CATransaction setDisableActions:YES];
 
-        // 1. 图标高光与色散层现有的视差逻辑
+        // 建议 1：Fiber-Optic Light Leak (光纤导光实时姿态)
+        // 光束顺着倾斜方向在面板内部流动，具有更高的位移敏感度
+        CGFloat glowShift = 45.0;
+        self.redGlow.position = CGPointMake(40 + deltaRoll * glowShift, 25 + deltaPitch * glowShift);
+        self.yellowGlow.position = CGPointMake(65 + deltaRoll * glowShift, 25 + deltaPitch * glowShift);
+        self.greenGlow.position = CGPointMake(90 + deltaRoll * glowShift, 25 + deltaPitch * glowShift);
+
         self.specularHighlight.startPoint = CGPointMake(0.5 - deltaRoll*1.5, 0.5 - deltaPitch*1.5);
         self.specularHighlight.endPoint = CGPointMake(1.5 - deltaRoll*1.5, 1.5 - deltaPitch*1.5);
 
@@ -2263,7 +2328,45 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         [CATransaction commit];
     }];
 }
-- (void)stopLiquidMotion { [self.motionManager stopDeviceMotionUpdates]; }
+- (void)stopLiquidMotion { 
+    [self.motionManager stopDeviceMotionUpdates]; 
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    self.redGlow.hidden = YES; self.yellowGlow.hidden = YES; self.greenGlow.hidden = YES;
+    [CATransaction commit];
+}
+
+// 建议 2：Kinetic Viscosity Scrolling (动能黏滞滚动)
+- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    if (scrollView == self.collectionView) {
+        CGFloat velocity = [scrollView.panGestureRecognizer velocityInView:self.panelContainer].y;
+        // 限制形变范围，防止过度拉伸
+        CGFloat skew = MAX(-0.15, MIN(0.15, velocity * 0.00008));
+        
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        // 应用错切变换 (Skew)，模拟液体流动的黏滞拉伸
+        CATransform3D t = CATransform3DIdentity;
+        t.m12 = skew; 
+        self.collectionView.layer.transform = t;
+        [CATransaction commit];
+        
+        // 当速度很快时，增加轻微的运动模糊（通过透明度模拟）
+        self.collectionView.alpha = MAX(0.85, 1.0 - fabs(skew) * 0.5);
+    }
+}
+
+- (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView {
+    [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.6 initialSpringVelocity:0.5 options:0 animations:^{
+        self.collectionView.layer.transform = CATransform3DIdentity;
+        self.collectionView.alpha = 1.0;
+    } completion:nil];
+}
+
+- (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {
+    if (!decelerate) {
+        [self scrollViewDidEndDecelerating:scrollView];
+    }
+}
 
 - (BOOL)shouldIncludeApp:(id)appProxy {
     // 1. 必须是用户应用
