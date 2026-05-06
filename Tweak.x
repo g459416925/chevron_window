@@ -345,6 +345,11 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, strong) NSTimer *entropyTimer;
 @property (nonatomic, assign) NSInteger interactionCount; 
 
+// 终极融合系统属性
+@property (nonatomic, strong) UIView *projectionView; // 呼吸投影层
+@property (nonatomic, assign) BOOL isInPredictiveMode; // 交互黑洞预知模式
+@property (nonatomic, assign) CGPoint lastVelocity; // 惯性偏移计算
+
 - (void)show;
 - (void)loadAppsAsync;
 - (void)applyBackgroundTint:(UIColor *)color;
@@ -353,7 +358,7 @@ static void CV3LogToFile(NSString *format, ...) {
 - (void)updateMagneticLayout;
 - (void)emitLightWaveFromPoint:(CGPoint)point;
 - (void)startEntropicEvolution;
-- (void)applyAgingEffectToCell:(CV3AppCell *)cell withInfo:(CV3AppInfo *)info; 
+- (void)applyAgingEffectToCell:(CV3AppCell *)cell withInfo:(CV3AppInfo *)info;
 @end
 
 static NSCache *cv3IconCache = nil; 
@@ -1058,6 +1063,13 @@ struct {
 
     [self.panelContainer addSubview:self.appPanel];
 
+    // 终极融合系统：初始化全屏投影层
+    self.projectionView = [[UIView alloc] initWithFrame:self.bounds];
+    self.projectionView.userInteractionEnabled = NO;
+    self.projectionView.layer.compositingFilter = @"plusLighterBlendMode";
+    self.projectionView.alpha = 0.3;
+    [self.rootViewController.view insertSubview:self.projectionView atIndex:0];
+
     // 建议 1-3：主动交互图层初始化
     self.trailLayer = [CAShapeLayer layer];
     self.trailLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.4].CGColor;
@@ -1539,48 +1551,32 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     CGPoint location = [gesture locationInView:self.panelContainer];
     
     // 智能模糊抽离 (Smart Blur Easing) 计算
-    CGPoint velocity = [gesture velocityInView:self.panelContainer.superview];
-    CGFloat speed = sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
+    
     
     if (gesture.state == UIGestureRecognizerStateBegan) {
         if (location.y > 45.0) { return; }
         self.hasBeenMoved = YES;
         [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.5 initialSpringVelocity:1.0 options:0 animations:^{
-            // 保留当前的旋转状态（transform）只进行缩放
             CGAffineTransform currentTransform = self.panelContainer.transform;
             self.panelContainer.transform = CGAffineTransformScale(currentTransform, 1.05, 1.05);
         } completion:nil];
     }
-    
-    if (gesture.state == UIGestureRecognizerStateChanged) {
-        // 动态调整模糊强度与透明度，模拟物理上的视觉暂留
-        // 速度 0 -> 3000 对应 alpha 1.0 -> 0.75
-        CGFloat easingAlpha = MAX(0.75, 1.0 - (speed / 3000.0) * 0.25);
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        self.appPanel.alpha = easingAlpha;
-        [CATransaction commit];
-    }
 
-    // 使用 superview 坐标系以确保与父容器内的绝对位置一致
-    CGPoint translation = [gesture translationInView:self.panelContainer.superview];
-    CGPoint newCenter = CGPointMake(self.panelContainer.center.x + translation.x, self.panelContainer.center.y + translation.y);
-    
-    // 使用物理屏幕边界进行约束，允许超出安全区域
-    CGRect bounds = self.bounds;
-    
-    // 获取面板在旋转变换前的 bounds
-    CGRect panelBounds = self.panelContainer.bounds;
-    CGFloat halfW = (panelBounds.size.width * 1.05) / 2.0;
-    CGFloat halfH = (panelBounds.size.height * 1.05) / 2.0;
-    
-    // 物理屏幕边缘钳位：允许部分拖出，但必须保留面板的一定可视部分 (这里预留 halfW/halfH，即面板中心不会出屏幕)
-    newCenter.x = MAX(halfW - panelBounds.size.width * 0.4, MIN(bounds.size.width - halfW + panelBounds.size.width * 0.4, newCenter.x));
-    newCenter.y = MAX(halfH - panelBounds.size.height * 0.4, MIN(bounds.size.height - halfH + panelBounds.size.height * 0.4, newCenter.y));
-    
-    self.panelContainer.center = newCenter;
-    [gesture setTranslation:CGPointZero inView:self.panelContainer.superview];
-    
+    if (gesture.state == UIGestureRecognizerStateChanged) {
+        CGPoint translation = [gesture translationInView:self.panelContainer.superview];
+        CGPoint newCenter = CGPointMake(self.panelContainer.center.x + translation.x, self.panelContainer.center.y + translation.y);
+        
+        CGRect bounds = self.bounds;
+        CGRect panelBounds = self.panelContainer.bounds;
+        CGFloat halfW = (panelBounds.size.width * 1.05) / 2.0;
+        CGFloat halfH = (panelBounds.size.height * 1.05) / 2.0;
+        
+        newCenter.x = MAX(halfW - panelBounds.size.width * 0.4, MIN(bounds.size.width - halfW + panelBounds.size.width * 0.4, newCenter.x));
+        newCenter.y = MAX(halfH - panelBounds.size.height * 0.4, MIN(bounds.size.height - halfH + panelBounds.size.height * 0.4, newCenter.y));
+        
+        self.panelContainer.center = newCenter;
+        [gesture setTranslation:CGPointZero inView:self.panelContainer.superview];
+    }
     if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
         // 恢复原始缩放，但不重置 transform（保留旋转）
         CGAffineTransform current = self.panelContainer.transform;
@@ -1593,6 +1589,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         CGPoint currentCenter = self.panelContainer.center;
         CGPoint targetCenter = currentCenter;
         
+        CGRect panelBounds = self.panelContainer.bounds;
         CGSize sizeInRoot = CGRectApplyAffineTransform(panelBounds, self.panelContainer.transform).size;
         CGFloat rootHalfW = sizeInRoot.width / 2.0;
         CGFloat rootHalfH = sizeInRoot.height / 2.0;
@@ -2471,19 +2468,22 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     }];
 }
 
-// 建议 2：Kinetic Viscosity Scrolling (动能黏滞滚动)
-- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
-    if (scrollView == self.collectionView) {
-        CGFloat velocity = [scrollView.panGestureRecognizer velocityInView:self.panelContainer].y;
-        CGFloat skew = MAX(-0.15, MIN(0.15, velocity * 0.00008));
-        
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        CATransform3D t = CATransform3DIdentity;
-        t.m12 = skew; 
-        self.collectionView.layer.transform = t;
-        [CATransaction commit];
-        self.collectionView.alpha = MAX(0.85, 1.0 - fabs(skew) * 0.5);
+
+
+// 建议 3：交互黑洞预知系统 (Black Hole Predictive System)
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesBegan:touches withEvent:event];
+    if (!self.isPanelShowing) {
+        UITouch *touch = [touches anyObject];
+        // 探测靠近边界的行为（1cm 距离阈值）
+        if ([touch locationInView:self].x > self.bounds.size.width - 50) {
+            self.isInPredictiveMode = YES;
+            [UIView animateWithDuration:0.2 animations:^{
+                self.panelContainer.hidden = NO;
+                self.panelContainer.alpha = 0.5;
+                self.panelContainer.transform = CGAffineTransformScale(CGAffineTransformIdentity, 0.8, 0.8);
+            }];
+        }
     }
 }
 
