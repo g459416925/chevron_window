@@ -104,7 +104,7 @@
     if (self) {
         CGFloat iconSize = 54.0;
         UIView *ivBack = [[UIView alloc] initWithFrame:CGRectMake((frame.size.width - iconSize)/2, 8, iconSize, iconSize)];
-        ivBack.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.08];
+        ivBack.backgroundColor = [[UIColor labelColor] colorWithAlphaComponent:0.08];
         ivBack.layer.cornerRadius = 13;
         ivBack.layer.shadowColor = [UIColor blackColor].CGColor;
         ivBack.layer.shadowOffset = CGSizeMake(0, 3);
@@ -119,9 +119,9 @@
         // 增加图标表面的高光图层 (Specular Highlight)
         self.iconHighlight = [CAGradientLayer layer];
         self.iconHighlight.frame = self.iconView.bounds;
-        self.iconHighlight.colors = @[(id)[[UIColor whiteColor] colorWithAlphaComponent:0.0].CGColor,
-                                      (id)[[UIColor whiteColor] colorWithAlphaComponent:0.35].CGColor,
-                                      (id)[[UIColor whiteColor] colorWithAlphaComponent:0.0].CGColor];
+        self.iconHighlight.colors = @[(id)[[UIColor labelColor] colorWithAlphaComponent:0.0].CGColor,
+                                      (id)[[UIColor labelColor] colorWithAlphaComponent:0.35].CGColor,
+                                      (id)[[UIColor labelColor] colorWithAlphaComponent:0.0].CGColor];
         self.iconHighlight.startPoint = CGPointMake(0, 0);
         self.iconHighlight.endPoint = CGPointMake(1, 1);
         self.iconHighlight.opacity = 0; // 初始隐藏，仅在波纹经过时显示
@@ -141,7 +141,7 @@
         [self.iconView addSubview:self.pinnedIndicator];
 
         self.nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(4, iconSize + 14, frame.size.width - 8, 28)];
-        self.nameLabel.textColor = [[UIColor whiteColor] colorWithAlphaComponent:0.9];
+        self.nameLabel.textColor = [UIColor labelColor];
         self.nameLabel.font = [UIFont systemFontOfSize:10.0 weight:UIFontWeightMedium];
         self.nameLabel.textAlignment = NSTextAlignmentCenter;
         self.nameLabel.numberOfLines = 2;
@@ -156,7 +156,7 @@
 
     if (searchText && searchText.length > 0) {
 
-        NSMutableAttributedString *as = [[NSMutableAttributedString alloc] initWithString:info.name attributes:@{NSForegroundColorAttributeName: [[UIColor whiteColor] colorWithAlphaComponent:0.9]}];
+        NSMutableAttributedString *as = [[NSMutableAttributedString alloc] initWithString:info.name attributes:@{NSForegroundColorAttributeName: [UIColor labelColor]}];
         NSRange range = [info.name rangeOfString:searchText options:NSCaseInsensitiveSearch];
         if (range.location != NSNotFound) {
             // 高亮颜色：使用与绿色交通灯一致的绿色
@@ -167,7 +167,7 @@
     } else {
         self.nameLabel.attributedText = nil;
         self.nameLabel.text = info.name;
-        self.nameLabel.textColor = [[UIColor whiteColor] colorWithAlphaComponent:0.9];
+        self.nameLabel.textColor = [UIColor labelColor];
     }
 
     [self startBreathing];
@@ -635,7 +635,7 @@ struct {
         // 1. 基础缩放与阴影动画
         [UIView animateWithDuration:0.5 delay:0 options:UIViewAnimationOptionAutoreverse | UIViewAnimationOptionRepeat | UIViewAnimationOptionAllowUserInteraction animations:^{
             container.transform = CGAffineTransformMakeScale(1.02, 1.02);
-            self.searchBackground.shadowColor = [UIColor whiteColor].CGColor;
+            self.searchBackground.shadowColor = [UIColor labelColor].CGColor;
             self.searchBackground.shadowOffset = CGSizeZero;
             self.searchBackground.shadowOpacity = 0.4;
             self.searchBackground.shadowRadius = 8.0;
@@ -893,7 +893,7 @@ struct {
     self.bezierBlur.autoresizingMask = UIViewAutoresizingNone;
     [self.bezierContainer addSubview:self.bezierBlur];
     self.bezierLayer = [CAShapeLayer layer];
-    self.bezierLayer.fillColor = [UIColor whiteColor].CGColor;
+    self.bezierLayer.fillColor = [UIColor labelColor].CGColor;
     self.bezierBlur.layer.mask = self.bezierLayer; 
     
     self.panelContainer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kChevronLayoutConstants.panelW, kChevronLayoutConstants.panelH)];
@@ -921,7 +921,7 @@ struct {
     self.appPanel.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
     self.appPanel.layer.masksToBounds = YES;
     self.appPanel.layer.borderWidth = 0.4;
-    self.appPanel.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.2].CGColor;
+    self.appPanel.layer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.2].CGColor;
     
     // 1. 对比度增强层 (Contrast Booster): 极淡的黑色，用于压住背景杂色，让 App 图标更浮出
     self.contrastBackdrop = [[UIView alloc] initWithFrame:self.appPanel.bounds];
@@ -939,14 +939,14 @@ struct {
     // 这种极细的高亮边框能赋予面板物理实体的“边缘折射”感
     self.innerGlowLayer = [CALayer layer];
     self.innerGlowLayer.frame = self.appPanel.bounds;
-    self.innerGlowLayer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.45].CGColor;
+    self.innerGlowLayer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.45].CGColor;
     self.innerGlowLayer.borderWidth = 0.3;
     self.innerGlowLayer.cornerRadius = kChevronLayoutConstants.cornerRadius;
     [self.appPanel.layer addSublayer:self.innerGlowLayer];
 
     self.specularHighlight = [CAGradientLayer layer];
     self.specularHighlight.frame = self.appPanel.bounds;
-    self.specularHighlight.colors = @[(id)[[UIColor whiteColor] colorWithAlphaComponent:0.0].CGColor, (id)[[UIColor whiteColor] colorWithAlphaComponent:0.07].CGColor, (id)[[UIColor whiteColor] colorWithAlphaComponent:0.0].CGColor];
+    self.specularHighlight.colors = @[(id)[[UIColor labelColor] colorWithAlphaComponent:0.0].CGColor, (id)[[UIColor labelColor] colorWithAlphaComponent:0.07].CGColor, (id)[[UIColor labelColor] colorWithAlphaComponent:0.0].CGColor];
     [self.appPanel.layer addSublayer:self.specularHighlight];
 
     self.dispersionContainer = [[UIView alloc] initWithFrame:self.appPanel.bounds];
@@ -1010,18 +1010,18 @@ struct {
     self.searchBackground = [CAShapeLayer layer];
     self.searchBackground.frame = searchContainer.bounds;
     self.searchBackground.path = [UIBezierPath bezierPathWithRoundedRect:searchContainer.bounds cornerRadius:10].CGPath;
-    self.searchBackground.fillColor = [[UIColor whiteColor] colorWithAlphaComponent:0.06].CGColor;
-    self.searchBackground.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.1].CGColor;
+    self.searchBackground.fillColor = [[UIColor labelColor] colorWithAlphaComponent:0.06].CGColor;
+    self.searchBackground.strokeColor = [[UIColor labelColor] colorWithAlphaComponent:0.1].CGColor;
     self.searchBackground.lineWidth = 0.4;
     [searchContainer.layer addSublayer:self.searchBackground];
     
     self.searchField = [[UITextField alloc] initWithFrame:CGRectInset(searchContainer.bounds, 10, 0)];
     self.searchField.placeholder = @"搜索应用...";
-    self.searchField.textColor = [UIColor whiteColor];
+    self.searchField.textColor = [UIColor labelColor];
     self.searchField.font = [UIFont systemFontOfSize:14];
-    self.searchField.tintColor = [UIColor whiteColor];
+    self.searchField.tintColor = [UIColor labelColor];
     // 设置占位符颜色
-    self.searchField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"搜索应用..." attributes:@{NSForegroundColorAttributeName: [[UIColor whiteColor] colorWithAlphaComponent:0.4]}];
+    self.searchField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"搜索应用..." attributes:@{NSForegroundColorAttributeName: [UIColor secondaryLabelColor]}];
     [self.searchField addTarget:self action:@selector(searchTextChanged:) forControlEvents:UIControlEventEditingChanged];
     self.searchField.delegate = self;
     self.searchField.returnKeyType = UIReturnKeySearch;
@@ -1031,7 +1031,7 @@ struct {
     // --- No Results Label Setup ---
     self.noResultsLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 150, kChevronLayoutConstants.panelW, 40)];
     self.noResultsLabel.text = @"未找到相关应用";
-    self.noResultsLabel.textColor = [[UIColor whiteColor] colorWithAlphaComponent:0.4];
+    self.noResultsLabel.textColor = [UIColor secondaryLabelColor];
     self.noResultsLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
     self.noResultsLabel.textAlignment = NSTextAlignmentCenter;
     self.noResultsLabel.hidden = YES;
@@ -1052,7 +1052,7 @@ struct {
     // 中心点从 (0,0) 移至 (12, 12)，半径 20，使其更紧贴 28pt 的圆角
     self.resizingHandleLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(12, 12) radius:20 startAngle:0 endAngle:M_PI_2 clockwise:YES].CGPath;
     self.resizingHandleLayer.fillColor = [UIColor clearColor].CGColor;
-    self.resizingHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
+    self.resizingHandleLayer.strokeColor = [[UIColor labelColor] colorWithAlphaComponent:0.3].CGColor;
     self.resizingHandleLayer.lineWidth = 2.0;
     [self.resizingHandle.layer addSublayer:self.resizingHandleLayer];
     
@@ -1219,8 +1219,8 @@ struct {
             }
             
             BOOL isSelected = [btnCatName isEqualToString:self.selectedCategory];
-            btn.backgroundColor = isSelected ? [[UIColor whiteColor] colorWithAlphaComponent:0.2] : [[UIColor whiteColor] colorWithAlphaComponent:0.06];
-            btn.layer.borderColor = isSelected ? [[UIColor cyanColor] colorWithAlphaComponent:0.5].CGColor : [[UIColor whiteColor] colorWithAlphaComponent:0.1].CGColor;
+            btn.backgroundColor = isSelected ? [[UIColor labelColor] colorWithAlphaComponent:0.2] : [[UIColor labelColor] colorWithAlphaComponent:0.06];
+            btn.layer.borderColor = isSelected ? [[UIColor cyanColor] colorWithAlphaComponent:0.5].CGColor : [[UIColor labelColor] colorWithAlphaComponent:0.1].CGColor;
         }
     }
     
@@ -1318,7 +1318,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         [btn setTitle:displayTitle forState:UIControlStateNormal];
         
         btn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-        [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        [btn setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
         
         // 如果是当前时段推荐的分类，增加一个微弱的发光边框暗示
         BOOL isSuggested = CV3GetTimePriorityForCategory(cat) > 0;
@@ -1329,10 +1329,10 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         btn.layer.cornerRadius = 14;
         
         BOOL isSelected = [cat isEqualToString:self.selectedCategory];
-        btn.backgroundColor = isSelected ? [[UIColor whiteColor] colorWithAlphaComponent:0.2] : [[UIColor whiteColor] colorWithAlphaComponent:0.06];
+        btn.backgroundColor = isSelected ? [[UIColor labelColor] colorWithAlphaComponent:0.2] : [[UIColor labelColor] colorWithAlphaComponent:0.06];
         btn.layer.borderWidth = isSuggested ? 1.0 : 0.5;
         btn.layer.borderColor = isSelected ? [[UIColor cyanColor] colorWithAlphaComponent:0.5].CGColor : 
-                                (isSuggested ? [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor : [[UIColor whiteColor] colorWithAlphaComponent:0.1].CGColor);
+                                (isSuggested ? [[UIColor labelColor] colorWithAlphaComponent:0.3].CGColor : [[UIColor labelColor] colorWithAlphaComponent:0.1].CGColor);
         
         [btn addTarget:self action:@selector(handleCategoryTap:) forControlEvents:UIControlEventTouchUpInside];
         [self.categoryBar addSubview:btn];
@@ -1460,7 +1460,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
         [CATransaction begin];
         [CATransaction setAnimationDuration:0.4];
-        self.resizingHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
+        self.resizingHandleLayer.strokeColor = [[UIColor labelColor] colorWithAlphaComponent:0.3].CGColor;
         self.resizingHandleLayer.lineWidth = 2.0;
         [CATransaction commit];
     }
@@ -1909,7 +1909,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             self.bezierContainer.alpha = 1.0;
             self.dimmingView.alpha = 0; 
             
-            self.bezierLayer.shadowColor = [UIColor whiteColor].CGColor;
+            self.bezierLayer.shadowColor = [UIColor labelColor].CGColor;
             self.bezierLayer.shadowOffset = CGSizeZero;
             self.bezierLayer.shadowRadius = 10.0;
             self.bezierLayer.shadowOpacity = 0.0;
@@ -2009,7 +2009,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
 - (void)updateTrafficLightsFocus:(BOOL)active {
     NSArray *tc = @[[UIColor colorWithRed:1.00 green:0.37 blue:0.33 alpha:1.0], [UIColor colorWithRed:1.00 green:0.75 blue:0.18 alpha:1.0], [UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:1.0]];
-    UIColor *gray = [[UIColor whiteColor] colorWithAlphaComponent:0.2];
+    UIColor *gray = [[UIColor labelColor] colorWithAlphaComponent:0.2];
     
     // 移除嵌套动画，改为直接设置颜色或使用极简动画，防止阻塞主线程交互
     for (int i = 0; i < self.trafficDots.count; i++) {
@@ -2200,12 +2200,12 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
             self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:MIN(0.6, 0.12 + MAX(0, boost))].CGColor;
             self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:MIN(0.6, 0.12 + MAX(0, boost))].CGColor;
-            self.innerGlowLayer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:MIN(1.0, 0.45 + MAX(0, boost))].CGColor;
+            self.innerGlowLayer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:MIN(1.0, 0.45 + MAX(0, boost))].CGColor;
             self.innerGlowLayer.borderWidth = 0.3 + MAX(0, boost) * 1.5;
         } else {
             self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.12].CGColor;
             self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:0.12].CGColor;
-            self.innerGlowLayer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.45].CGColor;
+            self.innerGlowLayer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.45].CGColor;
             self.innerGlowLayer.borderWidth = 0.3;
         }
 
