@@ -333,11 +333,17 @@ static void CV3LogToFile(NSString *format, ...) {
 // 建议 1：光纤导光图层 (Fiber-Optic Glows)
 @property (nonatomic, strong) CAGradientLayer *redGlow, *yellowGlow, *greenGlow;
 
+// --- 创意：光学玻璃与引力场支持 ---
+@property (nonatomic, strong) UIView *refractionView; // 光学折射容器
+@property (nonatomic, strong) CIFilter *distortionFilter; // 位移畸变滤镜
+@property (nonatomic, assign) BOOL isMagneticLayoutActive; // 引力布局状态
+
 - (void)show;
 - (void)loadAppsAsync;
 - (void)applyBackgroundTint:(UIColor *)color;
 - (NSString *)_role; 
-- (void)triggerCollisionImpulse; // 建议 3：碰撞脉冲
+- (void)triggerCollisionImpulse; 
+- (void)updateMagneticLayout; // 建议：引力场重排
 @end
 
 static NSCache *cv3IconCache = nil; 
@@ -610,6 +616,9 @@ struct {
     self.filteredApps = res;
     
     [self.collectionView reloadData];
+    
+    // 调用引力布局
+    [self updateMagneticLayout];
     
     // 建议 4 & 5：涟漪动效与首项吸附
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.01 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -992,6 +1001,13 @@ struct {
     
     self.cyanLayer = [CALayer layer]; 
     self.cyanLayer.frame = CGRectInset(self.dispersionContainer.bounds, -0.3, -0.3);
+    
+    // 创意：光学折射层 (Negative Lens Effect)
+    self.refractionView = [[UIView alloc] initWithFrame:self.appPanel.bounds];
+    self.refractionView.userInteractionEnabled = NO;
+    self.refractionView.layer.compositingFilter = @"overlayBlendMode";
+    [self.appPanel.contentView addSubview:self.refractionView];
+
     self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.12].CGColor; 
     self.cyanLayer.borderWidth = 0.3; 
     [self.dispersionContainer.layer addSublayer:self.cyanLayer];
@@ -1169,6 +1185,33 @@ struct {
     // 触觉反馈：刚性碰撞
     UIImpactFeedbackGenerator *rigid = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid];
     [rigid impactOccurredWithIntensity:1.0];
+}
+
+// 建议 2：Magnetic Search Attraction (磁极引力搜索)
+- (void)updateMagneticLayout {
+    self.isMagneticLayoutActive = (self.searchField.text.length > 0);
+    
+    if (self.isMagneticLayoutActive) {
+        CGPoint center = CGPointMake(self.collectionView.bounds.size.width / 2, self.collectionView.bounds.size.height / 2);
+        
+        [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
+            NSArray *visibleCells = [self.collectionView visibleCells];
+            for (UICollectionViewCell *cell in visibleCells) {
+                NSIndexPath *indexPath = [self.collectionView indexPathForCell:cell];
+                CGFloat weight = 1.0 - (indexPath.item / (CGFloat)self.filteredApps.count);
+                
+                CGFloat tx = (center.x - cell.center.x) * weight * 0.5;
+                CGFloat ty = (center.y - cell.center.y) * weight * 0.5;
+                cell.transform = CGAffineTransformMakeTranslation(tx, ty);
+            }
+        } completion:nil];
+    } else {
+        [UIView animateWithDuration:0.3 animations:^{
+            for (UICollectionViewCell *cell in [self.collectionView visibleCells]) {
+                cell.transform = CGAffineTransformIdentity;
+            }
+        }];
+    }
 }
 
 - (void)handleAppLongPress:(UILongPressGestureRecognizer *)gesture {
