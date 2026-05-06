@@ -307,6 +307,9 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, assign) CGPoint cachedTargetCenter; // 建议3：布局预热缓存
 @property (nonatomic, assign) CGFloat currentDecoDX; // 建议：惯性衰减 X
 @property (nonatomic, assign) CGFloat currentDecoDY; // 建议：惯性衰减 Y
+@property (nonatomic, assign) CGFloat baseRoll; // 建议：基准 Roll (用于解耦绝对姿态)
+@property (nonatomic, assign) CGFloat basePitch; // 建议：基准 Pitch
+@property (nonatomic, assign) BOOL hasCapturedBaseline; // 建议：是否已捕获基准姿态
 
 - (void)show;
 - (void)loadAppsAsync;
@@ -515,7 +518,7 @@ struct {
         });
 
         [self.searchField resignFirstResponder];
-        [self animateSpotlight:NO fromPoint:self.panelContainer.center];
+        [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
             [[NSClassFromString(@"LSApplicationWorkspace") defaultWorkspace] openApplicationWithBundleID:bid];
         });
@@ -1438,7 +1441,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 }
 
 - (void)handleDimmingTap:(UITapGestureRecognizer *)tap {
-    [self animateSpotlight:NO fromPoint:self.panelContainer.center];
+    [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
 }
 
 - (void)handleResize:(UIPanGestureRecognizer *)gesture {
@@ -1576,7 +1579,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         [gesture setTranslation:CGPointZero inView:self];
     }
 
-    self.appPanel.frame = self.panelContainer.bounds;
+    self.appPanel.bounds = self.panelContainer.bounds;
+    self.appPanel.center = CGPointMake(CGRectGetMidX(self.panelContainer.bounds), CGRectGetMidY(self.panelContainer.bounds));
     CGRect updatedBounds = self.panelContainer.bounds;
     
     // --- UI 智能自适应逻辑 ---
@@ -1672,7 +1676,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
     if (sender.tag == 0 || sender.tag == 1) {
         // 直接触发，不再通过 dispatch_after 延迟，以匹配点击背景的极速响应
-        [self animateSpotlight:NO fromPoint:self.panelContainer.center];
+        [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
     } else if (sender.tag == 2) {
         // 最大化/重置逻辑也同步触发
         [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.8 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
@@ -1691,7 +1695,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 - (void)updateResizingHandleFrame {
     // 确保把手始终在面板的右下角
     CGRect bounds = self.panelContainer.bounds;
-    self.resizingHandle.frame = CGRectMake(bounds.size.width - 40, bounds.size.height - 40, 40, 40);
+    self.resizingHandle.bounds = CGRectMake(0, 0, 40, 40);
+    self.resizingHandle.center = CGPointMake(bounds.size.width - 20, bounds.size.height - 20);
 }
 
 - (void)layoutSubviews {
@@ -1767,6 +1772,11 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             self.panelContainer.transform = targetRotation;
             self.panelContainer.bounds = panelBounds;
             
+            // 重置视差形变，防止修改 frame 时发生坐标跳变 (Geometry Jump)
+            self.appPanel.transform = CGAffineTransformIdentity;
+            self.trafficCapsule.transform = CGAffineTransformIdentity;
+            self.resizingHandle.transform = CGAffineTransformIdentity;
+
             // 调整子组件大小以匹配容器
             self.appPanel.frame = self.panelContainer.bounds;
             
@@ -1924,13 +1934,13 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             }
 
             if (stretch > 45) { 
-                [self animateSpotlight:YES fromPoint:location]; 
+                [self animateSpotlight:YES fromPoint:location velocity:vel]; 
                 gesture.enabled = NO; gesture.enabled = YES; 
             }
         }
     } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
         if (self.bezierContainer.alpha > 0 && !self.isPanelShowing && vel > 300 && gesture.state != UIGestureRecognizerStateCancelled) {
-            [self animateSpotlight:YES fromPoint:location];
+            [self animateSpotlight:YES fromPoint:location velocity:vel];
         }
         [UIView animateWithDuration:0.4 animations:^{ 
             self.bezierContainer.alpha = 0; 
@@ -2007,16 +2017,17 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     }
 }
 
-- (void)animateSpotlight:(BOOL)visible fromPoint:(CGPoint)point {
+- (void)animateSpotlight:(BOOL)visible fromPoint:(CGPoint)point velocity:(CGFloat)velocity {
     if (self.isAnimating) return;
     self.isPanelShowing = visible; self.isAnimating = YES;
     if (visible) {
         self.lastTriggerPoint = point;
+        self.hasCapturedBaseline = NO; // 重置基准姿态捕获标志
         [self loadAppsAsync];
         [self updateTrafficLightsFocus:YES];
         self.dimmingView.userInteractionEnabled = YES; // 显示时开启拦截
         self.panelContainer.hidden = NO; self.panelContainer.center = point;
-        
+
         // 预先应用正确的旋转变换和尺寸
         CGAffineTransform initialRotation = CGAffineTransformIdentity;
         UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
@@ -2027,13 +2038,27 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             default: initialRotation = CGAffineTransformIdentity; break;
         }
 
+        // 根据速度计算非对称形变 (Squash & Stretch)
+        CGAffineTransform squashTransform = CGAffineTransformIdentity;
+        if (fabs(velocity) > 0) {
+            CGFloat stretchAmount = MIN(fabs(velocity) / 2500.0, 0.35); // 最大 35% 拉伸
+            // X轴拉伸，Y轴挤压，方向由 velocity 符号决定（如果是向内拉出则 X 拉伸）
+            squashTransform = CGAffineTransformMakeScale(1.0 + stretchAmount, 1.0 - stretchAmount * 0.5);
+        }
+
+        CGAffineTransform startTransform = CGAffineTransformConcat(squashTransform, initialRotation);
+
         // 计算当前环境下合法的尺寸 (同步 layoutSubviews 逻辑)
-        CGSize maxSize = [self calculateMaxPanelSize];
-        
+        CGSize maxSize = [self calculateMaxPanelSize];        
         CGFloat targetW = MIN(kChevronLayoutConstants.panelW, maxSize.width);
         CGFloat targetH = MIN(kChevronLayoutConstants.panelH, maxSize.height);
         targetH = MAX(targetH, kChevronLayoutConstants.minHeight);
         
+        // 重置视差形变，防止修改 frame 时发生坐标跳变 (Geometry Jump)
+        self.appPanel.transform = CGAffineTransformIdentity;
+        self.trafficCapsule.transform = CGAffineTransformIdentity;
+        self.resizingHandle.transform = CGAffineTransformIdentity;
+
         // 设置初始 bounds 和子组件大小，防止在 layoutSubviews 锁定期间出现错位
         self.panelContainer.bounds = CGRectMake(0, 0, targetW, targetH);
         self.appPanel.frame = self.panelContainer.bounds;
@@ -2057,13 +2082,13 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         self.magentaLayer.frame = CGRectInset(self.appPanel.bounds, 0.3, 0.3);
         [self.collectionView.collectionViewLayout invalidateLayout];
 
-        self.panelContainer.transform = CGAffineTransformScale(initialRotation, 0.01, 0.01);
+        self.panelContainer.transform = CGAffineTransformScale(startTransform, 0.01, 0.01);
         self.panelContainer.alpha = 0;
 
         // 建议3：使用预热缓存的中心点 (Layout Pre-warming)
         CGPoint targetCenter = (self.cachedTargetCenter.x > 0) ? self.cachedTargetCenter : [self calculateTargetCenter];
 
-        [UIView animateWithDuration:0.6 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:1 options:0 animations:^{
+        [UIView animateWithDuration:0.6 delay:0 usingSpringWithDamping:0.45 initialSpringVelocity:1.5 options:0 animations:^{
             self.dimmingView.alpha = 1.0;
             self.panelContainer.center = targetCenter;
             self.panelContainer.transform = initialRotation;
@@ -2114,25 +2139,37 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     if (!self.motionManager.isDeviceMotionAvailable) return;
     [self.motionManager startDeviceMotionUpdatesToQueue:[NSOperationQueue mainQueue] withHandler:^(CMDeviceMotion *m, NSError *e) {
         if (!m) return;
+        
+        // 捕获首次启动时的基准姿态，实现相对视差 (Relative Parallax)
+        if (!self.hasCapturedBaseline) {
+            self.baseRoll = m.attitude.roll;
+            self.basePitch = m.attitude.pitch;
+            self.hasCapturedBaseline = YES;
+        }
+        
+        // 计算相对于面板呼出时的相对倾斜量
+        CGFloat deltaRoll = m.attitude.roll - self.baseRoll;
+        CGFloat deltaPitch = m.attitude.pitch - self.basePitch;
+
         [CATransaction begin]; [CATransaction setDisableActions:YES];
 
         // 1. 图标高光与色散层现有的视差逻辑
-        self.specularHighlight.startPoint = CGPointMake(0.5 - m.attitude.roll*1.5, 0.5 - m.attitude.pitch*1.5);
-        self.specularHighlight.endPoint = CGPointMake(1.5 - m.attitude.roll*1.5, 1.5 - m.attitude.pitch*1.5);
+        self.specularHighlight.startPoint = CGPointMake(0.5 - deltaRoll*1.5, 0.5 - deltaPitch*1.5);
+        self.specularHighlight.endPoint = CGPointMake(1.5 - deltaRoll*1.5, 1.5 - deltaPitch*1.5);
 
-        CGFloat dx = m.attitude.roll * 1.2;
-        CGFloat dy = m.attitude.pitch * 1.2;
+        CGFloat dx = deltaRoll * 1.2;
+        CGFloat dy = deltaPitch * 1.2;
         self.cyanLayer.transform = CATransform3DMakeTranslation(-dx, -dy, 0);
         self.magentaLayer.transform = CATransform3DMakeTranslation(dx, dy, 0);
 
         // 建议2：视差解耦 (Parallax Decoupling) - 使用定义的系数
-        CGFloat panelDX = m.attitude.roll * kChevronPhysicsConstants.parallaxPanelFactor;
-        CGFloat panelDY = m.attitude.pitch * kChevronPhysicsConstants.parallaxPanelFactor;
+        CGFloat panelDX = deltaRoll * kChevronPhysicsConstants.parallaxPanelFactor;
+        CGFloat panelDY = deltaPitch * kChevronPhysicsConstants.parallaxPanelFactor;
         self.appPanel.transform = CGAffineTransformMakeTranslation(panelDX, panelDY);
 
         // 装饰件深度视差 (Layered Decoration Parallax) + 惯性衰减 (Inertial Damping)
-        CGFloat targetDecoDX = m.attitude.roll * kChevronPhysicsConstants.parallaxDecoFactor;
-        CGFloat targetDecoDY = m.attitude.pitch * kChevronPhysicsConstants.parallaxDecoFactor;
+        CGFloat targetDecoDX = deltaRoll * kChevronPhysicsConstants.parallaxDecoFactor;
+        CGFloat targetDecoDY = deltaPitch * kChevronPhysicsConstants.parallaxDecoFactor;
 
         // 惯性平滑逻辑：使用插值 (Lerp) 实现物理质量感
         CGFloat oldDecoDX = self.currentDecoDX;
