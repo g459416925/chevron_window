@@ -338,12 +338,19 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, strong) CIFilter *distortionFilter; // 位移畸变滤镜
 @property (nonatomic, assign) BOOL isMagneticLayoutActive; // 引力布局状态
 
+// 建议 1-3：主动交互系统 (Active Interactive System)
+@property (nonatomic, strong) CAShapeLayer *trailLayer; // 流体留存层
+@property (nonatomic, strong) UIView *lightWaveView; // 光照探测层
+@property (nonatomic, strong) NSTimer *entropyTimer; // 熵增演化定时器
+
 - (void)show;
 - (void)loadAppsAsync;
 - (void)applyBackgroundTint:(UIColor *)color;
 - (NSString *)_role; 
 - (void)triggerCollisionImpulse; 
-- (void)updateMagneticLayout; // 建议：引力场重排
+- (void)updateMagneticLayout;
+- (void)emitLightWaveFromPoint:(CGPoint)point; // 建议 2：光照波
+- (void)startEntropicEvolution; // 建议 3：熵增演化
 @end
 
 static NSCache *cv3IconCache = nil; 
@@ -1019,6 +1026,21 @@ struct {
     [self.dispersionContainer.layer addSublayer:self.magentaLayer];
 
     [self.panelContainer addSubview:self.appPanel];
+
+    // 建议 1-3：主动交互图层初始化
+    self.trailLayer = [CAShapeLayer layer];
+    self.trailLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.4].CGColor;
+    self.trailLayer.lineWidth = 4.0;
+    self.trailLayer.lineCap = kCALineCapRound;
+    [self.rootViewController.view.layer addSublayer:self.trailLayer];
+    
+    self.lightWaveView = [[UIView alloc] initWithFrame:self.bounds];
+    self.lightWaveView.userInteractionEnabled = NO;
+    self.lightWaveView.backgroundColor = [UIColor clearColor];
+    [self.rootViewController.view addSubview:self.lightWaveView];
+    
+    // 启动熵增演化定时器
+    self.entropyTimer = [NSTimer scheduledTimerWithTimeInterval:30.0 target:self selector:@selector(startEntropicEvolution) userInfo:nil repeats:YES];
 
     // 建议 1：初始化光纤导光图层 (Fiber-Optic Setup)
     // 这些光晕位于最底层，用于模拟玻璃内部的导光效果
@@ -2378,25 +2400,62 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     [CATransaction commit];
 }
 
+// 建议 1：微流体记忆 (Viscous Residue Memory)
+- (void)showTrailingResidueFromPoint:(CGPoint)startPoint toPoint:(CGPoint)endPoint {
+    UIBezierPath *path = [UIBezierPath bezierPath];
+    [path moveToPoint:startPoint];
+    [path addQuadCurveToPoint:endPoint controlPoint:CGPointMake((startPoint.x + endPoint.x)/2, startPoint.y)];
+    self.trailLayer.path = path.CGPath;
+    
+    [UIView animateWithDuration:0.5 animations:^{ self.trailLayer.opacity = 0; } completion:^(BOOL f) {
+        self.trailLayer.path = nil; self.trailLayer.opacity = 1.0;
+    }];
+}
+
+// 建议 2：光照探测器 (Luminous Proximity)
+- (void)emitLightWaveFromPoint:(CGPoint)point {
+    UIView *wave = [[UIView alloc] initWithFrame:CGRectMake(point.x, point.y, 20, 20)];
+    wave.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3];
+    wave.layer.cornerRadius = 10;
+    [self.lightWaveView addSubview:wave];
+    [UIView animateWithDuration:0.8 animations:^{
+        wave.transform = CGAffineTransformMakeScale(20, 20);
+        wave.alpha = 0;
+    } completion:^(BOOL f){ [wave removeFromSuperview]; }];
+}
+
+// 建议 3：熵增演化 (Entropic Shuffle)
+- (void)startEntropicEvolution {
+    if (!self.isPanelShowing || self.isProcessing) return;
+    [UIView animateWithDuration:2.0 animations:^{
+        for (UICollectionViewCell *cell in [self.collectionView visibleCells]) {
+            CGFloat randX = (arc4random_uniform(20) - 10) * 0.5;
+            CGFloat randY = (arc4random_uniform(20) - 10) * 0.5;
+            cell.transform = CGAffineTransformTranslate(cell.transform, randX, randY);
+        }
+    } completion:^(BOOL f){
+        [UIView animateWithDuration:2.0 animations:^{
+             for (UICollectionViewCell *cell in [self.collectionView visibleCells]) cell.transform = CGAffineTransformIdentity;
+        }];
+    }];
+}
+
 // 建议 2：Kinetic Viscosity Scrolling (动能黏滞滚动)
 - (void)scrollViewDidScroll:(UIScrollView *)scrollView {
     if (scrollView == self.collectionView) {
         CGFloat velocity = [scrollView.panGestureRecognizer velocityInView:self.panelContainer].y;
-        // 限制形变范围，防止过度拉伸
         CGFloat skew = MAX(-0.15, MIN(0.15, velocity * 0.00008));
         
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
-        // 应用错切变换 (Skew)，模拟液体流动的黏滞拉伸
         CATransform3D t = CATransform3DIdentity;
         t.m12 = skew; 
         self.collectionView.layer.transform = t;
         [CATransaction commit];
-        
-        // 当速度很快时，增加轻微的运动模糊（通过透明度模拟）
         self.collectionView.alpha = MAX(0.85, 1.0 - fabs(skew) * 0.5);
     }
 }
+
 
 - (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView {
     [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.6 initialSpringVelocity:0.5 options:0 animations:^{
