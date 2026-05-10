@@ -13,6 +13,7 @@
 @interface SBSystemGestureManager : NSObject
 + (id)mainDisplayManager;
 - (void)addGestureRecognizer:(id)arg1 withType:(unsigned long long)arg2;
+- (void)removeGestureRecognizer:(id)arg1;
 @end
 
 @interface SpringBoard : UIApplication
@@ -2775,6 +2776,15 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             UIWindowScene *targetScene = nil;
             if ([NSClassFromString(@"SBWindowScene") respondsToSelector:@selector(mainDisplayWindowScene)]) {
                 targetScene = [NSClassFromString(@"SBWindowScene") performSelector:@selector(mainDisplayWindowScene)];
+                if (targetScene) {
+                    NSString *role = targetScene.session.role;
+                    if ([role isEqualToString:@"SBWindowSceneSessionRoleSystemAperture"] ||
+                        [role isEqualToString:@"SBWindowSceneSessionRoleSystemApertureCurtain"] ||
+                        [role isEqualToString:@"UISceneSessionRolePlaceholder"] ||
+                        [[role lowercaseString] containsString:@"siri"]) {
+                        targetScene = nil;
+                    }
+                }
             }
             
             if (!targetScene) {
@@ -2783,7 +2793,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
                         NSString *role = scene.session.role;
                         if ([role isEqualToString:@"SBWindowSceneSessionRoleSystemAperture"] ||
                             [role isEqualToString:@"SBWindowSceneSessionRoleSystemApertureCurtain"] ||
-                            [role isEqualToString:@"UISceneSessionRolePlaceholder"]) continue;
+                            [role isEqualToString:@"UISceneSessionRolePlaceholder"] ||
+                            [[role lowercaseString] containsString:@"siri"]) continue;
                         
                         if (scene.activationState == UISceneActivationStateForegroundActive) {
                             targetScene = (UIWindowScene *)scene;
@@ -2922,16 +2933,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         return nil;
     }
 
-    // 终极绑定逻辑
-    CGPoint pointInRoot = [self convertPoint:point toView:self.rootViewController.view];
-    if (CGRectContainsPoint(self.edgeTriggerView.frame, pointInRoot)) {
-        if (self.isKeyboardVisible) {
-            CGPoint pInTrigger = [self.rootViewController.view convertPoint:pointInRoot toView:self.edgeTriggerView];
-            if (pInTrigger.y > self.edgeTriggerView.bounds.size.height * 0.4) return nil;
-        }
-        return self;
-    }
-
+    // 触控透传架构: 当面板隐藏时，CV3Window 的 hitTest 返回 nil，实现完全透传，
+    // 让底层 App 窗口直接接收并处理手势，由 hostWindow 上的 systemEdgePan 触发。
     return nil;
 }
 
@@ -3084,5 +3087,29 @@ static NSTimeInterval lastLogTime = 0;
     sharedWindow.hidden = NO;
     sharedWindow.alpha = 1.0;
     [sharedWindow show];
+}
+%end
+
+%hook SBSystemGestureManager
+- (void)addGestureRecognizer:(id)arg1 withType:(unsigned long long)arg2 {
+    // 如果系统（Siri）尝试注册 112 槽位，并且当前有我们的手势占用，则主动让出槽位避免崩溃
+    if (arg2 == 112 && sharedWindow && sharedWindow.systemEdgePan && arg1 != sharedWindow.systemEdgePan) {
+        @try {
+            [self removeGestureRecognizer:sharedWindow.systemEdgePan];
+        } @catch (NSException *e) {}
+    }
+    %orig;
+}
+
+- (void)removeGestureRecognizer:(id)arg1 {
+    %orig;
+    // 如果系统移除了某个手势，我们尝试重新夺回 112 槽位
+    if (sharedWindow && sharedWindow.systemEdgePan && arg1 != sharedWindow.systemEdgePan) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            @try {
+                [[%c(SBSystemGestureManager) mainDisplayManager] addGestureRecognizer:sharedWindow.systemEdgePan withType:112];
+            } @catch (NSException *e) {}
+        });
+    }
 }
 %end
