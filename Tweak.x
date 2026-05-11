@@ -343,7 +343,6 @@ static void CV3LogToFile(NSString *format, ...) {
 // 建议 1-3：主动交互系统 (Active Interactive System)
 @property (nonatomic, strong) CAShapeLayer *trailLayer; 
 @property (nonatomic, strong) UIView *lightWaveView;
-@property (nonatomic, strong) NSTimer *entropyTimer;
 @property (nonatomic, assign) NSInteger interactionCount; 
 
 // 终极融合系统属性
@@ -358,7 +357,6 @@ static void CV3LogToFile(NSString *format, ...) {
 - (void)triggerCollisionImpulse; 
 - (void)updateMagneticLayout;
 - (void)emitLightWaveFromPoint:(CGPoint)point;
-- (void)startEntropicEvolution;
 - (void)applyAgingEffectToCell:(CV3AppCell *)cell withInfo:(CV3AppInfo *)info;
 @end
 
@@ -1082,9 +1080,6 @@ struct {
     self.lightWaveView.userInteractionEnabled = NO;
     self.lightWaveView.backgroundColor = [UIColor clearColor];
     [self.rootViewController.view addSubview:self.lightWaveView];
-    
-    // 启动熵增演化定时器
-    self.entropyTimer = [NSTimer scheduledTimerWithTimeInterval:30.0 target:self selector:@selector(startEntropicEvolution) userInfo:nil repeats:YES];
 
     // 建议 1：初始化光纤导光图层 (Fiber-Optic Setup)
     // 这些光晕位于最底层，用于模拟玻璃内部的导光效果
@@ -2455,22 +2450,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         wave.transform = CGAffineTransformMakeScale(20, 20);
         wave.alpha = 0;
     } completion:^(BOOL f){ [wave removeFromSuperview]; }];
-}
-
-// 建议 3：熵增演化 (Entropic Shuffle)
-- (void)startEntropicEvolution {
-    if (!self.isPanelShowing || self.isProcessing) return;
-    [UIView animateWithDuration:2.0 animations:^{
-        for (UICollectionViewCell *cell in [self.collectionView visibleCells]) {
-            CGFloat randX = (arc4random_uniform(20) - 10) * 0.5;
-            CGFloat randY = (arc4random_uniform(20) - 10) * 0.5;
-            cell.transform = CGAffineTransformTranslate(cell.transform, randX, randY);
-        }
-    } completion:^(BOOL f){
-        [UIView animateWithDuration:2.0 animations:^{
-             for (UICollectionViewCell *cell in [self.collectionView visibleCells]) cell.transform = CGAffineTransformIdentity;
-        }];
-    }];
 }
 
 
