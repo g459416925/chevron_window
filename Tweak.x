@@ -910,17 +910,18 @@ struct {
         UIGestureRecognizer *other = (gestureRecognizer == self.systemEdgePan) ? otherGestureRecognizer : gestureRecognizer;
         if (other != self.systemEdgePan) {
             NSString *className = NSStringFromClass([other class]);
-            // 白名单：防止误杀 Home Bar、通知中心、控制中心等核心系统手势
-            if (![className containsString:@"Home"] && 
-                ![className containsString:@"Fluid"] && 
-                ![className containsString:@"Grabber"] &&
-                ![className containsString:@"Notification"] &&
-                ![className containsString:@"ControlCenter"]) {
-                
-                // 暴力打断系统底层的手势（如翻页、Spotlight下拉）
-                other.enabled = NO;
-                other.enabled = YES;
+            // 白名单：允许 Home Bar、通知中心、控制中心等核心系统手势并发
+            if ([className containsString:@"Home"] || 
+                [className containsString:@"Fluid"] || 
+                [className containsString:@"Grabber"] ||
+                [className containsString:@"Notification"] ||
+                [className containsString:@"ControlCenter"]) {
+                return YES;
             }
+            
+            // 暴力打断系统底层的手势（如翻页、Spotlight下拉）
+            other.enabled = NO;
+            other.enabled = YES;
         }
         return NO;
     }
