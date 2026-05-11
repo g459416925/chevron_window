@@ -350,6 +350,11 @@ static void CV3LogToFile(NSString *format, ...) {
 @property (nonatomic, assign) BOOL isInPredictiveMode; // 交互黑洞预知模式
 @property (nonatomic, assign) CGPoint lastVelocity; // 惯性偏移计算
 
+// 拖拽分屏支持
+@property (nonatomic, strong) UIImageView *draggedIconView;
+@property (nonatomic, strong) CV3AppInfo *draggedAppInfo;
+@property (nonatomic, assign) CGPoint dragStartCenter;
+
 - (void)show;
 - (void)loadAppsAsync;
 - (void)applyBackgroundTint:(UIColor *)color;
@@ -1293,26 +1298,100 @@ struct {
 }
 
 - (void)handleAppLongPress:(UILongPressGestureRecognizer *)gesture {
+    CGPoint pointInCollection = [gesture locationInView:self.collectionView];
+    CGPoint pointInWindow = [gesture locationInView:self];
+    
     if (gesture.state == UIGestureRecognizerStateBegan) {
-        CGPoint point = [gesture locationInView:self.collectionView];
-        NSIndexPath *indexPath = [self.collectionView indexPathForItemAtPoint:point];
+        NSIndexPath *indexPath = [self.collectionView indexPathForItemAtPoint:pointInCollection];
         if (indexPath && indexPath.item < self.filteredApps.count) {
-            CV3AppInfo *info = self.filteredApps[indexPath.item];
+            CV3AppCell *cell = (CV3AppCell *)[self.collectionView cellForItemAtIndexPath:indexPath];
+            self.draggedAppInfo = self.filteredApps[indexPath.item];
             
             [self.feedback impactOccurredWithIntensity:0.85];
             
-            if ([self.pinnedBundleIDs containsObject:info.bundleId]) {
-                [self.pinnedBundleIDs removeObject:info.bundleId];
-            } else {
-                [self.pinnedBundleIDs addObject:info.bundleId];
+            // 锁定 CollectionView 滚动，防止拖拽时面板跟着滑动
+            self.collectionView.scrollEnabled = NO;
+            
+            // 创建拖拽的浮动图标
+            if (cell.iconView.image) {
+                self.draggedIconView = [[UIImageView alloc] initWithImage:cell.iconView.image];
+                self.draggedIconView.frame = [self convertRect:cell.iconView.bounds fromView:cell.iconView];
+                self.dragStartCenter = self.draggedIconView.center;
+                [self addSubview:self.draggedIconView];
+                
+                [UIView animateWithDuration:0.2 animations:^{
+                    self.draggedIconView.transform = CGAffineTransformMakeScale(1.2, 1.2);
+                    self.draggedIconView.alpha = 0.9;
+                }];
+                cell.alpha = 0.3; // 降低原cell透明度
             }
+        }
+    } else if (gesture.state == UIGestureRecognizerStateChanged) {
+        if (self.draggedIconView) {
+            self.draggedIconView.center = pointInWindow;
+        }
+    } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        // 恢复 CollectionView 滚动
+        self.collectionView.scrollEnabled = YES;
+        
+        if (self.draggedIconView && self.draggedAppInfo) {
+            // 判断是否拖出面板边界
+            BOOL isOutside = !CGRectContainsPoint(self.appPanel.frame, pointInWindow);
             
-            // 持久化
-            [[NSUserDefaults standardUserDefaults] setObject:[self.pinnedBundleIDs allObjects] forKey:@"CV3PinnedApps"];
-            [[NSUserDefaults standardUserDefaults] synchronize];
-            
-            // 重新加载并刷新 UI (带流动感)
-            [self loadAppsAsync];
+            if (isOutside && gesture.state == UIGestureRecognizerStateEnded) {
+                [self.feedback impactOccurredWithIntensity:1.0];
+                CV3LogToFile(@"[Info] 拖拽出面板，尝试使用 MilkyWay2 开启: %@", self.draggedAppInfo.bundleId);
+                
+                // --- MilkyWay2 触发逻辑 (通过 Darwin Notification) ---
+                // 通常 MilkyWay2 等分屏插件在越狱社区可以通过特定的通知名触发
+                // 如果用户有专属的触发 API（例如通过 SBUIController），可替换此处
+                NSString *bundleID = self.draggedAppInfo.bundleId;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    // MilkyWay 2/3 / Zetsu 兼容通知猜测，发送 bundle identifier
+                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), 
+                                                         CFSTR("jp.yuri.milkyway2.launchapp"), 
+                                                         (__bridge CFStringRef)bundleID, 
+                                                         NULL, YES);
+                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), 
+                                                         CFSTR("zetsu.open.window"), 
+                                                         (__bridge CFStringRef)bundleID, 
+                                                         NULL, YES);
+                });
+                
+                // 移除浮动视图并隐藏面板
+                [UIView animateWithDuration:0.3 animations:^{
+                    self.draggedIconView.alpha = 0;
+                    self.draggedIconView.transform = CGAffineTransformMakeScale(0.1, 0.1);
+                } completion:^(BOOL finished) {
+                    [self.draggedIconView removeFromSuperview];
+                    self.draggedIconView = nil;
+                    self.draggedAppInfo = nil;
+                    [self loadAppsAsync];
+                }];
+                
+                [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
+                
+            } else {
+                // 如果没有拖出去，保留原有的“置顶/取消置顶”逻辑，并动画弹回
+                if ([self.pinnedBundleIDs containsObject:self.draggedAppInfo.bundleId]) {
+                    [self.pinnedBundleIDs removeObject:self.draggedAppInfo.bundleId];
+                } else {
+                    [self.pinnedBundleIDs addObject:self.draggedAppInfo.bundleId];
+                }
+                
+                [[NSUserDefaults standardUserDefaults] setObject:[self.pinnedBundleIDs allObjects] forKey:@"CV3PinnedApps"];
+                [[NSUserDefaults standardUserDefaults] synchronize];
+                
+                [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
+                    self.draggedIconView.center = self.dragStartCenter;
+                    self.draggedIconView.transform = CGAffineTransformIdentity;
+                } completion:^(BOOL finished) {
+                    [self.draggedIconView removeFromSuperview];
+                    self.draggedIconView = nil;
+                    self.draggedAppInfo = nil;
+                    [self loadAppsAsync];
+                }];
+            }
         }
     }
 }
