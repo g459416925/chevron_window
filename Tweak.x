@@ -910,18 +910,19 @@ struct {
         UIGestureRecognizer *other = (gestureRecognizer == self.systemEdgePan) ? otherGestureRecognizer : gestureRecognizer;
         if (other != self.systemEdgePan) {
             NSString *className = NSStringFromClass([other class]);
-            // 白名单：允许 Home Bar、通知中心、控制中心等核心系统手势并发
-            if ([className containsString:@"Home"] || 
-                [className containsString:@"Fluid"] || 
-                [className containsString:@"Grabber"] ||
-                [className containsString:@"Notification"] ||
-                [className containsString:@"ControlCenter"]) {
-                return YES;
+            
+            // 黑名单策略：只打断会导致桌面翻页(ScrollView)或下拉搜索(TouchTemplate)的基础手势
+            // 放行所有其他系统边缘手势（控制中心、Home Bar、通知中心等）
+            if ([className containsString:@"ScrollView"] || 
+                [className containsString:@"TouchTemplate"] || 
+                [className isEqualToString:@"UIPanGestureRecognizer"]) {
+                
+                other.enabled = NO;
+                other.enabled = YES;
+                return NO;
             }
             
-            // 暴力打断系统底层的手势（如翻页、Spotlight下拉）
-            other.enabled = NO;
-            other.enabled = YES;
+            return YES;
         }
         return NO;
     }
