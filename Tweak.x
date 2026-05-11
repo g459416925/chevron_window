@@ -893,9 +893,6 @@ struct {
 
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
-    if (gestureRecognizer == self.systemEdgePan && [otherGestureRecognizer isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) {
-        return YES;
-    }
     return NO;
 }
 
@@ -903,9 +900,20 @@ struct {
     return NO;
 }
 
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {    // 禁止拖拽手势与调整大小手势同时发生
-    if (([gestureRecognizer.view isKindOfClass:[NSClassFromString(@"UIPanGestureRecognizer") class]] && otherGestureRecognizer.view == self.resizingHandle) ||
-        (gestureRecognizer.view == self.resizingHandle && [otherGestureRecognizer.view isKindOfClass:[NSClassFromString(@"UIPanGestureRecognizer") class]])) {
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    if (gestureRecognizer == self.systemEdgePan || otherGestureRecognizer == self.systemEdgePan) {
+        UIGestureRecognizer *other = (gestureRecognizer == self.systemEdgePan) ? otherGestureRecognizer : gestureRecognizer;
+        if (other != self.systemEdgePan) {
+            // 暴力打断系统底层的手势（如翻页、Spotlight下拉）
+            other.enabled = NO;
+            other.enabled = YES;
+        }
+        return NO;
+    }
+    
+    // 禁止拖拽手势与调整大小手势同时发生
+    if (([gestureRecognizer isKindOfClass:[UIPanGestureRecognizer class]] && otherGestureRecognizer.view == self.resizingHandle) ||
+        (gestureRecognizer.view == self.resizingHandle && [otherGestureRecognizer isKindOfClass:[UIPanGestureRecognizer class]])) {
         return NO;
     }
     return YES;
