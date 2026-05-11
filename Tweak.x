@@ -3,7 +3,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <AudioToolbox/AudioToolbox.h>
 
-// --- Private API Declarations ---
+#pragma mark - Private API Declarations
 @interface SBWindow : UIWindow
 @end
 
@@ -54,7 +54,7 @@
 + (UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleIdentifier format:(int)format scale:(CGFloat)scale;
 @end
 
-// --- Data Model ---
+#pragma mark - Data Model
 @interface CV3AppInfo : NSObject
 @property (nonatomic, copy) NSString *name;
 @property (nonatomic, copy) NSString *bundleId;
@@ -88,7 +88,7 @@
 }
 @end
 
-// --- Custom Cell ---
+#pragma mark - Custom Cell
 @interface CV3AppCell : UICollectionViewCell
 @property (nonatomic, strong) UIImageView *iconView;
 @property (nonatomic, strong) UILabel *nameLabel;
@@ -223,13 +223,13 @@
 }
 @end
 
-// --- Root VC ---
+#pragma mark - Root VC
 #import <UIKit/UIKit.h> // Explicitly import UIKit to ensure visibility of UIWindowScene
 
 @interface CV3RootViewController : UIViewController
 @end
 static void CV3LogToFile(NSString *format, ...) {
-// --- Helper for File Logging (Asynchronous & Safe) ---
+#pragma mark - Helper for File Logging (Asynchronous & Safe)
     va_list args;
     va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
@@ -276,7 +276,7 @@ static void CV3LogToFile(NSString *format, ...) {
 @implementation CV3RootViewController
 @end
 
-// --- Main Window ---
+#pragma mark - Main Window
 @interface CV3Window : UIWindow <UIGestureRecognizerDelegate, UICollectionViewDataSource, UICollectionViewDelegate, UITextFieldDelegate>
 @property (nonatomic, strong) UIView *panelContainer; 
 @property (nonatomic, strong) UIVisualEffectView *appPanel; 
@@ -335,7 +335,7 @@ static void CV3LogToFile(NSString *format, ...) {
 // 建议 1：光纤导光图层 (Fiber-Optic Glows)
 @property (nonatomic, strong) CAGradientLayer *redGlow, *yellowGlow, *greenGlow;
 
-// --- 创意：光学玻璃与引力场支持 ---
+#pragma mark - 创意：光学玻璃与引力场支持
 @property (nonatomic, strong) UIView *refractionView; // 光学折射容器
 @property (nonatomic, strong) CIFilter *distortionFilter; // 位移畸变滤镜
 @property (nonatomic, assign) BOOL isMagneticLayoutActive; // 引力布局状态
@@ -372,7 +372,7 @@ static CGFloat CGPointDistance(CGPoint p1, CGPoint p2) {
     return sqrt(pow(p1.x - p2.x, 2) + pow(p1.y - p2.y, 2));
 }
 
-// --- Helper: Color Extraction ---
+#pragma mark - Helper: Color Extraction
 static UIColor *CV3AverageColorFromImage(UIImage *image) {
     if (!image) return nil;
     CGSize size = {1, 1};
@@ -438,7 +438,7 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
 }
 @end
 
-// --- Layout & Physics Constants ---
+#pragma mark - Layout & Physics Constants
 struct {
     CGFloat panelW;
     CGFloat panelH;
@@ -483,8 +483,27 @@ struct {
     .momentumDamping = 0.92
 };
 
+struct {
+    CGFloat durationShort;
+    CGFloat durationMedium;
+    CGFloat durationLong;
+    CGFloat springDamping;
+    CGFloat springVelocity;
+} static const __attribute__((unused)) kChevronAnimationConstants = {
+    .durationShort = 0.15,
+    .durationMedium = 0.3,
+    .durationLong = 0.5,
+    .springDamping = 0.6,
+    .springVelocity = 0.8
+};
 
-// --- Quick Access View (Keyboard Accessory) ---
+// Colors will be generated via macro/functions to avoid static constant color allocation issues, but for basic values we can define them as macros or functions.
+#define kCV3ColorSystemGreen [UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:1.0]
+#define kCV3ColorSystemRed   [UIColor colorWithRed:1.00 green:0.37 blue:0.33 alpha:1.0]
+#define kCV3ColorSystemYellow [UIColor colorWithRed:1.00 green:0.75 blue:0.18 alpha:1.0]
+
+
+#pragma mark - Quick Access View (Keyboard Accessory)
 @interface CV3QuickAccessView : UIView
 @property (nonatomic, strong) NSArray<CV3AppInfo *> *apps;
 @property (nonatomic, copy) void (^selectionHandler)(CV3AppInfo *info);
@@ -937,7 +956,11 @@ struct {
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        if (!cv3IconCache) cv3IconCache = [[NSCache alloc] init];
+        if (!cv3IconCache) {
+            cv3IconCache = [[NSCache alloc] init];
+            cv3IconCache.countLimit = 150; // 防御 Jetsam: 限制最大缓存数量
+            cv3IconCache.totalCostLimit = 150 * 1024 * 1024; // 防御 Jetsam: 限制最大成本 (约 150MB)
+        }
         [self applyAdaptiveLevel];
         self.backgroundColor = [UIColor clearColor];
         self.apps = [NSMutableArray array];
@@ -1156,7 +1179,7 @@ struct {
     }
     self.trafficDots = dots;
 
-    // --- Search Bar Setup ---
+#pragma mark - Search Bar Setup
     UIView *searchContainer = [[UIView alloc] initWithFrame:CGRectMake(15, 50, kChevronLayoutConstants.panelW - 30, 36)];
     searchContainer.backgroundColor = [UIColor clearColor];
     [self.appPanel.contentView addSubview:searchContainer];
@@ -1183,7 +1206,7 @@ struct {
     self.searchField.clearButtonMode = UITextFieldViewModeWhileEditing; // 启用清空按钮
     [searchContainer addSubview:self.searchField];
 
-    // --- No Results Label Setup ---
+#pragma mark - No Results Label Setup
     self.noResultsLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 150, kChevronLayoutConstants.panelW, 40)];
     self.noResultsLabel.text = @"未找到相关应用";
     self.noResultsLabel.textColor = [UIColor secondaryLabelColor];
@@ -1344,7 +1367,7 @@ struct {
                 [self.feedback impactOccurredWithIntensity:1.0];
                 CV3LogToFile(@"[Info] 拖拽出面板，尝试使用 MilkyWay2 开启: %@", self.draggedAppInfo.bundleId);
                 
-                // --- MilkyWay2 触发逻辑 (通过 Darwin Notification) ---
+#pragma mark - MilkyWay2 触发逻辑 (通过 Darwin Notification)
                 // 通常 MilkyWay2 等分屏插件在越狱社区可以通过特定的通知名触发
                 // 如果用户有专属的触发 API（例如通过 SBUIController），可替换此处
                 NSString *bundleID = self.draggedAppInfo.bundleId;
@@ -1527,7 +1550,7 @@ struct {
     [self filterApps];
 }
 
-// --- Helper: Time-based Category Priority ---
+#pragma mark - Helper: Time-based Category Priority
 static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     NSDateComponents *components = [[NSCalendar currentCalendar] components:NSCalendarUnitHour fromDate:[NSDate date]];
     NSInteger hour = [components hour];
@@ -1749,7 +1772,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         [CATransaction commit];
     }
 
-    CGRect currentBounds = self.panelContainer.bounds;
+    // 建议 4：Animation Transaction Safety (避免坐标跳变)
+    CGRect currentBounds = self.panelContainer.layer.presentationLayer ? self.panelContainer.layer.presentationLayer.bounds : self.panelContainer.bounds;
 
     if (gesture) {
         // 1. 获取屏幕坐标系的平移，确保拖拽感在所有旋转下保持一致
@@ -1762,7 +1786,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         CGFloat rawW = currentBounds.size.width + localTranslation.x;
         CGFloat rawH = currentBounds.size.height + localTranslation.y;
         
-        // --- 核心修复：基于投影的全方位边界钳位 ---
+#pragma mark - 核心修复：基于投影的全方位边界钳位
         CGRect screenBounds = self.bounds;
         UIEdgeInsets safe = self.safeAreaInsets;
         CGFloat breath = kChevronLayoutConstants.safeAreaBreath;
@@ -1775,7 +1799,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
                                       screenBounds.size.width - safe.left - safe.right - 2*breath, 
                                       screenBounds.size.height - safe.top - safe.bottom - 2*breath);
 
-        CGPoint center = self.panelContainer.center;
+        CGPoint center = self.panelContainer.layer.presentationLayer ? self.panelContainer.layer.presentationLayer.position : self.panelContainer.center;
         
         // 计算屏幕安全区域内允许的最大半宽高 (相对于中心点)
         CGFloat rootAllowedHalfW = MIN(center.x - safeFrame.origin.x, CGRectGetMaxX(safeFrame) - center.x);
@@ -1792,7 +1816,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             maxH = rootAllowedHalfH * 2.0;
         }
 
-        // --- 智能自动推移 (Auto-Push) ---
+#pragma mark - 智能自动推移 (Auto-Push)
         // 如果想要达到的尺寸超过了当前位置允许的最大尺寸，尝试平移中心点以换取空间
         CGFloat preferredW = MAX(50.0, rawW);
         CGFloat preferredH = MAX(50.0, rawH);
@@ -1829,7 +1853,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         CGFloat targetW = MIN(maxW, preferredW);
         CGFloat targetH = MIN(maxH, preferredH);
 
-        // --- 最小值与果冻效果逻辑 ---
+#pragma mark - 最小值与果冻效果逻辑
         CGFloat minW = 175.0;
         CGFloat minH = isLandscape ? 270.0 : 380.0;
         
@@ -1867,7 +1891,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     self.appPanel.center = CGPointMake(CGRectGetMidX(self.panelContainer.bounds), CGRectGetMidY(self.panelContainer.bounds));
     CGRect updatedBounds = self.panelContainer.bounds;
     
-    // --- UI 智能自适应逻辑 ---
+#pragma mark - UI 智能自适应逻辑
     // 如果高度太小（不足以舒适容纳分类栏），则隐藏分类栏并上移 CollectionView
     BOOL hideCategories = (updatedBounds.size.height < 320.0);
     self.categoryBar.alpha = hideCategories ? 0 : 1.0;
@@ -1903,7 +1927,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     [self.collectionView.collectionViewLayout invalidateLayout];
 
     if (gesture && (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled)) {
-        // --- 弹簧回弹 (Snapback) ---
+#pragma mark - 弹簧回弹 (Snapback)
         UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
         BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
 
@@ -2157,7 +2181,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     CGPoint translation = [gesture translationInView:nil];
     CGPoint velocity = [gesture velocityInView:nil];
 
-    // --- 动态方向感知拉伸计算 ---
+#pragma mark - 动态方向感知拉伸计算
     UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
     CGFloat stretch = 0;
     CGFloat vel = 0;
@@ -2316,6 +2340,15 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         [self updateTrafficLightsFocus:YES];
         self.dimmingView.userInteractionEnabled = YES; // 显示时开启拦截
         self.panelContainer.hidden = NO; self.panelContainer.center = point;
+        
+        // 恢复所有高开销特效图层的显示
+        self.dispersionContainer.hidden = NO;
+        self.cyanLayer.hidden = NO;
+        self.magentaLayer.hidden = NO;
+        self.innerGlowLayer.hidden = NO;
+        self.contrastBackdrop.hidden = NO;
+        self.whiteFilter.hidden = NO;
+        self.specularHighlight.hidden = NO;
 
         // 预先应用正确的旋转变换和尺寸
         CGAffineTransform initialRotation = CGAffineTransformIdentity;
@@ -2409,6 +2442,14 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         } completion:^(BOOL f){ 
             self.isAnimating = NO; 
             self.panelContainer.hidden = YES; 
+            // 显式挂起所有重度开销图层，确保 GPU 零消耗
+            self.dispersionContainer.hidden = YES;
+            self.cyanLayer.hidden = YES;
+            self.magentaLayer.hidden = YES;
+            self.innerGlowLayer.hidden = YES;
+            self.contrastBackdrop.hidden = YES;
+            self.whiteFilter.hidden = YES;
+            self.specularHighlight.hidden = YES;
         }];
     }
 }
@@ -2724,7 +2765,9 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 }
 
 - (void)handleMemoryWarning {
+    CV3LogToFile(@"[Warning] Received Memory Warning, clearing icon cache and pausing tasks...");
     [cv3IconCache removeAllObjects];
+    self.needsFullReload = YES; 
 }
 
 - (void)show {
@@ -2955,7 +2998,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 - (BOOL)_ignoresHitTest { return NO; }
 - (BOOL)_shouldIsolate { return YES; }
 
-// --- 强制压制逻辑：深度抑制，防止在系统 UI 活跃时出现 ---
+#pragma mark - 强制压制逻辑：深度抑制，防止在系统 UI 活跃时出现
 - (void)setHidden:(BOOL)hidden {
     if (!hidden && self.isSuppressedBySystem) {
         CV3LogToFile(@"[Debug] 拦截到非法的 unhide 请求 (当前处于系统压制状态)");
@@ -2976,7 +3019,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     }
 }
 
-// --- 尝试绕过 App 级触控黑洞的私有方法 ---
+#pragma mark - 尝试绕过 App 级触控黑洞的私有方法
 - (BOOL)_isSecure { return YES; }
 - (BOOL)_isWindowServerHostingManaged { return YES; }
 - (BOOL)_wantsSceneAssociation { return YES; }
@@ -3103,7 +3146,7 @@ static NSTimeInterval lastLogTime = 0;
 }
 %end
 
-// --- Fix: Auto-hide when Control Center or Notification Center is active ---
+#pragma mark - Fix: Auto-hide when Control Center or Notification Center is active
 %hook SBControlCenterController
 - (void)_willPresent {
     %orig;
