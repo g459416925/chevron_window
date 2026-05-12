@@ -2261,17 +2261,35 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
                 self.dimmingView.alpha = 0;
                 self.isAnimating = NO;
             }];
+            
+            // Jelly Physics for Exit
+            CASpringAnimation *spring = [CASpringAnimation animationWithKeyPath:@"path"];
+            spring.damping = 12;
+            spring.stiffness = 300;
+            spring.mass = 1.0;
+            spring.duration = spring.settlingDuration;
+            spring.fromValue = (id)self.bezierLayer.path;
+            spring.toValue = (id)[self pathForStretch:0 atPoint:location velocity:CGPointZero orientation:orientation].CGPath;
+            [self.bezierLayer addAnimation:spring forKey:@"bounceBack"];
+            
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            self.bezierLayer.path = [self pathForStretch:0 atPoint:location velocity:CGPointZero orientation:orientation].CGPath;
+            [CATransaction commit];
         }
-        [UIView animateWithDuration:0.4 animations:^{ 
+        [UIView animateWithDuration:0.5 delay:0.15 options:UIViewAnimationOptionCurveEaseInOut animations:^{ 
             self.bezierContainer.alpha = 0; 
             if (!self.isPanelShowing) self.dimmingView.alpha = 0;
-        }];
+        } completion:nil];
     }
 }
 
 
 - (UIBezierPath *)pathForStretch:(CGFloat)stretch atPoint:(CGPoint)point velocity:(CGPoint)velocity orientation:(UIInterfaceOrientation)orientation {
     CGFloat s = MIN(stretch * 0.7, 95); 
+    CGFloat baseW = 130 + stretch * 0.2;
+    CGFloat cp1Offset = 65 + stretch * 0.5;
+    CGFloat cp2Offset = 45 + stretch * 0.2;
     
     UIBezierPath *path = [UIBezierPath bezierPath];
 
@@ -2279,46 +2297,46 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
     if (orientation == UIInterfaceOrientationLandscapeLeft) {
         // 顶部拉伸 (LandscapeLeft, Home在右)
-        CGFloat leftX = point.x - 130;
-        CGFloat rightX = point.x + 130;
+        CGFloat leftX = point.x - baseW;
+        CGFloat rightX = point.x + baseW;
         CGFloat peakY = s;
         [path moveToPoint:CGPointMake(0, 0)]; // 从左上角开始
         [path addLineToPoint:CGPointMake(leftX, 0)]; // 直线到左边起点
-        [path addCurveToPoint:CGPointMake(point.x, peakY) controlPoint1:CGPointMake(point.x - 65, 0) controlPoint2:CGPointMake(point.x - 45, peakY)];
-        [path addCurveToPoint:CGPointMake(rightX, 0) controlPoint1:CGPointMake(point.x + 45, peakY) controlPoint2:CGPointMake(point.x + 65, 0)];
+        [path addCurveToPoint:CGPointMake(point.x, peakY) controlPoint1:CGPointMake(point.x - cp1Offset, 0) controlPoint2:CGPointMake(point.x - cp2Offset, peakY)];
+        [path addCurveToPoint:CGPointMake(rightX, 0) controlPoint1:CGPointMake(point.x + cp2Offset, peakY) controlPoint2:CGPointMake(point.x + cp1Offset, 0)];
         [path addLineToPoint:CGPointMake(b.size.width, 0)]; // 直线到右上角
         [path addLineToPoint:CGPointMake(0, 0)]; // 闭合
     } else if (orientation == UIInterfaceOrientationLandscapeRight) {
         // 底部拉伸 (LandscapeRight, Home在左)
-        CGFloat leftX = point.x - 130;
-        CGFloat rightX = point.x + 130;
+        CGFloat leftX = point.x - baseW;
+        CGFloat rightX = point.x + baseW;
         CGFloat peakY = b.size.height - s;
         [path moveToPoint:CGPointMake(0, b.size.height)]; // 左下角
         [path addLineToPoint:CGPointMake(leftX, b.size.height)];
-        [path addCurveToPoint:CGPointMake(point.x, peakY) controlPoint1:CGPointMake(point.x - 65, b.size.height) controlPoint2:CGPointMake(point.x - 45, peakY)];
-        [path addCurveToPoint:CGPointMake(rightX, b.size.height) controlPoint1:CGPointMake(point.x + 45, peakY) controlPoint2:CGPointMake(point.x + 65, b.size.height)];
+        [path addCurveToPoint:CGPointMake(point.x, peakY) controlPoint1:CGPointMake(point.x - cp1Offset, b.size.height) controlPoint2:CGPointMake(point.x - cp2Offset, peakY)];
+        [path addCurveToPoint:CGPointMake(rightX, b.size.height) controlPoint1:CGPointMake(point.x + cp2Offset, peakY) controlPoint2:CGPointMake(point.x + cp1Offset, b.size.height)];
         [path addLineToPoint:CGPointMake(b.size.width, b.size.height)]; // 右下角
         [path addLineToPoint:CGPointMake(0, b.size.height)]; // 闭合
     } else if (orientation == UIInterfaceOrientationPortraitUpsideDown) {
         // 左边缘拉伸
-        CGFloat topY = point.y - 130;
-        CGFloat bottomY = point.y + 130;
+        CGFloat topY = point.y - baseW;
+        CGFloat bottomY = point.y + baseW;
         CGFloat peakX = s;
         [path moveToPoint:CGPointMake(0, 0)]; // 左上角
         [path addLineToPoint:CGPointMake(0, topY)];
-        [path addCurveToPoint:CGPointMake(peakX, point.y) controlPoint1:CGPointMake(0, point.y - 65) controlPoint2:CGPointMake(peakX, point.y - 45)];
-        [path addCurveToPoint:CGPointMake(0, bottomY) controlPoint1:CGPointMake(peakX, point.y + 45) controlPoint2:CGPointMake(0, point.y + 65)];
+        [path addCurveToPoint:CGPointMake(peakX, point.y) controlPoint1:CGPointMake(0, point.y - cp1Offset) controlPoint2:CGPointMake(peakX, point.y - cp2Offset)];
+        [path addCurveToPoint:CGPointMake(0, bottomY) controlPoint1:CGPointMake(peakX, point.y + cp2Offset) controlPoint2:CGPointMake(0, point.y + cp1Offset)];
         [path addLineToPoint:CGPointMake(0, b.size.height)]; // 左下角
         [path addLineToPoint:CGPointMake(0, 0)]; // 闭合
     } else {
         // 右边缘拉伸 (Portrait)
-        CGFloat topY = point.y - 130;
-        CGFloat bottomY = point.y + 130;
+        CGFloat topY = point.y - baseW;
+        CGFloat bottomY = point.y + baseW;
         CGFloat peakX = b.size.width - s;
         [path moveToPoint:CGPointMake(b.size.width, 0)]; // 右上角
         [path addLineToPoint:CGPointMake(b.size.width, topY)];
-        [path addCurveToPoint:CGPointMake(peakX, point.y) controlPoint1:CGPointMake(b.size.width, point.y - 65) controlPoint2:CGPointMake(peakX, point.y - 45)];
-        [path addCurveToPoint:CGPointMake(b.size.width, bottomY) controlPoint1:CGPointMake(peakX, point.y + 45) controlPoint2:CGPointMake(b.size.width, point.y + 65)];
+        [path addCurveToPoint:CGPointMake(peakX, point.y) controlPoint1:CGPointMake(b.size.width, point.y - cp1Offset) controlPoint2:CGPointMake(peakX, point.y - cp2Offset)];
+        [path addCurveToPoint:CGPointMake(b.size.width, bottomY) controlPoint1:CGPointMake(peakX, point.y + cp2Offset) controlPoint2:CGPointMake(b.size.width, point.y + cp1Offset)];
         [path addLineToPoint:CGPointMake(b.size.width, b.size.height)]; // 右下角
         [path addLineToPoint:CGPointMake(b.size.width, 0)]; // 闭合
     }
