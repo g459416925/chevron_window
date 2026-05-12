@@ -60,8 +60,11 @@
 - (void)launchApplicationWithIdentifier:(NSString *)identifier suspended:(BOOL)suspended;
 @end
 
+@class FBScene;
+
 @interface SBApplication : NSObject
 @property (nonatomic, readonly) NSString *bundleIdentifier;
+- (FBScene *)mainScene;
 @end
 
 @interface SBApplicationController : NSObject
@@ -75,11 +78,12 @@
 @interface FBSMutableSceneSettings : FBSSceneSettings
 @property (assign, nonatomic) BOOL foreground;
 @property (assign, nonatomic) BOOL backgrounded;
+@property (assign, nonatomic) CGRect frame;
 @end
 
 @interface FBScene : NSObject
 @property (nonatomic, readonly) NSString *identifier;
-@property (nonatomic, retain) FBSMutableSceneSettings *mutableSettings;
+@property (nonatomic, readonly) FBSSceneSettings *settings;
 - (void)_setContentState:(NSInteger)state;
 - (void)updateSettings:(FBSSceneSettings *)settings withTransitionContext:(id)context;
 @end
@@ -369,13 +373,41 @@ static NSMutableArray *floatingWindows = nil;
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         [self.titleBar addGestureRecognizer:pan];
         
+        [self clampToScreenBounds];
         [self loadAppScene];
     }
     return self;
 }
 
+- (void)clampToScreenBounds {
+    UIWindow *keyWindow = nil;
+    if (@available(iOS 15.0, *)) {
+        keyWindow = self.windowScene.keyWindow;
+    } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        keyWindow = [UIApplication sharedApplication].keyWindow;
+#pragma clang diagnostic pop
+    }
+    UIEdgeInsets safeArea = keyWindow ? keyWindow.safeAreaInsets : UIEdgeInsetsMake(47, 0, 34, 0);
+    CGRect screenBounds = [UIScreen mainScreen].bounds;
+    
+    CGRect frame = self.frame;
+    if (frame.origin.x < safeArea.left) frame.origin.x = safeArea.left;
+    if (frame.origin.y < safeArea.top) frame.origin.y = safeArea.top;
+    if (CGRectGetMaxX(frame) > screenBounds.size.width - safeArea.right) frame.origin.x = screenBounds.size.width - safeArea.right - frame.size.width;
+    if (CGRectGetMaxY(frame) > screenBounds.size.height - safeArea.bottom) frame.origin.y = screenBounds.size.height - safeArea.bottom - frame.size.height;
+    self.frame = frame;
+}
+
 - (FBScene *)getSceneForBundleID:(NSString *)bundleID {
     @try {
+        SBApplication *app = [[%c(SBApplicationController) sharedInstance] applicationWithBundleIdentifier:bundleID];
+        if ([app respondsToSelector:@selector(mainScene)]) {
+            FBScene *scene = [app mainScene];
+            if (scene) return scene;
+        }
+        
         FBSceneManager *manager = [%c(FBSceneManager) sharedInstance];
         NSDictionary *scenes = nil;
         
@@ -414,11 +446,21 @@ static NSMutableArray *floatingWindows = nil;
                 FBScene *targetScene = [self getSceneForBundleID:self.bundleID];
                 
                 if (targetScene) {
-                    FBSMutableSceneSettings *settings = targetScene.mutableSettings;
-                    [settings setBackgrounded:NO];
-                    [settings setForeground:YES];
-                    [targetScene updateSettings:settings withTransitionContext:nil];
-                    [targetScene _setContentState:2];
+                    // Step 1: Force Backgrounded NO
+                    FBSMutableSceneSettings *bgSettings = [[targetScene settings] mutableCopy];
+                    [bgSettings setBackgrounded:NO];
+                    [targetScene updateSettings:bgSettings withTransitionContext:nil];
+                    
+                    // Step 2: Wake Scene (State 2, Foreground YES, Frame)
+                    [targetScene _setContentState:2]; // 2 == ready
+                    
+                    FBSMutableSceneSettings *fgSettings = [[targetScene settings] mutableCopy];
+                    [fgSettings setForeground:YES];
+                    
+                    CGRect targetFrame = CGRectMake(0, 0, self.bounds.size.width, self.bounds.size.height - 30);
+                    [fgSettings setFrame:targetFrame];
+                    
+                    [targetScene updateSettings:fgSettings withTransitionContext:nil];
                     
                     _UISceneLayerHostContainerView *host = [[%c(_UISceneLayerHostContainerView) alloc] initWithScene:targetScene];
                     if (host) {
@@ -447,6 +489,7 @@ static NSMutableArray *floatingWindows = nil;
     if (gesture.state == UIGestureRecognizerStateChanged) {
         self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
         [gesture setTranslation:CGPointZero inView:nil];
+        [self clampToScreenBounds];
     }
 }
 
@@ -454,7 +497,7 @@ static NSMutableArray *floatingWindows = nil;
     @try {
         FBScene *targetScene = [self getSceneForBundleID:self.bundleID];
         if (targetScene) {
-            FBSMutableSceneSettings *settings = targetScene.mutableSettings;
+            FBSMutableSceneSettings *settings = [[targetScene settings] mutableCopy];
             [settings setBackgrounded:YES];
             [settings setForeground:NO];
             [targetScene updateSettings:settings withTransitionContext:nil];
