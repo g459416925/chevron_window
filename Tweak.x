@@ -2,6 +2,7 @@
 #import <CoreMotion/CoreMotion.h>
 #import <QuartzCore/QuartzCore.h>
 #import <AudioToolbox/AudioToolbox.h>
+#import <objc/runtime.h>
 
 #pragma mark - Private API Declarations
 @interface SBWindow : UIWindow
@@ -52,6 +53,48 @@
 
 @interface UIImage (Private)
 + (UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleIdentifier format:(int)format scale:(CGFloat)scale;
+@end
+
+#pragma mark - SceneKit Declarations for App Hosting
+@interface UIApplication (Private)
+- (void)launchApplicationWithIdentifier:(NSString *)identifier suspended:(BOOL)suspended;
+@end
+
+@interface SBApplication : NSObject
+@property (nonatomic, readonly) NSString *bundleIdentifier;
+@end
+
+@interface SBApplicationController : NSObject
++ (instancetype)sharedInstance;
+- (SBApplication *)applicationWithBundleIdentifier:(NSString *)bundleIdentifier;
+@end
+
+@interface FBSSceneSettings : NSObject
+@end
+
+@interface FBSMutableSceneSettings : FBSSceneSettings
+@property (assign, nonatomic) BOOL foreground;
+@property (assign, nonatomic) BOOL backgrounded;
+@end
+
+@interface FBScene : NSObject
+@property (nonatomic, readonly) NSString *identifier;
+@property (nonatomic, retain) FBSMutableSceneSettings *mutableSettings;
+- (void)_setContentState:(NSInteger)state;
+- (void)updateSettings:(FBSSceneSettings *)settings withTransitionContext:(id)context;
+@end
+
+@interface FBSceneManager : NSObject
++ (instancetype)sharedInstance;
+@end
+
+@interface _UISceneLayerHostContainerView : UIView
+- (instancetype)initWithScene:(FBScene *)scene;
+- (void)_setPresentationContext:(id)context;
+@end
+
+@interface UIScenePresentationContext : NSObject
+- (instancetype)_initWithDefaultValues;
 @end
 
 #pragma mark - Data Model
@@ -274,6 +317,156 @@ static void CV3LogToFile(NSString *format, ...) {
 }
 
 @implementation CV3RootViewController
+@end
+
+#pragma mark - Floating App Window (MilkyWay2-style)
+static NSMutableArray *floatingWindows = nil;
+
+@interface CV3FloatingAppWindow : UIWindow
+@property (nonatomic, copy) NSString *bundleID;
+@property (nonatomic, strong) UIView *hostView;
+@property (nonatomic, strong) UIView *titleBar;
+- (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene;
+@end
+
+@implementation CV3FloatingAppWindow
+- (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene {
+    if (windowScene) {
+        self = [super initWithWindowScene:windowScene];
+    } else {
+        self = [super initWithFrame:CGRectMake(0, 0, 300, 500)];
+    }
+    
+    if (self) {
+        self.frame = CGRectMake(0, 0, 300, 500);
+        self.bundleID = bundleID;
+        self.center = center;
+        self.windowLevel = 2101; // 覆盖在面板之上
+        self.backgroundColor = [UIColor blackColor];
+        self.layer.cornerRadius = 16;
+        self.layer.masksToBounds = YES;
+        self.layer.borderWidth = 1.0;
+        self.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.2].CGColor;
+        
+        // 顶部标题栏
+        self.titleBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 300, 30)];
+        self.titleBar.backgroundColor = [UIColor darkGrayColor];
+        [self addSubview:self.titleBar];
+        
+        UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 0, 240, 30)];
+        titleLabel.textColor = [UIColor whiteColor];
+        titleLabel.font = [UIFont systemFontOfSize:12];
+        titleLabel.text = bundleID;
+        [self.titleBar addSubview:titleLabel];
+        
+        UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+        closeBtn.frame = CGRectMake(270, 5, 20, 20);
+        [closeBtn setBackgroundColor:[UIColor redColor]];
+        closeBtn.layer.cornerRadius = 10;
+        [closeBtn addTarget:self action:@selector(closeWindow) forControlEvents:UIControlEventTouchUpInside];
+        [self.titleBar addSubview:closeBtn];
+        
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+        [self.titleBar addGestureRecognizer:pan];
+        
+        [self loadAppScene];
+    }
+    return self;
+}
+
+- (FBScene *)getSceneForBundleID:(NSString *)bundleID {
+    @try {
+        FBSceneManager *manager = [%c(FBSceneManager) sharedInstance];
+        NSDictionary *scenes = nil;
+        
+        @try {
+            id workspace = [manager valueForKey:@"_workspace"];
+            scenes = [workspace valueForKey:@"_allScenesByID"];
+        } @catch (NSException *e) {
+            scenes = nil;
+        }
+        
+        if (!scenes) {
+            @try {
+                scenes = [manager valueForKey:@"_scenesByID"];
+            } @catch (NSException *e) {
+                scenes = nil;
+            }
+        }
+        
+        for (NSString *key in scenes.allKeys) {
+            if ([key containsString:bundleID]) {
+                return scenes[key];
+            }
+        }
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Error] getSceneForBundleID failed: %@", e);
+    }
+    return nil;
+}
+
+- (void)loadAppScene {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            [[UIApplication sharedApplication] launchApplicationWithIdentifier:self.bundleID suspended:YES];
+            
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                FBScene *targetScene = [self getSceneForBundleID:self.bundleID];
+                
+                if (targetScene) {
+                    FBSMutableSceneSettings *settings = targetScene.mutableSettings;
+                    [settings setBackgrounded:NO];
+                    [settings setForeground:YES];
+                    [targetScene updateSettings:settings withTransitionContext:nil];
+                    [targetScene _setContentState:2];
+                    
+                    _UISceneLayerHostContainerView *host = [[%c(_UISceneLayerHostContainerView) alloc] initWithScene:targetScene];
+                    if (host) {
+                        if ([host respondsToSelector:@selector(_setPresentationContext:)]) {
+                            [host _setPresentationContext:[[%c(UIScenePresentationContext) alloc] _initWithDefaultValues]];
+                        }
+                        host.frame = CGRectMake(0, 30, self.bounds.size.width, self.bounds.size.height - 30);
+                        host.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                        self.hostView = host;
+                        [self addSubview:host];
+                    } else {
+                        CV3LogToFile(@"[Error] Failed to instantiate _UISceneLayerHostContainerView for %@", self.bundleID);
+                    }
+                } else {
+                    CV3LogToFile(@"[Error] targetScene not found after launch for %@", self.bundleID);
+                }
+            });
+        } @catch (NSException *e) {
+            CV3LogToFile(@"[Error] Floating window load scene failed: %@", e);
+        }
+    });
+}
+
+- (void)handlePan:(UIPanGestureRecognizer *)gesture {
+    CGPoint translation = [gesture translationInView:nil];
+    if (gesture.state == UIGestureRecognizerStateChanged) {
+        self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
+        [gesture setTranslation:CGPointZero inView:nil];
+    }
+}
+
+- (void)closeWindow {
+    @try {
+        FBScene *targetScene = [self getSceneForBundleID:self.bundleID];
+        if (targetScene) {
+            FBSMutableSceneSettings *settings = targetScene.mutableSettings;
+            [settings setBackgrounded:YES];
+            [settings setForeground:NO];
+            [targetScene updateSettings:settings withTransitionContext:nil];
+            [targetScene _setContentState:0];
+        }
+    } @catch (NSException *e) {}
+    
+    self.hidden = YES;
+    [self.hostView removeFromSuperview];
+    self.hostView = nil;
+    [floatingWindows removeObject:self];
+}
 @end
 
 #pragma mark - Main Window
@@ -1360,27 +1553,25 @@ struct {
         self.collectionView.scrollEnabled = YES;
         
         if (self.draggedIconView && self.draggedAppInfo) {
-            // 判断是否拖出面板边界
-            BOOL isOutside = !CGRectContainsPoint(self.appPanel.frame, pointInWindow);
+            // 判断是否拖出面板边界 (修正坐标系不匹配问题)
+            CGPoint pointInContainer = [self.panelContainer convertPoint:pointInWindow fromView:self];
+            BOOL isOutside = !CGRectContainsPoint(self.panelContainer.bounds, pointInContainer);
             
             if (isOutside && gesture.state == UIGestureRecognizerStateEnded) {
                 [self.feedback impactOccurredWithIntensity:1.0];
-                CV3LogToFile(@"[Info] 拖拽出面板，尝试使用 MilkyWay2 开启: %@", self.draggedAppInfo.bundleId);
+                CV3LogToFile(@"[Info] 拖拽出面板，使用自带 App Hosting 开启: %@", self.draggedAppInfo.bundleId);
                 
-#pragma mark - MilkyWay2 触发逻辑 (通过 Darwin Notification)
-                // 通常 MilkyWay2 等分屏插件在越狱社区可以通过特定的通知名触发
-                // 如果用户有专属的触发 API（例如通过 SBUIController），可替换此处
                 NSString *bundleID = self.draggedAppInfo.bundleId;
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    // MilkyWay 2/3 / Zetsu 兼容通知猜测，发送 bundle identifier
-                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), 
-                                                         CFSTR("jp.yuri.milkyway2.launchapp"), 
-                                                         (__bridge CFStringRef)bundleID, 
-                                                         NULL, YES);
-                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), 
-                                                         CFSTR("zetsu.open.window"), 
-                                                         (__bridge CFStringRef)bundleID, 
-                                                         NULL, YES);
+                    if (!floatingWindows) {
+                        floatingWindows = [NSMutableArray array];
+                    }
+                    
+                    // 将坐标从 CV3Window 转换到屏幕坐标
+                    CGPoint screenPoint = [self convertPoint:pointInWindow toWindow:nil];
+                    CV3FloatingAppWindow *floatingWindow = [[CV3FloatingAppWindow alloc] initWithBundleID:bundleID center:screenPoint windowScene:self.windowScene];
+                    [floatingWindows addObject:floatingWindow];
+                    [floatingWindow makeKeyAndVisible];
                 });
                 
                 // 移除浮动视图并隐藏面板
