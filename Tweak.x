@@ -409,6 +409,19 @@ static NSMutableArray *floatingWindows = nil;
         }
         
         FBSceneManager *manager = [%c(FBSceneManager) sharedInstance];
+        
+        // iOS 16 fallback: check if 'scenes' property exists (returns NSSet)
+        if ([manager respondsToSelector:@selector(scenes)]) {
+            id scenesSet = [manager valueForKey:@"scenes"];
+            if ([scenesSet isKindOfClass:[NSSet class]]) {
+                for (FBScene *scene in scenesSet) {
+                    if ([scene.identifier containsString:bundleID]) {
+                        return scene;
+                    }
+                }
+            }
+        }
+        
         NSDictionary *scenes = nil;
         
         @try {
@@ -437,49 +450,64 @@ static NSMutableArray *floatingWindows = nil;
     return nil;
 }
 
+- (void)attemptToHostSceneWithRetries:(int)retries delay:(double)delay {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        @try {
+            FBScene *targetScene = [self getSceneForBundleID:self.bundleID];
+            
+            if (targetScene) {
+                // Step 1: Force Backgrounded NO
+                FBSMutableSceneSettings *bgSettings = [[targetScene settings] mutableCopy];
+                [bgSettings setBackgrounded:NO];
+                [targetScene updateSettings:bgSettings withTransitionContext:nil];
+                
+                // Step 2: Wake Scene (State 2, Foreground YES, Frame)
+                if ([targetScene respondsToSelector:@selector(_setContentState:)]) {
+                    [targetScene _setContentState:2]; // 2 == ready
+                }
+                
+                FBSMutableSceneSettings *fgSettings = [[targetScene settings] mutableCopy];
+                [fgSettings setForeground:YES];
+                
+                CGRect targetFrame = CGRectMake(0, 0, self.bounds.size.width, self.bounds.size.height - 30);
+                [fgSettings setFrame:targetFrame];
+                
+                [targetScene updateSettings:fgSettings withTransitionContext:nil];
+                
+                _UISceneLayerHostContainerView *host = [[%c(_UISceneLayerHostContainerView) alloc] initWithScene:targetScene];
+                if (host) {
+                    if ([host respondsToSelector:@selector(_setPresentationContext:)]) {
+                        [host _setPresentationContext:[[%c(UIScenePresentationContext) alloc] _initWithDefaultValues]];
+                    }
+                    host.frame = CGRectMake(0, 30, self.bounds.size.width, self.bounds.size.height - 30);
+                    host.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                    self.hostView = host;
+                    [self addSubview:host];
+                } else {
+                    CV3LogToFile(@"[Error] Failed to instantiate _UISceneLayerHostContainerView for %@", self.bundleID);
+                }
+            } else {
+                if (retries > 0) {
+                    // Exponential backoff
+                    [self attemptToHostSceneWithRetries:retries - 1 delay:delay * 1.5];
+                } else {
+                    CV3LogToFile(@"[Error] targetScene not found after launch for %@", self.bundleID);
+                }
+            }
+        } @catch (NSException *e) {
+            CV3LogToFile(@"[Error] Floating window load scene failed: %@", e);
+        }
+    });
+}
+
 - (void)loadAppScene {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
             [[UIApplication sharedApplication] launchApplicationWithIdentifier:self.bundleID suspended:YES];
-            
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                FBScene *targetScene = [self getSceneForBundleID:self.bundleID];
-                
-                if (targetScene) {
-                    // Step 1: Force Backgrounded NO
-                    FBSMutableSceneSettings *bgSettings = [[targetScene settings] mutableCopy];
-                    [bgSettings setBackgrounded:NO];
-                    [targetScene updateSettings:bgSettings withTransitionContext:nil];
-                    
-                    // Step 2: Wake Scene (State 2, Foreground YES, Frame)
-                    [targetScene _setContentState:2]; // 2 == ready
-                    
-                    FBSMutableSceneSettings *fgSettings = [[targetScene settings] mutableCopy];
-                    [fgSettings setForeground:YES];
-                    
-                    CGRect targetFrame = CGRectMake(0, 0, self.bounds.size.width, self.bounds.size.height - 30);
-                    [fgSettings setFrame:targetFrame];
-                    
-                    [targetScene updateSettings:fgSettings withTransitionContext:nil];
-                    
-                    _UISceneLayerHostContainerView *host = [[%c(_UISceneLayerHostContainerView) alloc] initWithScene:targetScene];
-                    if (host) {
-                        if ([host respondsToSelector:@selector(_setPresentationContext:)]) {
-                            [host _setPresentationContext:[[%c(UIScenePresentationContext) alloc] _initWithDefaultValues]];
-                        }
-                        host.frame = CGRectMake(0, 30, self.bounds.size.width, self.bounds.size.height - 30);
-                        host.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-                        self.hostView = host;
-                        [self addSubview:host];
-                    } else {
-                        CV3LogToFile(@"[Error] Failed to instantiate _UISceneLayerHostContainerView for %@", self.bundleID);
-                    }
-                } else {
-                    CV3LogToFile(@"[Error] targetScene not found after launch for %@", self.bundleID);
-                }
-            });
+            // Start polling with initial delay of 0.3s, up to 5 retries (max ~4 seconds)
+            [self attemptToHostSceneWithRetries:5 delay:0.3];
         } @catch (NSException *e) {
-            CV3LogToFile(@"[Error] Floating window load scene failed: %@", e);
+            CV3LogToFile(@"[Error] Floating window launch failed: %@", e);
         }
     });
 }
@@ -501,7 +529,9 @@ static NSMutableArray *floatingWindows = nil;
             [settings setBackgrounded:YES];
             [settings setForeground:NO];
             [targetScene updateSettings:settings withTransitionContext:nil];
-            [targetScene _setContentState:0];
+            if ([targetScene respondsToSelector:@selector(_setContentState:)]) {
+                [targetScene _setContentState:0];
+            }
         }
     } @catch (NSException *e) {}
     
