@@ -2217,6 +2217,11 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             self.bezierContainer.alpha = 1.0;
             // 彻底移除 dimmingView 的预加载
             
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            self.bezierLayer.path = [self pathForStretch:0 atPoint:location velocity:CGPointZero orientation:orientation].CGPath;
+            [CATransaction commit];
+            
             self.bezierLayer.shadowColor = [UIColor labelColor].CGColor;
             self.bezierLayer.shadowOffset = CGSizeZero;
             self.bezierLayer.shadowRadius = 10.0;
@@ -2224,7 +2229,10 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         }
     } else if (gesture.state == UIGestureRecognizerStateChanged) {
         if (self.bezierContainer.alpha > 0) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
             self.bezierLayer.path = [self pathForStretch:MAX(0, stretch) atPoint:location velocity:velocity orientation:orientation].CGPath;
+            [CATransaction commit];
 
             // 仅进行手势拉伸图形绘制，延迟 dimmingView 等呈现准备工作至阈值触发后
             // 建议 3：Tactile Granularity (触觉颗粒感)
