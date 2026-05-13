@@ -81,6 +81,10 @@
 @property (assign, nonatomic) CGRect frame;
 @end
 
+@interface UIMutableApplicationSceneSettings : FBSMutableSceneSettings
+- (void)setInLiveResize:(BOOL)inLiveResize;
+@end
+
 @interface FBSceneHostManager : NSObject
 - (void)enableHostingForRequester:(id)arg1 priority:(long long)arg2;
 - (UIView *)hostView;
@@ -105,6 +109,9 @@
 
 @interface UIScenePresentationContext : NSObject
 - (instancetype)_initWithDefaultValues;
+@property (nonatomic, assign) NSUInteger presentedLayerTypes;
+@property (nonatomic, assign) NSUInteger appearanceStyle;
+@property (nonatomic, assign) BOOL clipsToBounds;
 @end
 
 #pragma mark - Data Model
@@ -338,6 +345,7 @@ static NSMutableArray *floatingWindows = nil;
 @property (nonatomic, strong) UIView *dragHandle;
 @property (nonatomic, strong) UIView *resizeHandle;
 @property (nonatomic, strong) FBScene *targetScene;
+@property (nonatomic, assign) CGRect initialResizeFrame;
 - (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene;
 @end
 
@@ -471,7 +479,7 @@ static NSMutableArray *floatingWindows = nil;
                 [settings setForeground:YES];
                 
                 if ([settings respondsToSelector:@selector(setFrame:)]) {
-                    [settings setFrame:self.frame];
+                    [settings setFrame:self.bounds];
                 }
                 
                 [targetScene updateSettings:settings withTransitionContext:nil];
@@ -483,14 +491,23 @@ static NSMutableArray *floatingWindows = nil;
                 // Step 2: 使用 _UISceneLayerHostContainerView 创建渲染视图
                 @try {
                     _UISceneLayerHostContainerView *hostedView = [[%c(_UISceneLayerHostContainerView) alloc] initWithScene:targetScene debugDescription:@"ChevronV3Host"];
-                    id context = [[%c(UIScenePresentationContext) alloc] _initWithDefaultValues];
+                    UIScenePresentationContext *context = [[%c(UIScenePresentationContext) alloc] _initWithDefaultValues];
+                    if ([context respondsToSelector:@selector(setPresentedLayerTypes:)]) {
+                        [context setPresentedLayerTypes:26]; // 尝试强制渲染所有类型
+                    }
+                    if ([context respondsToSelector:@selector(setAppearanceStyle:)]) {
+                        [context setAppearanceStyle:2];
+                    }
+                    if ([context respondsToSelector:@selector(setClipsToBounds:)]) {
+                        [context setClipsToBounds:YES];
+                    }
+                    
                     if ([hostedView respondsToSelector:@selector(_setPresentationContext:)]) {
                         [hostedView _setPresentationContext:context];
                     }
                     
                     if (hostedView) {
-                        CGSize refSize = self.bounds.size;
-                        hostedView.frame = CGRectMake(0, 0, refSize.width, refSize.height);
+                        hostedView.frame = self.bounds;
                         hostedView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
                         
                         self.hostView = hostedView;
@@ -540,7 +557,17 @@ static NSMutableArray *floatingWindows = nil;
 }
 
 - (void)handleResizePan:(UIPanGestureRecognizer *)gesture {
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        self.initialResizeFrame = self.frame;
+        if (self.hostView) {
+            self.hostView.transform = CGAffineTransformIdentity;
+            self.hostView.frame = CGRectMake(0, 0, self.initialResizeFrame.size.width, self.initialResizeFrame.size.height);
+        }
+    }
+    
     CGPoint translation = [gesture translationInView:nil];
+    [gesture setTranslation:CGPointZero inView:nil];
+    
     if (gesture.state == UIGestureRecognizerStateChanged || gesture.state == UIGestureRecognizerStateEnded) {
         // 固定高宽比例: 500 / 300 = 1.6666...
         CGFloat aspect = 500.0 / 300.0;
@@ -556,25 +583,37 @@ static NSMutableArray *floatingWindows = nil;
         
         // 更新内部组件布局
         self.dragHandle.frame = CGRectMake(0, 0, newWidth, 20);
-        
-        if (self.hostView) {
-            self.hostView.frame = CGRectMake(0, 0, newWidth, newHeight);
-        }
         self.resizeHandle.frame = CGRectMake(newWidth - 20, newHeight - 20, 20, 20);
         
-        [gesture setTranslation:CGPointZero inView:nil];
-        
-        // 实时更新 FBScene 的 frame
-        @try {
-            if (self.targetScene) {
-                FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
-                if ([settings respondsToSelector:@selector(setFrame:)]) {
-                    [settings setFrame:newFrame];
+        if (self.hostView) {
+            if (gesture.state == UIGestureRecognizerStateChanged) {
+                // 拖动过程中：仅使用图层缩放避免应用引擎频繁重绘引发花屏
+                CGFloat scaleX = newWidth / self.initialResizeFrame.size.width;
+                CGFloat scaleY = newHeight / self.initialResizeFrame.size.height;
+                self.hostView.transform = CGAffineTransformMakeScale(scaleX, scaleY);
+                // 缩放后重新居中
+                self.hostView.center = CGPointMake(newWidth / 2.0, newHeight / 2.0);
+            } else if (gesture.state == UIGestureRecognizerStateEnded) {
+                // 拖动结束：移除缩放形变，设定最终的真实布局尺寸，并同步给系统 Scene
+                self.hostView.transform = CGAffineTransformIdentity;
+                self.hostView.frame = CGRectMake(0, 0, newWidth, newHeight);
+                self.initialResizeFrame = newFrame;
+                
+                @try {
+                    if (self.targetScene) {
+                        FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
+                        if ([settings respondsToSelector:@selector(setFrame:)]) {
+                            [settings setFrame:self.bounds];
+                        }
+                        if ([settings respondsToSelector:@selector(setInLiveResize:)]) {
+                            [(UIMutableApplicationSceneSettings *)settings setInLiveResize:NO];
+                        }
+                        [self.targetScene updateSettings:settings withTransitionContext:nil];
+                    }
+                } @catch (NSException *e) {
+                    CV3LogToFile(@"[Error] Resize update scene failed: %@", e);
                 }
-                [self.targetScene updateSettings:settings withTransitionContext:nil];
             }
-        } @catch (NSException *e) {
-            CV3LogToFile(@"[Error] Resize update scene failed: %@", e);
         }
     }
 }
