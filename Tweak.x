@@ -560,6 +560,7 @@ static NSMutableArray *floatingWindows = nil;
     if (gesture.state == UIGestureRecognizerStateBegan) {
         self.initialResizeFrame = self.frame;
         if (self.hostView) {
+            self.hostView.autoresizingMask = UIViewAutoresizingNone; // 禁用自动布局，防止拖动中冲突
             self.hostView.transform = CGAffineTransformIdentity;
             self.hostView.frame = CGRectMake(0, 0, self.initialResizeFrame.size.width, self.initialResizeFrame.size.height);
         }
@@ -597,6 +598,7 @@ static NSMutableArray *floatingWindows = nil;
                 // 拖动结束：移除缩放形变，设定最终的真实布局尺寸，并同步给系统 Scene
                 self.hostView.transform = CGAffineTransformIdentity;
                 self.hostView.frame = CGRectMake(0, 0, newWidth, newHeight);
+                self.hostView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight; // 恢复自动布局
                 self.initialResizeFrame = newFrame;
                 
                 @try {
