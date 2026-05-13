@@ -81,9 +81,15 @@
 @property (assign, nonatomic) CGRect frame;
 @end
 
+@interface FBSceneHostManager : NSObject
+- (void)enableHostingForRequester:(id)arg1 priority:(long long)arg2;
+- (UIView *)hostView;
+@end
+
 @interface FBScene : NSObject
 @property (nonatomic, readonly) NSString *identifier;
 @property (nonatomic, readonly) FBSSceneSettings *settings;
+@property (nonatomic, readonly) FBSceneHostManager *hostManager; // 添加此属性
 - (void)_setContentState:(NSInteger)state;
 - (void)updateSettings:(FBSSceneSettings *)settings withTransitionContext:(id)context;
 @end
@@ -93,7 +99,7 @@
 @end
 
 @interface _UISceneLayerHostContainerView : UIView
-- (instancetype)initWithScene:(FBScene *)scene;
+- (instancetype)initWithScene:(FBScene *)scene debugDescription:(NSString *)debugDescription;
 - (void)_setPresentationContext:(id)context;
 @end
 
@@ -456,39 +462,44 @@ static NSMutableArray *floatingWindows = nil;
             FBScene *targetScene = [self getSceneForBundleID:self.bundleID];
             
             if (targetScene) {
-                // Step 1: Force Backgrounded NO
-                FBSMutableSceneSettings *bgSettings = [[targetScene settings] mutableCopy];
-                [bgSettings setBackgrounded:NO];
-                [targetScene updateSettings:bgSettings withTransitionContext:nil];
+                CV3LogToFile(@"[Debug] 找到场景: %@ (retries left: %d)", self.bundleID, retries);
                 
-                // Step 2: Wake Scene (State 2, Foreground YES, Frame)
+                // Step 1: 确保 Scene 已准备好被托管
+                FBSMutableSceneSettings *settings = [[targetScene settings] mutableCopy];
+                [settings setBackgrounded:NO];
+                [settings setForeground:YES];
+                [targetScene updateSettings:settings withTransitionContext:nil];
+                
                 if ([targetScene respondsToSelector:@selector(_setContentState:)]) {
-                    [targetScene _setContentState:2]; // 2 == ready
+                    [targetScene _setContentState:2]; // Ready
                 }
                 
-                FBSMutableSceneSettings *fgSettings = [[targetScene settings] mutableCopy];
-                [fgSettings setForeground:YES];
-                
-                CGRect targetFrame = CGRectMake(0, 0, self.bounds.size.width, self.bounds.size.height - 30);
-                [fgSettings setFrame:targetFrame];
-                
-                [targetScene updateSettings:fgSettings withTransitionContext:nil];
-                
-                _UISceneLayerHostContainerView *host = [[%c(_UISceneLayerHostContainerView) alloc] initWithScene:targetScene];
-                if (host) {
-                    if ([host respondsToSelector:@selector(_setPresentationContext:)]) {
-                        [host _setPresentationContext:[[%c(UIScenePresentationContext) alloc] _initWithDefaultValues]];
+                // Step 2: 使用 _UISceneLayerHostContainerView 创建渲染视图
+                @try {
+                    _UISceneLayerHostContainerView *hostedView = [[%c(_UISceneLayerHostContainerView) alloc] initWithScene:targetScene debugDescription:@"ChevronV3Host"];
+                    id context = [[%c(UIScenePresentationContext) alloc] _initWithDefaultValues];
+                    if ([hostedView respondsToSelector:@selector(_setPresentationContext:)]) {
+                        [hostedView _setPresentationContext:context];
                     }
-                    host.frame = CGRectMake(0, 30, self.bounds.size.width, self.bounds.size.height - 30);
-                    host.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-                    self.hostView = host;
-                    [self addSubview:host];
-                } else {
-                    CV3LogToFile(@"[Error] Failed to instantiate _UISceneLayerHostContainerView for %@", self.bundleID);
+                    
+                    if (hostedView) {
+                        CGSize refSize = CGSizeMake(self.bounds.size.width, self.bounds.size.height - 30);
+                        hostedView.frame = CGRectMake(0, 30, refSize.width, refSize.height);
+                        hostedView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                        
+                        self.hostView = hostedView;
+                        [self addSubview:hostedView];
+                        [self bringSubviewToFront:self.titleBar];
+                        CV3LogToFile(@"[Debug] 成功通过 _UISceneLayerHostContainerView 创建渲染视图");
+                    } else {
+                        CV3LogToFile(@"[Error] _UISceneLayerHostContainerView 创建失败");
+                    }
+                } @catch (NSException *e) {
+                    CV3LogToFile(@"[Error] 获取 SceneContainerView 失败: %@", e);
                 }
             } else {
+                CV3LogToFile(@"[Debug] 未找到场景: %@", self.bundleID);
                 if (retries > 0) {
-                    // Exponential backoff
                     [self attemptToHostSceneWithRetries:retries - 1 delay:delay * 1.5];
                 } else {
                     CV3LogToFile(@"[Error] targetScene not found after launch for %@", self.bundleID);
