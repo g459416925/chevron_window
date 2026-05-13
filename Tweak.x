@@ -468,6 +468,12 @@ static NSMutableArray *floatingWindows = nil;
                 FBSMutableSceneSettings *settings = [[targetScene settings] mutableCopy];
                 [settings setBackgrounded:NO];
                 [settings setForeground:YES];
+                
+                CGSize refSize = CGSizeMake(self.bounds.size.width, self.bounds.size.height - 30);
+                if ([settings respondsToSelector:@selector(setFrame:)]) {
+                    [settings setFrame:CGRectMake(0, 0, refSize.width, refSize.height)];
+                }
+                
                 [targetScene updateSettings:settings withTransitionContext:nil];
                 
                 if ([targetScene respondsToSelector:@selector(_setContentState:)]) {
