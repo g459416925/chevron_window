@@ -541,8 +541,13 @@ static NSMutableArray *floatingWindows = nil;
 - (void)handleResizePan:(UIPanGestureRecognizer *)gesture {
     CGPoint translation = [gesture translationInView:nil];
     if (gesture.state == UIGestureRecognizerStateChanged || gesture.state == UIGestureRecognizerStateEnded) {
-        CGFloat newWidth = MAX(150, self.bounds.size.width + translation.x);
-        CGFloat newHeight = MAX(200, self.bounds.size.height + translation.y);
+        // 固定高宽比例: 500 / 300 = 1.6666...
+        CGFloat aspect = 500.0 / 300.0;
+        
+        // 以水平拖拽距离为基准进行等比例缩放
+        // 设定最小宽度为 200，保证应用 UI 元素不会因为过度拥挤而错位
+        CGFloat newWidth = MAX(200, self.bounds.size.width + translation.x);
+        CGFloat newHeight = newWidth * aspect;
         
         self.bounds = CGRectMake(0, 0, newWidth, newHeight);
         
