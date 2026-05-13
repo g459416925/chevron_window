@@ -337,6 +337,7 @@ static NSMutableArray *floatingWindows = nil;
 @property (nonatomic, strong) UIView *hostView;
 @property (nonatomic, strong) UIView *dragHandle;
 @property (nonatomic, strong) UIView *resizeHandle;
+@property (nonatomic, strong) FBScene *targetScene;
 - (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene;
 @end
 
@@ -461,6 +462,7 @@ static NSMutableArray *floatingWindows = nil;
             FBScene *targetScene = [self getSceneForBundleID:self.bundleID];
             
             if (targetScene) {
+                self.targetScene = targetScene;
                 CV3LogToFile(@"[Debug] 找到场景: %@ (retries left: %d)", self.bundleID, retries);
                 
                 // Step 1: 确保 Scene 已准备好被托管
@@ -468,9 +470,8 @@ static NSMutableArray *floatingWindows = nil;
                 [settings setBackgrounded:NO];
                 [settings setForeground:YES];
                 
-                CGSize refSize = self.bounds.size;
                 if ([settings respondsToSelector:@selector(setFrame:)]) {
-                    [settings setFrame:CGRectMake(0, 0, refSize.width, refSize.height)];
+                    [settings setFrame:self.frame];
                 }
                 
                 [targetScene updateSettings:settings withTransitionContext:nil];
@@ -544,12 +545,14 @@ static NSMutableArray *floatingWindows = nil;
         // 固定高宽比例: 500 / 300 = 1.6666...
         CGFloat aspect = 500.0 / 300.0;
         
-        // 以水平拖拽距离为基准进行等比例缩放
-        // 设定最小宽度为 200，保证应用 UI 元素不会因为过度拥挤而错位
-        CGFloat newWidth = MAX(200, self.bounds.size.width + translation.x);
+        // 必须基于原 frame 计算，避免 bounds 导致中心点向两边扩展
+        CGRect newFrame = self.frame;
+        CGFloat newWidth = MAX(200, newFrame.size.width + translation.x);
         CGFloat newHeight = newWidth * aspect;
         
-        self.bounds = CGRectMake(0, 0, newWidth, newHeight);
+        newFrame.size.width = newWidth;
+        newFrame.size.height = newHeight;
+        self.frame = newFrame;
         
         // 更新内部组件布局
         self.dragHandle.frame = CGRectMake(0, 0, newWidth, 20);
@@ -563,13 +566,12 @@ static NSMutableArray *floatingWindows = nil;
         
         // 实时更新 FBScene 的 frame
         @try {
-            FBScene *targetScene = [self getSceneForBundleID:self.bundleID];
-            if (targetScene) {
-                FBSMutableSceneSettings *settings = [[targetScene settings] mutableCopy];
+            if (self.targetScene) {
+                FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
                 if ([settings respondsToSelector:@selector(setFrame:)]) {
-                    [settings setFrame:CGRectMake(0, 0, newWidth, newHeight)];
+                    [settings setFrame:newFrame];
                 }
-                [targetScene updateSettings:settings withTransitionContext:nil];
+                [self.targetScene updateSettings:settings withTransitionContext:nil];
             }
         } @catch (NSException *e) {
             CV3LogToFile(@"[Error] Resize update scene failed: %@", e);
