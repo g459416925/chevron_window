@@ -335,7 +335,8 @@ static NSMutableArray *floatingWindows = nil;
 @interface CV3FloatingAppWindow : UIWindow
 @property (nonatomic, copy) NSString *bundleID;
 @property (nonatomic, strong) UIView *hostView;
-@property (nonatomic, strong) UIView *titleBar;
+@property (nonatomic, strong) UIView *dragHandle;
+@property (nonatomic, strong) UIView *resizeHandle;
 - (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene;
 @end
 
@@ -358,26 +359,24 @@ static NSMutableArray *floatingWindows = nil;
         self.layer.borderWidth = 1.0;
         self.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.2].CGColor;
         
-        // 顶部标题栏
-        self.titleBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 300, 30)];
-        self.titleBar.backgroundColor = [UIColor darkGrayColor];
-        [self addSubview:self.titleBar];
-        
-        UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 0, 240, 30)];
-        titleLabel.textColor = [UIColor whiteColor];
-        titleLabel.font = [UIFont systemFontOfSize:12];
-        titleLabel.text = bundleID;
-        [self.titleBar addSubview:titleLabel];
-        
-        UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-        closeBtn.frame = CGRectMake(270, 5, 20, 20);
-        [closeBtn setBackgroundColor:[UIColor redColor]];
-        closeBtn.layer.cornerRadius = 10;
-        [closeBtn addTarget:self action:@selector(closeWindow) forControlEvents:UIControlEventTouchUpInside];
-        [self.titleBar addSubview:closeBtn];
+        // 顶部隐形拖拽区域，高度20
+        self.dragHandle = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 300, 20)];
+        self.dragHandle.backgroundColor = [UIColor clearColor]; // 完全透明
+        [self addSubview:self.dragHandle];
         
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
-        [self.titleBar addGestureRecognizer:pan];
+        [self.dragHandle addGestureRecognizer:pan];
+        
+        // 右下角缩放把手
+        self.resizeHandle = [[UIView alloc] initWithFrame:CGRectMake(280, 480, 20, 20)];
+        self.resizeHandle.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.5];
+        self.resizeHandle.layer.cornerRadius = 4;
+        self.resizeHandle.layer.maskedCorners = kCALayerMinXMinYCorner; // 类似圆角折角
+        [self addSubview:self.resizeHandle];
+        
+        UIPanGestureRecognizer *resizePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleResizePan:)];
+        [self.resizeHandle addGestureRecognizer:resizePan];
+        self.resizeHandle.userInteractionEnabled = YES;
         
         [self clampToScreenBounds];
         [self loadAppScene];
@@ -469,7 +468,7 @@ static NSMutableArray *floatingWindows = nil;
                 [settings setBackgrounded:NO];
                 [settings setForeground:YES];
                 
-                CGSize refSize = CGSizeMake(self.bounds.size.width, self.bounds.size.height - 30);
+                CGSize refSize = self.bounds.size;
                 if ([settings respondsToSelector:@selector(setFrame:)]) {
                     [settings setFrame:CGRectMake(0, 0, refSize.width, refSize.height)];
                 }
@@ -489,13 +488,14 @@ static NSMutableArray *floatingWindows = nil;
                     }
                     
                     if (hostedView) {
-                        CGSize refSize = CGSizeMake(self.bounds.size.width, self.bounds.size.height - 30);
-                        hostedView.frame = CGRectMake(0, 30, refSize.width, refSize.height);
+                        CGSize refSize = self.bounds.size;
+                        hostedView.frame = CGRectMake(0, 0, refSize.width, refSize.height);
                         hostedView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
                         
                         self.hostView = hostedView;
                         [self addSubview:hostedView];
-                        [self bringSubviewToFront:self.titleBar];
+                        [self bringSubviewToFront:self.dragHandle];
+                        [self bringSubviewToFront:self.resizeHandle];
                         CV3LogToFile(@"[Debug] 成功通过 _UISceneLayerHostContainerView 创建渲染视图");
                     } else {
                         CV3LogToFile(@"[Error] _UISceneLayerHostContainerView 创建失败");
@@ -535,6 +535,40 @@ static NSMutableArray *floatingWindows = nil;
         self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
         [gesture setTranslation:CGPointZero inView:nil];
         [self clampToScreenBounds];
+    }
+}
+
+- (void)handleResizePan:(UIPanGestureRecognizer *)gesture {
+    CGPoint translation = [gesture translationInView:nil];
+    if (gesture.state == UIGestureRecognizerStateChanged || gesture.state == UIGestureRecognizerStateEnded) {
+        CGFloat newWidth = MAX(150, self.bounds.size.width + translation.x);
+        CGFloat newHeight = MAX(200, self.bounds.size.height + translation.y);
+        
+        self.bounds = CGRectMake(0, 0, newWidth, newHeight);
+        
+        // 更新内部组件布局
+        self.dragHandle.frame = CGRectMake(0, 0, newWidth, 20);
+        
+        if (self.hostView) {
+            self.hostView.frame = CGRectMake(0, 0, newWidth, newHeight);
+        }
+        self.resizeHandle.frame = CGRectMake(newWidth - 20, newHeight - 20, 20, 20);
+        
+        [gesture setTranslation:CGPointZero inView:nil];
+        
+        // 实时更新 FBScene 的 frame
+        @try {
+            FBScene *targetScene = [self getSceneForBundleID:self.bundleID];
+            if (targetScene) {
+                FBSMutableSceneSettings *settings = [[targetScene settings] mutableCopy];
+                if ([settings respondsToSelector:@selector(setFrame:)]) {
+                    [settings setFrame:CGRectMake(0, 0, newWidth, newHeight)];
+                }
+                [targetScene updateSettings:settings withTransitionContext:nil];
+            }
+        } @catch (NSException *e) {
+            CV3LogToFile(@"[Error] Resize update scene failed: %@", e);
+        }
     }
 }
 
