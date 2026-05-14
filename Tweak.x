@@ -3,6 +3,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <objc/runtime.h>
+#include <sys/stat.h>
 
 #pragma mark - Private API Declarations
 @interface SBWindow : UIWindow
@@ -295,6 +296,11 @@ static void CV3LogToFile(NSString *format, ...) {
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
 
+    // 过滤日志，只记录包含“尺寸已同步”或特定分辨率相关的日志
+    if (![message containsString:@"尺寸已同步"] && ![message containsString:@"分辨率"]) {
+        return;
+    }
+
     // 立即输出到系统日志，作为第一层保障
     NSLog(@"[ChevronV3] %@", message);
 
@@ -324,7 +330,7 @@ static void CV3LogToFile(NSString *format, ...) {
             if (handle) {
                 [handle seekToEndOfFile];
                 NSString *timestamp = [NSDateFormatter localizedStringFromDate:[NSDate date] dateStyle:NSDateFormatterShortStyle timeStyle:NSDateFormatterMediumStyle];
-                NSString *finalLog = [NSString stringWithFormat:@"[%@] %@\n", timestamp, message];
+                NSString *finalLog = [NSString stringWithFormat:@"[%@] [Host] %@\n", timestamp, message];
                 // 确保使用 UTF-8 编码写入文件
                 [handle writeData:[finalLog dataUsingEncoding:NSUTF8StringEncoding]];
                 [handle closeFile];
@@ -476,7 +482,7 @@ static NSMutableArray *floatingWindows = nil;
         
         // 顶部拖拽区域
         self.dragHandle = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 300, 30)];
-        self.dragHandle.backgroundColor = [UIColor clearColor];
+        self.dragHandle.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.01]; // 确保整个 30pt 高度的区域都能接收拖拽手势
         [self addSubview:self.dragHandle];
         
         // iPadOS 风格多任务胶囊
@@ -505,7 +511,7 @@ static NSMutableArray *floatingWindows = nil;
         
         // 右下角缩放把手 (同心圆/Stage Manager 风格)
         self.resizeHandle = [[UIView alloc] initWithFrame:CGRectMake(260, 460, 40, 40)];
-        self.resizeHandle.backgroundColor = [UIColor clearColor];
+        self.resizeHandle.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.01]; // 必须有微弱的背景色才能接收触控，否则透传给底层的 App
         [self addSubview:self.resizeHandle];
         
         self.resizeHandleLayer = [CAShapeLayer layer];
@@ -686,12 +692,16 @@ static NSMutableArray *floatingWindows = nil;
                     if (hostedView) {
                         hostedView.frame = self.bounds;
                         hostedView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                        hostedView.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+                        hostedView.layer.masksToBounds = YES;
                         
                         self.hostView = hostedView;
                         [self addSubview:hostedView];
                         [self bringSubviewToFront:self.dragHandle];
                         [self bringSubviewToFront:self.resizeHandle];
                         CV3LogToFile(@"[Debug] 成功通过 _UISceneLayerHostContainerView 创建渲染视图");
+                        
+                        [self syncWindowBoundsToClient];
                     } else {
                         CV3LogToFile(@"[Error] _UISceneLayerHostContainerView 创建失败");
                     }
@@ -949,6 +959,26 @@ static NSMutableArray *floatingWindows = nil;
     }
 }
 
+- (void)syncWindowBoundsToClient {
+    if (self.bundleID) {
+        NSString *path = @"/var/mobile/Library/Preferences/com.xu.chevronv3.plist";
+        NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithContentsOfFile:path] ?: [NSMutableDictionary dictionary];
+        
+        dict[[NSString stringWithFormat:@"isHosted_%@", self.bundleID]] = @(!self.hidden);
+        dict[[NSString stringWithFormat:@"currentWidth_%@", self.bundleID]] = @(self.bounds.size.width);
+        dict[[NSString stringWithFormat:@"currentHeight_%@", self.bundleID]] = @(self.bounds.size.height);
+        
+        [dict writeToFile:path atomically:YES];
+        
+        // 赋予全局可读权限，确保沙盒内的 App 能读取到尺寸数据
+        chmod([path UTF8String], 0644);
+        
+        CV3LogToFile(@"宿主窗口 (%@) 尺寸已同步: 宽度=%.1f, 高度=%.1f", self.bundleID, self.bounds.size.width, self.bounds.size.height);
+        
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (CFStringRef)@"com.xu.chevronv3/SizeChanged", NULL, NULL, YES);
+    }
+}
+
 - (void)handleResizePan:(UIPanGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
         self.initialResizeFrame = self.frame;
@@ -1020,12 +1050,17 @@ static NSMutableArray *floatingWindows = nil;
                 } @catch (NSException *e) {
                     CV3LogToFile(@"[Error] Resize update scene failed: %@", e);
                 }
+                
+                [self syncWindowBoundsToClient];
             }
         }
     }
 }
 
 - (void)closeWindow {
+    self.hidden = YES;
+    [self syncWindowBoundsToClient];
+    
     @try {
         FBScene *targetScene = [self getSceneForBundleID:self.bundleID];
         if (targetScene) {
@@ -3970,6 +4005,29 @@ static NSTimeInterval lastLogTime = 0;
     sharedWindow.hidden = NO;
     sharedWindow.alpha = 1.0;
     [sharedWindow show];
+}
+%end
+
+%hook FBScene
+- (void)updateSettings:(id)arg1 withTransitionContext:(id)arg2 {
+    if (floatingWindows) {
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            // 只保护未隐藏的分屏窗口
+            if ([self.identifier containsString:win.bundleID] && !win.hidden) {
+                // 强制将 settings 转为 mutable，从而合法修改属性
+                id mutableSettings = [arg1 mutableCopy];
+                if ([mutableSettings respondsToSelector:@selector(setForeground:)]) {
+                    [mutableSettings setForeground:YES];
+                }
+                if ([mutableSettings respondsToSelector:@selector(setBackgrounded:)]) {
+                    [mutableSettings setBackgrounded:NO];
+                }
+                %orig(mutableSettings, arg2);
+                return;
+            }
+        }
+    }
+    %orig;
 }
 %end
 
