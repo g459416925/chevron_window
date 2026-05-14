@@ -416,10 +416,6 @@ static NSMutableArray *floatingWindows = nil;
 @property (nonatomic, copy) NSString *bundleID;
 @property (nonatomic, strong) UIView *hostContainerProxy;
 @property (nonatomic, strong) UIView *hostView;
-@property (nonatomic, strong) UIVisualEffectView *blurBackdrop;
-@property (nonatomic, strong) UIView *dispersionContainer;
-@property (nonatomic, strong) CALayer *cyanLayer;
-@property (nonatomic, strong) CALayer *magentaLayer;
 @property (nonatomic, strong) UIView *dragHandle;
 @property (nonatomic, strong) UIView *topCapsule;
 @property (nonatomic, strong) UIView *resizeHandle;
@@ -448,42 +444,12 @@ static NSMutableArray *floatingWindows = nil;
         self.windowLevel = 2101; // 覆盖在面板之上
         self.backgroundColor = [UIColor clearColor];
         
-        // 动态阴影容器 (由于 masksToBounds=YES 会裁剪阴影，我们需要在 layer 层做文章或使用父 view)
-        // 这里的策略是利用 UIWindow 自身的 layer 阴影
+        // 动态阴影容器
         self.layer.shadowColor = [UIColor blackColor].CGColor;
         self.layer.shadowOffset = CGSizeMake(0, 10);
         self.layer.shadowOpacity = 0.4;
         self.layer.shadowRadius = 20.0;
         self.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
-        
-        // 毛玻璃背景
-        self.blurBackdrop = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
-        self.blurBackdrop.frame = self.bounds;
-        self.blurBackdrop.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
-        self.blurBackdrop.layer.masksToBounds = YES;
-        self.blurBackdrop.layer.borderWidth = 0.5;
-        self.blurBackdrop.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.2].CGColor;
-        [self addSubview:self.blurBackdrop];
-
-        // 1.15x 折射缩放 (Liquid Glass Engine 核心规范)
-        self.blurBackdrop.contentView.transform = CGAffineTransformMakeScale(1.15, 1.15);
-
-        // 三棱镜色散容器
-        self.dispersionContainer = [[UIView alloc] initWithFrame:self.bounds];
-        self.dispersionContainer.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
-        self.dispersionContainer.layer.masksToBounds = YES;
-        self.dispersionContainer.userInteractionEnabled = NO;
-        [self addSubview:self.dispersionContainer];
-
-        self.cyanLayer = [CALayer layer];
-        self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.15].CGColor;
-        self.cyanLayer.borderWidth = 0.3;
-        [self.dispersionContainer.layer addSublayer:self.cyanLayer];
-
-        self.magentaLayer = [CALayer layer];
-        self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:0.15].CGColor;
-        self.magentaLayer.borderWidth = 0.3;
-        [self.dispersionContainer.layer addSublayer:self.magentaLayer];
         
         // 代理容器：用来隔离系统的布局覆盖，承载真实的缩放和裁剪
         self.hostContainerProxy = [[UIView alloc] initWithFrame:self.bounds];
@@ -563,17 +529,6 @@ static NSMutableArray *floatingWindows = nil;
     CGFloat w = self.bounds.size.width;
     CGFloat h = self.bounds.size.height;
     
-    self.blurBackdrop.frame = self.bounds;
-    self.dispersionContainer.frame = self.bounds;
-    
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    self.cyanLayer.frame = CGRectInset(self.bounds, -0.3, -0.3);
-    self.magentaLayer.frame = CGRectInset(self.bounds, 0.3, 0.3);
-    self.cyanLayer.cornerRadius = kChevronLayoutConstants.cornerRadius;
-    self.magentaLayer.cornerRadius = kChevronLayoutConstants.cornerRadius;
-    [CATransaction commit];
-    
     self.dragHandle.frame = CGRectMake(0, 0, w, 30);
     self.topCapsule.center = CGPointMake(w / 2.0, 15);
     
@@ -594,7 +549,6 @@ static NSMutableArray *floatingWindows = nil;
         self.hostContainerProxy.transform = CGAffineTransformIdentity;
         self.hostContainerProxy.frame = screenBounds; 
         
-        // 内部真实视图只管充满代理容器即可
         if (self.hostView) {
             self.hostView.transform = CGAffineTransformIdentity;
             self.hostView.frame = screenBounds;
@@ -723,8 +677,11 @@ static NSMutableArray *floatingWindows = nil;
                     }
                     
                     if (hostedView) {
+                        hostedView.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+                        hostedView.layer.masksToBounds = YES;
+                        
                         self.hostView = hostedView;
-                        [self.hostContainerProxy addSubview:hostedView];
+                        [self addSubview:hostedView];
                         [self bringSubviewToFront:self.dragHandle];
                         [self bringSubviewToFront:self.resizeHandle];
                         CV3LogToFile(@"[Debug] 成功通过 _UISceneLayerHostContainerView 创建渲染视图");
@@ -779,11 +736,11 @@ static NSMutableArray *floatingWindows = nil;
         CGRect screen = [UIScreen mainScreen].bounds;
         CGFloat threshold = 40.0;
         if (self.center.x < threshold || self.center.x > screen.size.width - threshold) {
-            self.blurBackdrop.layer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.5].CGColor;
-            self.blurBackdrop.layer.borderWidth = 2.0;
+            self.layer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.5].CGColor;
+            self.layer.borderWidth = 2.0;
         } else {
-            self.blurBackdrop.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.2].CGColor;
-            self.blurBackdrop.layer.borderWidth = 0.5;
+            self.layer.borderColor = [[UIColor clearColor] CGColor];
+            self.layer.borderWidth = 0.0;
         }
     }
     
@@ -844,8 +801,8 @@ static NSMutableArray *floatingWindows = nil;
             }
             
             [self clampToScreenBounds];
-            self.blurBackdrop.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.2].CGColor;
-            self.blurBackdrop.layer.borderWidth = 0.5;
+            self.layer.borderColor = [[UIColor clearColor] CGColor];
+            self.layer.borderWidth = 0.0;
         } completion:nil];
     }
 }
@@ -883,8 +840,6 @@ static NSMutableArray *floatingWindows = nil;
             self.isStashed = NO;
             self.stashedSide = 0;
             self.stashGrabber.alpha = 0;
-            self.blurBackdrop.alpha = 1.0;
-            self.blurBackdrop.transform = CGAffineTransformIdentity;
             [self clampToScreenBounds];
         } completion:^(BOOL finished) {
             // 通知其他窗口更新堆叠状态
@@ -905,21 +860,14 @@ static NSMutableArray *floatingWindows = nil;
         // 无需额外操作
     } else if (gesture.state == UIGestureRecognizerStateChanged) {
         CGRect currentFrame = self.frame;
-        CGFloat progress = 0;
         if (self.stashedSide == 1) { // Left
             CGFloat delta = MAX(0, translation.x);
             currentFrame.origin.x = (-self.preStashFrame.size.width + 4) + delta;
-            progress = delta / self.preStashFrame.size.width;
         } else { // Right
             CGFloat delta = MIN(0, translation.x);
             currentFrame.origin.x = (screen.size.width - 4) + delta;
-            progress = ABS(delta) / self.preStashFrame.size.width;
         }
         self.frame = currentFrame;
-        
-        // 动态模糊扩散 (Materialization Effect)
-        self.blurBackdrop.alpha = 0.3 + (MIN(1.0, progress) * 0.7);
-        self.blurBackdrop.transform = CGAffineTransformMakeScale(0.95 + (MIN(1.0, progress) * 0.05), 0.95 + (MIN(1.0, progress) * 0.05));
     } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
         CGPoint velocity = [gesture velocityInView:nil];
         BOOL shouldRestore = NO;
@@ -942,8 +890,6 @@ static NSMutableArray *floatingWindows = nil;
                     stashedFrame.origin.x = screen.size.width - 4;
                 }
                 self.frame = stashedFrame;
-                self.blurBackdrop.alpha = 0.3; // 回到半透明状态
-                self.blurBackdrop.transform = CGAffineTransformMakeScale(0.95, 0.95);
             } completion:nil];
         }
     }
@@ -4002,6 +3948,51 @@ static NSTimeInterval lastLogTime = 0;
     sharedWindow.hidden = NO;
     sharedWindow.alpha = 1.0;
     [sharedWindow show];
+}
+%end
+
+@interface CV3PassthroughWindow : UIWindow
+@end
+@implementation CV3PassthroughWindow
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hitView = [super hitTest:point withEvent:event];
+    if (hitView == self) return nil;
+    return hitView;
+}
+@end
+
+static CV3PassthroughWindow *cv3_keyboardWindow = nil;
+
+%hook _UISceneLayerHostContainerView
+- (void)layoutSubviews {
+    %orig;
+    for (UIView *subview in self.subviews) {
+        if ([NSStringFromClass([subview class]) containsString:@"Keyboard"]) {
+            if (!cv3_keyboardWindow) {
+                if (@available(iOS 15.0, *)) {
+                    UIWindowScene *ws = nil;
+                    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                        if ([scene isKindOfClass:[UIWindowScene class]]) {
+                            ws = (UIWindowScene *)scene;
+                            break;
+                        }
+                    }
+                    cv3_keyboardWindow = [[CV3PassthroughWindow alloc] initWithWindowScene:ws];
+                } else {
+                    cv3_keyboardWindow = [[CV3PassthroughWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+                }
+                cv3_keyboardWindow.windowLevel = 10000;
+                cv3_keyboardWindow.backgroundColor = [UIColor clearColor];
+                cv3_keyboardWindow.hidden = NO;
+            }
+            if (subview.superview != cv3_keyboardWindow) {
+                [subview removeFromSuperview];
+                [cv3_keyboardWindow addSubview:subview];
+            }
+            subview.transform = CGAffineTransformIdentity;
+            subview.frame = [UIScreen mainScreen].bounds;
+        }
+    }
 }
 %end
 
