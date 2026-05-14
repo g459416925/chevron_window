@@ -83,6 +83,10 @@
 @end
 
 @interface UIMutableApplicationSceneSettings : FBSMutableSceneSettings
+@property (assign, nonatomic) UIEdgeInsets safeAreaInsetsPortrait;
+@property (assign, nonatomic) UIEdgeInsets safeAreaInsetsLandscapeLeft;
+@property (assign, nonatomic) UIEdgeInsets safeAreaInsetsLandscapeRight;
+@property (assign, nonatomic) UIEdgeInsets safeAreaInsetsPortraitUpsideDown;
 - (void)setInLiveResize:(BOOL)inLiveResize;
 @end
 
@@ -410,6 +414,7 @@ static NSMutableArray *floatingWindows = nil;
 
 @interface CV3FloatingAppWindow : UIWindow
 @property (nonatomic, copy) NSString *bundleID;
+@property (nonatomic, strong) UIView *hostContainerProxy;
 @property (nonatomic, strong) UIView *hostView;
 @property (nonatomic, strong) UIVisualEffectView *blurBackdrop;
 @property (nonatomic, strong) UIView *dispersionContainer;
@@ -479,6 +484,13 @@ static NSMutableArray *floatingWindows = nil;
         self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:0.15].CGColor;
         self.magentaLayer.borderWidth = 0.3;
         [self.dispersionContainer.layer addSublayer:self.magentaLayer];
+        
+        // 代理容器：用来隔离系统的布局覆盖，承载真实的缩放和裁剪
+        self.hostContainerProxy = [[UIView alloc] initWithFrame:self.bounds];
+        self.hostContainerProxy.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+        self.hostContainerProxy.layer.masksToBounds = YES;
+        self.hostContainerProxy.backgroundColor = [UIColor clearColor];
+        [self addSubview:self.hostContainerProxy];
         
         // 顶部拖拽区域
         self.dragHandle = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 300, 30)];
@@ -572,6 +584,27 @@ static NSMutableArray *floatingWindows = nil;
     [path moveToPoint:CGPointMake(35, 15)];
     [path addArcWithCenter:CGPointMake(15, 15) radius:20 startAngle:0 endAngle:M_PI_2 clockwise:YES];
     self.resizeHandleLayer.path = path.CGPath;
+    
+    // 核心：基于固定全屏分辨率进行等比物理缩放 (MilkyWay Style Scaling)
+    if (self.hostContainerProxy) {
+        CGRect screenBounds = [UIScreen mainScreen].bounds;
+        CGFloat scaleX = w / screenBounds.size.width;
+        CGFloat scaleY = h / screenBounds.size.height;
+        
+        self.hostContainerProxy.transform = CGAffineTransformIdentity;
+        self.hostContainerProxy.frame = screenBounds; 
+        
+        // 内部真实视图只管充满代理容器即可
+        if (self.hostView) {
+            self.hostView.transform = CGAffineTransformIdentity;
+            self.hostView.frame = screenBounds;
+        }
+        
+        // 利用 anchorPoint 使缩放围绕中心进行，然后重置 center 匹配当前窗口中心
+        self.hostContainerProxy.layer.anchorPoint = CGPointMake(0.5, 0.5);
+        self.hostContainerProxy.center = CGPointMake(w / 2.0, h / 2.0);
+        self.hostContainerProxy.transform = CGAffineTransformMakeScale(scaleX, scaleY);
+    }
 }
 
 - (void)clampToScreenBounds {
@@ -690,13 +723,8 @@ static NSMutableArray *floatingWindows = nil;
                     }
                     
                     if (hostedView) {
-                        hostedView.frame = self.bounds;
-                        hostedView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-                        hostedView.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
-                        hostedView.layer.masksToBounds = YES;
-                        
                         self.hostView = hostedView;
-                        [self addSubview:hostedView];
+                        [self.hostContainerProxy addSubview:hostedView];
                         [self bringSubviewToFront:self.dragHandle];
                         [self bringSubviewToFront:self.resizeHandle];
                         CV3LogToFile(@"[Debug] 成功通过 _UISceneLayerHostContainerView 创建渲染视图");
@@ -982,11 +1010,6 @@ static NSMutableArray *floatingWindows = nil;
 - (void)handleResizePan:(UIPanGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
         self.initialResizeFrame = self.frame;
-        if (self.hostView) {
-            self.hostView.autoresizingMask = UIViewAutoresizingNone; // 禁用自动布局，防止拖动中冲突
-            self.hostView.transform = CGAffineTransformIdentity;
-            self.hostView.frame = CGRectMake(0, 0, self.initialResizeFrame.size.width, self.initialResizeFrame.size.height);
-        }
         
         // 建议：把手高亮激活 (Handle Flare)
         [CATransaction begin];
@@ -1000,29 +1023,23 @@ static NSMutableArray *floatingWindows = nil;
     [gesture setTranslation:CGPointZero inView:nil];
     
     if (gesture.state == UIGestureRecognizerStateChanged || gesture.state == UIGestureRecognizerStateEnded) {
-        // 固定高宽比例: 500 / 300 = 1.6666...
-        CGFloat aspect = 500.0 / 300.0;
+        // 固定高宽比例: 基于屏幕比例
+        CGRect screenBounds = [UIScreen mainScreen].bounds;
+        CGFloat aspect = screenBounds.size.height / screenBounds.size.width;
         
         // 必须基于原 frame 计算，避免 bounds 导致中心点向两边扩展
         CGRect newFrame = self.frame;
-        CGFloat newWidth = MAX(200, newFrame.size.width + translation.x);
+        CGFloat newWidth = MAX(150, newFrame.size.width + translation.x);
         CGFloat newHeight = newWidth * aspect;
         
         newFrame.size.width = newWidth;
         newFrame.size.height = newHeight;
         self.frame = newFrame;
         
-        // 注：内部组件布局已移至 layoutSubviews 自动处理
+        // 注：内部组件布局已移至 layoutSubviews 自动处理，hostView 会在这里被缩放
         
         if (self.hostView) {
-            if (gesture.state == UIGestureRecognizerStateChanged) {
-                // 拖动过程中：仅使用图层缩放避免应用引擎频繁重绘引发花屏
-                CGFloat scaleX = newWidth / self.initialResizeFrame.size.width;
-                CGFloat scaleY = newHeight / self.initialResizeFrame.size.height;
-                self.hostView.transform = CGAffineTransformMakeScale(scaleX, scaleY);
-                // 缩放后重新居中
-                self.hostView.center = CGPointMake(newWidth / 2.0, newHeight / 2.0);
-            } else if (gesture.state == UIGestureRecognizerStateEnded) {
+            if (gesture.state == UIGestureRecognizerStateEnded) {
                 // 恢复把手外观
                 [CATransaction begin];
                 [CATransaction setAnimationDuration:0.3];
@@ -1030,27 +1047,7 @@ static NSMutableArray *floatingWindows = nil;
                 self.resizeHandleLayer.lineWidth = 2.0;
                 [CATransaction commit];
 
-                // 拖动结束：移除缩放形变，设定最终的真实布局尺寸，并同步给系统 Scene
-                self.hostView.transform = CGAffineTransformIdentity;
-                self.hostView.frame = CGRectMake(0, 0, newWidth, newHeight);
-                self.hostView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight; // 恢复自动布局
                 self.initialResizeFrame = newFrame;
-                
-                @try {
-                    if (self.targetScene) {
-                        FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
-                        if ([settings respondsToSelector:@selector(setFrame:)]) {
-                            [settings setFrame:self.bounds];
-                        }
-                        if ([settings respondsToSelector:@selector(setInLiveResize:)]) {
-                            [(UIMutableApplicationSceneSettings *)settings setInLiveResize:NO];
-                        }
-                        [self.targetScene updateSettings:settings withTransitionContext:nil];
-                    }
-                } @catch (NSException *e) {
-                    CV3LogToFile(@"[Error] Resize update scene failed: %@", e);
-                }
-                
                 [self syncWindowBoundsToClient];
             }
         }
@@ -4022,6 +4019,9 @@ static NSTimeInterval lastLogTime = 0;
                 if ([mutableSettings respondsToSelector:@selector(setBackgrounded:)]) {
                     [mutableSettings setBackgrounded:NO];
                 }
+                
+                // 移除 setFrame 覆写，保持原生全屏分辨率
+                
                 %orig(mutableSettings, arg2);
                 return;
             }
