@@ -480,7 +480,10 @@ static NSMutableArray *floatingWindows = nil;
     }
     
     if (self) {
-        self.frame = CGRectMake(0, 0, 300, 500);
+        CGRect screen = [UIScreen mainScreen].bounds;
+        CGFloat minW = screen.size.width * 0.45;
+        CGFloat minH = minW * (screen.size.height / screen.size.width);
+        self.frame = CGRectMake(0, 0, minW, minH);
         self.bundleID = bundleID;
         self.center = center;
         self.windowLevel = 2101; // 覆盖在面板之上
@@ -513,27 +516,27 @@ static NSMutableArray *floatingWindows = nil;
         self.hostContainerProxy.backgroundColor = [UIColor clearColor];
         [self.clippingContainer addSubview:self.hostContainerProxy];
 
-        // --- Liquid Glass Visuals ---
+        // --- Liquid Glass Visuals (Nested inside Backdrop to prevent ghosting) ---
         self.innerGlowLayer = [CALayer layer];
-        self.innerGlowLayer.frame = self.bounds;
+        self.innerGlowLayer.frame = self.glassBackdrop.bounds;
         self.innerGlowLayer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.45].CGColor;
         self.innerGlowLayer.borderWidth = 0.3;
         self.innerGlowLayer.cornerRadius = kChevronLayoutConstants.cornerRadius;
-        [self.layer addSublayer:self.innerGlowLayer];
+        [self.glassBackdrop.layer addSublayer:self.innerGlowLayer];
 
         self.cyanLayer = [CALayer layer];
-        self.cyanLayer.frame = CGRectInset(self.bounds, -0.3, -0.3);
-        self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.12].CGColor;
-        self.cyanLayer.borderWidth = 0.3;
+        self.cyanLayer.frame = self.glassBackdrop.bounds;
+        self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.15].CGColor;
+        self.cyanLayer.borderWidth = 0.4;
         self.cyanLayer.cornerRadius = kChevronLayoutConstants.cornerRadius;
-        [self.layer addSublayer:self.cyanLayer];
+        [self.glassBackdrop.layer addSublayer:self.cyanLayer];
 
         self.magentaLayer = [CALayer layer];
-        self.magentaLayer.frame = CGRectInset(self.bounds, 0.3, 0.3);
-        self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:0.12].CGColor;
-        self.magentaLayer.borderWidth = 0.3;
+        self.magentaLayer.frame = self.glassBackdrop.bounds;
+        self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:0.15].CGColor;
+        self.magentaLayer.borderWidth = 0.4;
         self.magentaLayer.cornerRadius = kChevronLayoutConstants.cornerRadius;
-        [self.layer addSublayer:self.magentaLayer];
+        [self.glassBackdrop.layer addSublayer:self.magentaLayer];
         
         // 顶部拖拽区域
         self.dragHandle = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 300, 30)];
@@ -1041,14 +1044,18 @@ static NSMutableArray *floatingWindows = nil;
     
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    self.innerGlowLayer.frame = self.bounds;
-    self.cyanLayer.frame = CGRectInset(self.bounds, -0.3, -0.3);
-    self.magentaLayer.frame = CGRectInset(self.bounds, 0.3, 0.3);
+    self.innerGlowLayer.frame = self.glassBackdrop.bounds;
+    self.cyanLayer.frame = self.glassBackdrop.bounds;
+    self.magentaLayer.frame = self.glassBackdrop.bounds;
     [CATransaction commit];
 
-    // 核心修复：更新裁剪层布局
-    self.clippingContainer.frame = self.bounds;
-    self.glassBackdrop.frame = self.bounds;
+    // 核心修复：更新裁剪层与玻璃背景布局
+    // 使用 bounds + center 而非 frame，确保在有 Transform 的情况下依然能精准对齐，消除掉队感
+    self.clippingContainer.bounds = self.bounds;
+    self.clippingContainer.center = CGPointMake(w/2.0, h/2.0);
+    
+    self.glassBackdrop.bounds = self.bounds;
+    self.glassBackdrop.center = CGPointMake(w/2.0, h/2.0);
 
     self.dragHandle.frame = CGRectMake(0, 0, w, 30);
     self.topCapsule.center = CGPointMake(w / 2.0, 15);
@@ -1268,6 +1275,9 @@ static NSMutableArray *floatingWindows = nil;
     }
     
     if (gesture.state == UIGestureRecognizerStateChanged) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        
         self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
         [gesture setTranslation:CGPointZero inView:nil];
         
@@ -1275,9 +1285,6 @@ static NSMutableArray *floatingWindows = nil;
         CGFloat velMag = sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
         CGFloat stretch = MIN(velMag / 2500.0, 0.12); 
         CGFloat angle = atan2(velocity.y, velocity.x);
-        
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
         
         // 1. 基准缩放值 (由 bounds 决定) - 必须保持稳定
         CGFloat scaleX = self.bounds.size.width / screen.size.width;
@@ -1328,6 +1335,13 @@ static NSMutableArray *floatingWindows = nil;
         [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:UIViewAnimationOptionCurveEaseInOut animations:^{
             self.transform = CGAffineTransformIdentity;
             self.topCapsule.transform = CGAffineTransformIdentity;
+            self.glassBackdrop.transform = CGAffineTransformIdentity; // 核心修复：重置玻璃形变
+            
+            // 重置所有图层形变
+            self.innerGlowLayer.transform = CATransform3DIdentity;
+            self.cyanLayer.transform = CATransform3DIdentity;
+            self.magentaLayer.transform = CATransform3DIdentity;
+            
             self.layer.shadowOpacity = 0.4;
             self.layer.shadowRadius = 20.0;
             self.snapPreviewView.alpha = 0;
