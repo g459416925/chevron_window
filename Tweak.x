@@ -373,8 +373,8 @@ struct {
     .trafficCapsuleW = 64.0,
     .trafficCapsuleH = 24.0,
     .trafficDotSize = 8.0,
-    .windowHandleW = 36.0,
-    .windowHandleH = 5.0
+    .windowHandleW = 44.0,
+    .windowHandleH = 6.0
 };
 
 struct {
@@ -564,8 +564,18 @@ static NSMutableArray *floatingWindows = nil;
         
         // Hyper-Capsule Setup (Using custom view with expanded hit area)
         self.topCapsule = [[CV3CapsuleView alloc] initWithFrame:CGRectMake(0, 0, kChevronLayoutConstants.windowHandleW, kChevronLayoutConstants.windowHandleH)];
-        self.topCapsule.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.25];
+        self.topCapsule.backgroundColor = [[UIColor labelColor] colorWithAlphaComponent:0.08]; // 极其微弱的底色
         self.topCapsule.layer.cornerRadius = kChevronLayoutConstants.windowHandleH / 2.0;
+        self.topCapsule.layer.borderWidth = 0.5;
+        self.topCapsule.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.1].CGColor;
+        
+        // 增加玻璃材质感
+        UIVisualEffectView *capsuleBlur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
+        capsuleBlur.frame = self.topCapsule.bounds;
+        capsuleBlur.layer.cornerRadius = self.topCapsule.layer.cornerRadius;
+        capsuleBlur.clipsToBounds = YES;
+        capsuleBlur.userInteractionEnabled = NO;
+        [self.topCapsule addSubview:capsuleBlur];
         [self.dragHandle addSubview:self.topCapsule];
         
         // Capsule Glow (Adaptive)
@@ -576,11 +586,11 @@ static NSMutableArray *floatingWindows = nil;
         [self.topCapsule.layer insertSublayer:self.capsuleGlowLayer atIndex:0];
 
         NSMutableArray *dots = [NSMutableArray array];
-        CGFloat dotSpacing = kChevronLayoutConstants.windowHandleW / 4.0;
         for (int i = 0; i < 3; i++) {
-            UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(dotSpacing * (i + 1) - 1, 1.5, 2, 2)];
-            dot.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.4];
-            dot.layer.cornerRadius = 1;
+            // 圆点改得更小更精致 (1.5pt)
+            UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1.5, 1.5)];
+            dot.backgroundColor = [[UIColor labelColor] colorWithAlphaComponent:0.4];
+            dot.layer.cornerRadius = 0.75;
             [self.topCapsule addSubview:dot];
             [dots addObject:dot];
         }
@@ -885,36 +895,43 @@ static NSMutableArray *floatingWindows = nil;
     UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [gen impactOccurred];
     
-    self.popoverView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial]];
-    self.popoverView.frame = CGRectMake(0, 0, 180, 44);
-    self.popoverView.layer.cornerRadius = 22;
+    // 核心设计：iPadOS 极简精致 HUD (100x32)
+    self.popoverView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
+    self.popoverView.frame = CGRectMake(0, 0, 100, 32);
+    self.popoverView.layer.cornerRadius = 16;
     self.popoverView.clipsToBounds = YES;
     self.popoverView.layer.borderWidth = 0.5;
-    self.popoverView.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.2].CGColor;
+    self.popoverView.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.15].CGColor;
     
-    self.popoverView.center = CGPointMake(self.topCapsule.center.x, self.topCapsule.center.y + 40);
+    // 紧贴胶囊下方，保持视觉上的呼吸感
+    self.popoverView.center = CGPointMake(self.topCapsule.center.x, self.topCapsule.center.y + 26);
     self.popoverView.alpha = 0;
-    self.popoverView.transform = CGAffineTransformMakeScale(0.4, 0.4);
+    self.popoverView.transform = CGAffineTransformMakeScale(0.85, 0.85); // 稍微缩放即可
     [self addSubview:self.popoverView];
     
-    // Quick Actions: FULL and CLOSE (Hide is now triggered by single tap)
+    // Quick Actions: FULL and CLOSE
     NSArray *actions = @[@"FULL", @"CLOSE"];
-    CGFloat btnW = 120 / 2.0; // Reduced width for 2 buttons
-    self.popoverView.frame = CGRectMake(0, 0, 120, 44);
-    self.popoverView.layer.cornerRadius = 22;
-
+    CGFloat btnW = 100 / 2.0;
     for (int i = 0; i < 2; i++) {
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-        btn.frame = CGRectMake(i * btnW, 0, btnW, 44);
+        btn.frame = CGRectMake(i * btnW, 0, btnW, 32);
         [btn setTitle:actions[i] forState:UIControlStateNormal];
-        btn.titleLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightBold];
+        // 字体改得更小更精致
+        btn.titleLabel.font = [UIFont systemFontOfSize:9 weight:UIFontWeightBold];
         btn.tintColor = [UIColor whiteColor];
         btn.tag = i;
         [btn addTarget:self action:@selector(handlePopoverAction:) forControlEvents:UIControlEventTouchUpInside];
         [self.popoverView.contentView addSubview:btn];
+        
+        // 增加中间的分割线
+        if (i == 0) {
+            UIView *sep = [[UIView alloc] initWithFrame:CGRectMake(btnW - 0.25, 10, 0.5, 12)];
+            sep.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.15];
+            [self.popoverView.contentView addSubview:sep];
+        }
     }
     
-    [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
+    [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0 options:0 animations:^{
         self.popoverView.alpha = 1.0;
         self.popoverView.transform = CGAffineTransformIdentity;
     } completion:nil];
@@ -1123,7 +1140,8 @@ static NSMutableArray *floatingWindows = nil;
     
     self.dragHandle.frame = CGRectMake(0, 0, w, scaledDragH);
     self.topCapsule.bounds = CGRectMake(0, 0, scaledCapW, scaledCapH);
-    self.topCapsule.center = CGPointMake(w / 2.0, scaledDragH / 2.0);
+    // 核心修复：位置上移，距离顶部仅留 6pt 呼吸间距，模仿 iPadOS 的贴顶精致感
+    self.topCapsule.center = CGPointMake(w / 2.0, 6 + scaledCapH / 2.0);
     self.topCapsule.layer.cornerRadius = scaledCapH / 2.0;
 
     [CATransaction begin];
@@ -1137,14 +1155,22 @@ static NSMutableArray *floatingWindows = nil;
         self.capsuleGlowLayer.frame = self.topCapsule.bounds;
         self.capsuleGlowLayer.cornerRadius = self.topCapsule.layer.cornerRadius;
     }
+    
+    // 同步更新胶囊模糊背景
+    for (UIView *sub in self.topCapsule.subviews) {
+        if ([sub isKindOfClass:[UIVisualEffectView class]]) {
+            sub.frame = self.topCapsule.bounds;
+            sub.layer.cornerRadius = self.topCapsule.layer.cornerRadius;
+        }
+    }
 
     // 重新排列胶囊内部的装饰圆点
     CGFloat dotSpacing = scaledCapW / 4.0;
     for (int i = 0; i < self.capsuleDots.count; i++) {
         UIView *dot = self.capsuleDots[i];
-        dot.bounds = CGRectMake(0, 0, 2 * currentScale, 2 * currentScale);
+        dot.bounds = CGRectMake(0, 0, 1.5 * currentScale, 1.5 * currentScale);
         dot.center = CGPointMake(dotSpacing * (i + 1), scaledCapH / 2.0);
-        dot.layer.cornerRadius = (2 * currentScale) / 2.0;
+        dot.layer.cornerRadius = (1.5 * currentScale) / 2.0;
     }
 
     // 强制执行 1.15x 几何缩放 (Liquid Glass Engine 规范)
