@@ -450,9 +450,15 @@ static NSMutableArray *floatingWindows = nil;
 @property (nonatomic, assign) CGRect lastTargetSnapFrame;
 @property (nonatomic, strong) UIColor *adaptiveAppColor; // New: Color from app icon
 
+// Pro Enhancements
+@property (nonatomic, assign) BOOL isFocused;
+@property (nonatomic, assign) CGPoint lastVelocity;
+@property (nonatomic, strong) UIView *crystalPreviewContainer; // For thumbnail previews
+
 - (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene;
 - (void)triggerCollisionImpulse;
 - (void)updateAdaptiveColor;
+- (void)setWindowFocused:(BOOL)focused;
 @end
 
 @implementation CV3FloatingAppWindow
@@ -585,10 +591,107 @@ static NSMutableArray *floatingWindows = nil;
         [self clampToScreenBounds];
         [self updateAdaptiveColor];
         [self loadAppScene];
-        }
-        return self;
-        }
+        
+        // Auto-focus on creation
+        [self setWindowFocused:YES];
+    }
+    return self;
+}
 
+- (void)setWindowFocused:(BOOL)focused {
+    if (self.isFocused == focused) return;
+    self.isFocused = focused;
+    
+    [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
+        if (focused) {
+            self.transform = CGAffineTransformMakeScale(1.02, 1.02);
+            self.layer.shadowOpacity = 0.7;
+            self.layer.shadowRadius = 30.0;
+            self.hostContainerProxy.alpha = 1.0;
+            
+            // Focus Pulse for Inner Glow
+            CABasicAnimation *pulse = [CABasicAnimation animationWithKeyPath:@"opacity"];
+            pulse.fromValue = @0.4;
+            pulse.toValue = @1.0;
+            pulse.duration = 1.5;
+            pulse.autoreverses = YES;
+            pulse.repeatCount = HUGE_VALF;
+            [self.innerGlowLayer addAnimation:pulse forKey:@"focusPulse"];
+        } else {
+            self.transform = CGAffineTransformIdentity;
+            self.layer.shadowOpacity = 0.4;
+            self.layer.shadowRadius = 20.0;
+            self.hostContainerProxy.alpha = 0.85; // Dim inactive windows
+            [self.innerGlowLayer removeAnimationForKey:@"focusPulse"];
+        }
+    } completion:nil];
+    
+    if (focused) {
+        [self makeKeyAndVisible];
+        // Dim other windows
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if (win != self && [win isKindOfClass:[CV3FloatingAppWindow class]]) [win setWindowFocused:NO];
+        }
+    }
+}
+
+- (void)handleGrabberLongPress:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
+        [gen impactOccurred];
+        
+        // Show Thumbnail Preview (Crystal Switcher)
+        if (!self.crystalPreviewContainer) {
+            self.crystalPreviewContainer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 120, 200)];
+            self.crystalPreviewContainer.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.4];
+            self.crystalPreviewContainer.layer.cornerRadius = 15;
+            self.crystalPreviewContainer.layer.borderWidth = 0.5;
+            self.crystalPreviewContainer.layer.borderColor = [self.adaptiveAppColor colorWithAlphaComponent:0.5].CGColor;
+            self.crystalPreviewContainer.clipsToBounds = YES;
+            
+            UIView *preview = [[UIView alloc] initWithFrame:self.crystalPreviewContainer.bounds];
+            preview.backgroundColor = self.adaptiveAppColor;
+            preview.alpha = 0.3;
+            [self.crystalPreviewContainer addSubview:preview];
+            
+            UIImageView *icon = [[UIImageView alloc] initWithFrame:CGRectMake(40, 80, 40, 40)];
+            icon.image = self.appIconMiniView.image;
+            [self.crystalPreviewContainer addSubview:icon];
+        }
+        
+        CGPoint grabberPos = [self.stashGrabber.superview convertPoint:self.stashGrabber.center toView:nil];
+        
+        self.crystalPreviewContainer.center = CGPointMake(self.stashedSide == 1 ? grabberPos.x + 100 : grabberPos.x - 100, grabberPos.y);
+        self.crystalPreviewContainer.alpha = 0;
+        self.crystalPreviewContainer.transform = CGAffineTransformMakeScale(0.5, 0.5);
+        
+        UIWindow *keyWin = nil;
+        if (@available(iOS 15.0, *)) {
+            keyWin = self.windowScene.keyWindow;
+        }
+        if (!keyWin) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            keyWin = [UIApplication sharedApplication].keyWindow;
+#pragma clang diagnostic pop
+        }
+        
+        [keyWin addSubview:self.crystalPreviewContainer];
+        
+        [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
+            self.crystalPreviewContainer.alpha = 1.0;
+            self.crystalPreviewContainer.transform = CGAffineTransformIdentity;
+        } completion:nil];
+        
+    } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        [UIView animateWithDuration:0.3 animations:^{
+            self.crystalPreviewContainer.alpha = 0;
+            self.crystalPreviewContainer.transform = CGAffineTransformMakeScale(0.5, 0.5);
+        } completion:^(BOOL finished) {
+            [self.crystalPreviewContainer removeFromSuperview];
+        }];
+    }
+}
         - (void)updateAdaptiveColor {
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         UIImage *icon = [UIImage _applicationIconImageForBundleIdentifier:self.bundleID format:10 scale:[UIScreen mainScreen].scale];
@@ -606,7 +709,7 @@ static NSMutableArray *floatingWindows = nil;
         });
         });
         }
-- (void)triggerCollisionImpulse {
+- (void)triggerCollisionImpulseAtPoint:(CGPoint)point {
     [CATransaction begin];
     [CATransaction setAnimationDuration:0.12];
     [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut]];
@@ -625,8 +728,65 @@ static NSMutableArray *floatingWindows = nil;
     
     [CATransaction commit];
     
+    // --- Collision Sparks (Particle System) ---
+    CAEmitterLayer *emitter = [CAEmitterLayer layer];
+    emitter.emitterPosition = point;
+    emitter.emitterShape = kCAEmitterLayerPoint;
+    emitter.renderMode = kCAEmitterLayerAdditive;
+    
+    CAEmitterCell *cell = [CAEmitterCell emitterCell];
+    cell.contents = (id)[self sparkImageWithColor:self.adaptiveAppColor].CGImage;
+    cell.birthRate = 45;
+    cell.lifetime = 0.5;
+    cell.lifetimeRange = 0.2;
+    cell.velocity = 150;
+    cell.velocityRange = 80;
+    cell.emissionRange = M_PI * 2.0;
+    cell.scale = 0.05;
+    cell.scaleSpeed = -0.1;
+    cell.alphaSpeed = -1.5;
+    
+    emitter.emitterCells = @[cell];
+    
+    UIWindow *keyWin = nil;
+    if (@available(iOS 15.0, *)) {
+        keyWin = self.windowScene.keyWindow;
+    }
+    if (!keyWin) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        keyWin = [UIApplication sharedApplication].keyWindow;
+#pragma clang diagnostic pop
+    }
+    
+    [keyWin.layer addSublayer:emitter];
+    
+    // Stop and remove emitter after a short burst
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        emitter.birthRate = 0;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [emitter removeFromSuperlayer];
+        });
+    });
+
     UIImpactFeedbackGenerator *rigid = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid];
     [rigid impactOccurredWithIntensity:1.0];
+}
+
+- (UIImage *)sparkImageWithColor:(UIColor *)color {
+    CGFloat size = 20.0;
+    UIGraphicsBeginImageContextWithOptions(CGSizeMake(size, size), NO, 0);
+    CGContextRef context = UIGraphicsGetCurrentContext();
+    CGContextAddEllipseInRect(context, CGRectMake(0, 0, size, size));
+    [color setFill];
+    CGContextFillPath(context);
+    UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return image;
+}
+
+- (void)triggerCollisionImpulse {
+    [self triggerCollisionImpulseAtPoint:self.center];
 }
 
 - (void)layoutSubviews {
@@ -845,13 +1005,15 @@ static NSMutableArray *floatingWindows = nil;
 - (void)handlePan:(UIPanGestureRecognizer *)gesture {
     CGPoint translation = [gesture translationInView:nil];
     CGPoint location = [gesture locationInView:nil];
+    CGPoint velocity = [gesture velocityInView:nil];
     CGRect screen = [UIScreen mainScreen].bounds;
     UIEdgeInsets safe = UIEdgeInsetsMake(47, 10, 34, 10);
     
     if (gesture.state == UIGestureRecognizerStateBegan) {
+        [self setWindowFocused:YES];
         [UIView animateWithDuration:0.3 animations:^{
-            self.transform = CGAffineTransformMakeScale(1.02, 1.02);
-            self.layer.shadowOpacity = 0.6;
+            self.transform = CGAffineTransformScale(self.transform, 1.05, 1.05);
+            self.layer.shadowOpacity = 0.8;
         }];
         
         UIWindow *keyWin = nil;
@@ -875,20 +1037,54 @@ static NSMutableArray *floatingWindows = nil;
         self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
         [gesture setTranslation:CGPointZero inView:nil];
         
-        // --- Snap Layouts 2.0 Logic ---
+        // --- Inertial Fluid Refraction ---
+        CGFloat velMag = sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
+        CGFloat stretch = MIN(velMag / 2000.0, 0.15);
+        CGFloat angle = atan2(velocity.y, velocity.x);
+        
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        // Distort hostContainerProxy based on movement
+        CGAffineTransform distort = CGAffineTransformMakeRotation(angle);
+        distort = CGAffineTransformScale(distort, 1.0 + stretch, 1.0 - stretch * 0.5);
+        distort = CGAffineTransformRotate(distort, -angle);
+        self.hostContainerProxy.transform = CGAffineTransformConcat(self.hostContainerProxy.transform, distort);
+        [CATransaction commit];
+        
+        // --- Magnetic Window Alignment ---
         CGRect targetSnapFrame = CGRectZero;
         CGFloat snapThreshold = 60.0;
+        CGFloat magnetThreshold = 30.0;
         
+        // Edge Snapping
         if (location.x < snapThreshold) {
-            // 左半屏
             targetSnapFrame = CGRectMake(safe.left, safe.top, (screen.size.width - safe.left - safe.right)/2.0 - 5, screen.size.height - safe.top - safe.bottom);
         } else if (location.x > screen.size.width - snapThreshold) {
-            // 右半屏
             CGFloat halfW = (screen.size.width - safe.left - safe.right)/2.0 - 5;
             targetSnapFrame = CGRectMake(screen.size.width - safe.right - halfW, safe.top, halfW, screen.size.height - safe.top - safe.bottom);
         } else if (location.y < snapThreshold) {
-            // 上半屏 (全屏预览)
             targetSnapFrame = CGRectMake(safe.left, safe.top, screen.size.width - safe.left - safe.right, screen.size.height - safe.top - safe.bottom);
+        }
+        
+        // Window-to-Window Magnetism
+        if (CGRectIsEmpty(targetSnapFrame)) {
+            for (CV3FloatingAppWindow *other in floatingWindows) {
+                if (other == self || other.isStashed) continue;
+                
+                CGRect otherFrame = other.frame;
+                // Magnetically snap to other window edges
+                if (fabs(CGRectGetMaxX(self.frame) - otherFrame.origin.x) < magnetThreshold) {
+                    CGPoint c = self.center;
+                    c.x = otherFrame.origin.x - self.frame.size.width / 2.0 - 5.0;
+                    self.center = c;
+                    [self triggerCollisionImpulseAtPoint:CGPointMake(CGRectGetMaxX(self.frame), self.center.y)];
+                } else if (fabs(self.frame.origin.x - CGRectGetMaxX(otherFrame)) < magnetThreshold) {
+                    CGPoint c = self.center;
+                    c.x = CGRectGetMaxX(otherFrame) + self.frame.size.width / 2.0 + 5.0;
+                    self.center = c;
+                    [self triggerCollisionImpulseAtPoint:CGPointMake(self.frame.origin.x, self.center.y)];
+                }
+            }
         }
         
         if (!CGRectEqualToRect(targetSnapFrame, self.lastTargetSnapFrame)) {
@@ -920,7 +1116,6 @@ static NSMutableArray *floatingWindows = nil;
             CGFloat stashThreshold = 30.0;
             CGRect targetFrame = self.frame;
             
-            // 1. Stash 判定
             if (self.frame.origin.x < -self.frame.size.width + stashThreshold) {
                 self.isStashed = YES;
                 self.stashedSide = 1;
@@ -936,7 +1131,6 @@ static NSMutableArray *floatingWindows = nil;
                 self.stashGrabber.alpha = 1.0;
                 self.stashGrabber.frame = CGRectMake(0, self.frame.size.height/2 - 22, 44, 44);
             } else {
-                // 2. Snap 判定 (使用之前计算好的 targetSnapFrame)
                 if (!CGRectIsEmpty(self.lastTargetSnapFrame)) {
                     targetFrame = self.lastTargetSnapFrame;
                 }
@@ -1125,7 +1319,6 @@ static NSMutableArray *floatingWindows = nil;
     if (gesture.state == UIGestureRecognizerStateBegan) {
         self.initialResizeFrame = self.frame;
         
-        // 建议：把手高亮激活 (Handle Flare)
         [CATransaction begin];
         [CATransaction setAnimationDuration:0.2];
         self.resizeHandleLayer.strokeColor = [[UIColor cyanColor] colorWithAlphaComponent:0.8].CGColor;
@@ -1134,36 +1327,63 @@ static NSMutableArray *floatingWindows = nil;
     }
     
     CGPoint translation = [gesture translationInView:nil];
-    [gesture setTranslation:CGPointZero inView:nil];
     
     if (gesture.state == UIGestureRecognizerStateChanged || gesture.state == UIGestureRecognizerStateEnded) {
-        // 固定高宽比例: 基于屏幕比例
         CGRect screenBounds = [UIScreen mainScreen].bounds;
         CGFloat aspect = screenBounds.size.height / screenBounds.size.width;
         
-        // 必须基于原 frame 计算，避免 bounds 导致中心点向两边扩展
-        CGRect newFrame = self.frame;
-        CGFloat newWidth = MAX(150, newFrame.size.width + translation.x);
-        CGFloat newHeight = newWidth * aspect;
+        // 核心：最小缩放保护 (Minimum Scaling Guard)
+        // 设定最小宽度为屏幕宽度的 45% (确保内容可读)
+        CGFloat minAllowedWidth = screenBounds.size.width * 0.45;
+        CGFloat maxAllowedWidth = screenBounds.size.width * 0.95;
         
-        newFrame.size.width = newWidth;
-        newFrame.size.height = newHeight;
+        CGFloat targetWidth = self.initialResizeFrame.size.width + translation.x;
+        CGFloat finalWidth = targetWidth;
+        
+        // 阻尼回弹计算 (Rubber-banding)
+        if (targetWidth < minAllowedWidth) {
+            finalWidth = minAllowedWidth - (minAllowedWidth - targetWidth) * 0.3;
+            if (gesture.state == UIGestureRecognizerStateChanged) {
+                static BOOL hitMinLimit = NO;
+                if (!hitMinLimit) {
+                    UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+                    [gen impactOccurred];
+                    hitMinLimit = YES;
+                }
+            }
+        } else if (targetWidth > maxAllowedWidth) {
+            finalWidth = maxAllowedWidth + (targetWidth - maxAllowedWidth) * 0.3;
+        } else {
+            // 重置限制标志
+            // (这里使用 static 变量，实际建议移至类属性，但为保持局部修改清晰暂用 static)
+        }
+        
+        CGFloat finalHeight = finalWidth * aspect;
+        
+        CGRect newFrame = self.frame;
+        newFrame.size.width = finalWidth;
+        newFrame.size.height = finalHeight;
         self.frame = newFrame;
         
-        // 注：内部组件布局已移至 layoutSubviews 自动处理，hostView 会在这里被缩放
-        
-        if (self.hostView) {
-            if (gesture.state == UIGestureRecognizerStateEnded) {
-                // 恢复把手外观
-                [CATransaction begin];
-                [CATransaction setAnimationDuration:0.3];
-                self.resizeHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
-                self.resizeHandleLayer.lineWidth = 2.0;
-                [CATransaction commit];
+        if (gesture.state == UIGestureRecognizerStateEnded) {
+            [CATransaction begin];
+            [CATransaction setAnimationDuration:0.3];
+            self.resizeHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
+            self.resizeHandleLayer.lineWidth = 2.0;
+            [CATransaction commit];
 
-                self.initialResizeFrame = newFrame;
-                [self syncWindowBoundsToClient];
+            // 弹簧回弹至合法范围
+            if (finalWidth < minAllowedWidth || finalWidth > maxAllowedWidth) {
+                [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
+                    CGRect bounceFrame = self.frame;
+                    bounceFrame.size.width = fmin(maxAllowedWidth, fmax(minAllowedWidth, finalWidth));
+                    bounceFrame.size.height = bounceFrame.size.width * aspect;
+                    self.frame = bounceFrame;
+                } completion:nil];
             }
+            
+            self.initialResizeFrame = self.frame;
+            [self syncWindowBoundsToClient];
         }
     }
 }
