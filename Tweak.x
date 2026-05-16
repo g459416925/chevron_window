@@ -504,39 +504,39 @@ static NSMutableArray *floatingWindows = nil;
         self.clippingContainer.backgroundColor = [UIColor clearColor];
         [self addSubview:self.clippingContainer];
 
-        // 核心视觉：引入液态玻璃背景
+        // 核心修复：引入液态玻璃背景 (已移入 clippingContainer 以实现完美剪裁)
         self.glassBackdrop = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial]];
-        self.glassBackdrop.frame = self.bounds;
+        self.glassBackdrop.frame = self.clippingContainer.bounds;
         self.glassBackdrop.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
         self.glassBackdrop.layer.masksToBounds = YES;
-        [self insertSubview:self.glassBackdrop belowSubview:self.clippingContainer];
+        [self.clippingContainer insertSubview:self.glassBackdrop atIndex:0];
 
         // 代理容器：用来隔离系统的布局覆盖，承载真实的缩放和裁剪
         self.hostContainerProxy = [[UIView alloc] initWithFrame:self.bounds];
         self.hostContainerProxy.backgroundColor = [UIColor clearColor];
         [self.clippingContainer addSubview:self.hostContainerProxy];
 
-        // --- Liquid Glass Visuals (Nested inside Backdrop to prevent ghosting) ---
+        // --- Liquid Glass Visuals (Moved to clippingContainer to maintain structural integrity during fluid drags) ---
         self.innerGlowLayer = [CALayer layer];
-        self.innerGlowLayer.frame = self.glassBackdrop.bounds;
+        self.innerGlowLayer.frame = self.clippingContainer.bounds;
         self.innerGlowLayer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.45].CGColor;
         self.innerGlowLayer.borderWidth = 0.3;
         self.innerGlowLayer.cornerRadius = kChevronLayoutConstants.cornerRadius;
-        [self.glassBackdrop.layer addSublayer:self.innerGlowLayer];
+        [self.clippingContainer.layer addSublayer:self.innerGlowLayer];
 
         self.cyanLayer = [CALayer layer];
-        self.cyanLayer.frame = self.glassBackdrop.bounds;
+        self.cyanLayer.frame = self.clippingContainer.bounds;
         self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.15].CGColor;
         self.cyanLayer.borderWidth = 0.4;
         self.cyanLayer.cornerRadius = kChevronLayoutConstants.cornerRadius;
-        [self.glassBackdrop.layer addSublayer:self.cyanLayer];
+        [self.clippingContainer.layer addSublayer:self.cyanLayer];
 
         self.magentaLayer = [CALayer layer];
-        self.magentaLayer.frame = self.glassBackdrop.bounds;
+        self.magentaLayer.frame = self.clippingContainer.bounds;
         self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:0.15].CGColor;
         self.magentaLayer.borderWidth = 0.4;
         self.magentaLayer.cornerRadius = kChevronLayoutConstants.cornerRadius;
-        [self.glassBackdrop.layer addSublayer:self.magentaLayer];
+        [self.clippingContainer.layer addSublayer:self.magentaLayer];
         
         // 顶部拖拽区域
         self.dragHandle = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 300, 30)];
@@ -1042,20 +1042,29 @@ static NSMutableArray *floatingWindows = nil;
     CGFloat w = self.bounds.size.width;
     CGFloat h = self.bounds.size.height;
     
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    self.innerGlowLayer.frame = self.glassBackdrop.bounds;
-    self.cyanLayer.frame = self.glassBackdrop.bounds;
-    self.magentaLayer.frame = self.glassBackdrop.bounds;
-    [CATransaction commit];
-
-    // 核心修复：更新裁剪层与玻璃背景布局
+    // 核心修复：更新裁剪层与玻璃背景布局 (必须在更新子图层之前)
     // 使用 bounds + center 而非 frame，确保在有 Transform 的情况下依然能精准对齐，消除掉队感
     self.clippingContainer.bounds = self.bounds;
     self.clippingContainer.center = CGPointMake(w/2.0, h/2.0);
     
-    self.glassBackdrop.bounds = self.bounds;
+    // 核心修复：为玻璃背景提供 10% 的冗余空间 (Bleed)，防止在惯性形变时露边
+    self.glassBackdrop.bounds = CGRectMake(0, 0, w * 1.1, h * 1.1);
     self.glassBackdrop.center = CGPointMake(w/2.0, h/2.0);
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    // 同步更新装饰图层，确保与裁剪容器完美贴合（解耦背景形变，防止脱离）
+    self.innerGlowLayer.frame = self.clippingContainer.bounds;
+    self.cyanLayer.frame = self.clippingContainer.bounds;
+    self.magentaLayer.frame = self.clippingContainer.bounds;
+
+    // 强制执行 1.15x 几何缩放 (Liquid Glass Engine 规范)
+    for (UIView *subview in self.glassBackdrop.subviews) {
+        if ([NSStringFromClass([subview class]) containsString:@"Backdrop"]) {
+            subview.transform = CGAffineTransformMakeScale(1.15, 1.15);
+        }
+    }
+    [CATransaction commit];
 
     self.dragHandle.frame = CGRectMake(0, 0, w, 30);
     self.topCapsule.center = CGPointMake(w / 2.0, 15);
@@ -1294,8 +1303,8 @@ static NSMutableArray *floatingWindows = nil;
         stretchTransform = CGAffineTransformRotate(stretchTransform, -angle);
         
         // 核心修复：
-        // A. 玻璃背景、装饰胶囊应用 stretchTransform。
-        // B. 子图层 (InnerGlow, Cyan, Magenta) 由于已嵌套，会自动跟随背景形变，禁止重复设置 transform 导致“飞出”
+        // A. 玻璃背景、装饰胶囊应用 stretchTransform，营造液态流动感。
+        // B. 子图层 (InnerGlow, Cyan, Magenta) 已移出 Backdrop 并解除嵌套，因此保持刚性，防止“脱离画面”
         self.glassBackdrop.transform = stretchTransform;
         self.topCapsule.transform = stretchTransform; 
         
