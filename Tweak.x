@@ -1570,7 +1570,7 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
             return NO;
         }
     }
-    
+
     return YES;
 }
 
@@ -1590,15 +1590,41 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
     if (gesture == self.systemEdgePan) {
-        // 1. 动态黑名单审计：在绘图或高频边缘操作 App 中禁用 (暂时彻底移除以排错)
-        /*
-        NSString *bid = [self currentActiveBundleID];
-        if (bid && ([bid isEqualToString:@"com.apple.mobilesafari"] || [bid containsString:@"drawing"])) {
-             return NO;
+        // 使用与 handleEdgeInteraction 一致的安全绝对坐标系
+        CGPoint location = [gesture locationInView:nil];
+        
+        UIWindow *keyWindow = nil;
+        if (@available(iOS 15.0, *)) {
+            keyWindow = self.windowScene.keyWindow;
+        } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            keyWindow = [UIApplication sharedApplication].keyWindow;
+#pragma clang diagnostic pop
         }
-        */
+        
+        // 动态获取准确的安全区域和边界
+        UIEdgeInsets safeArea = keyWindow ? keyWindow.safeAreaInsets : self.safeAreaInsets;
+        // 如果系统返回的 safeArea 全是 0，提供硬编码的兜底防线
+        if (safeArea.top == 0 && safeArea.bottom == 0) {
+            safeArea = UIEdgeInsetsMake(47, 0, 34, 0); // iPhone 14 Pro Max 典型值兜底
+        }
 
-        // 核心修复：移除所有可能导致 Gesture 被拒的区域限制，优先保证“能唤出”
+        CGSize screenSize = [UIScreen mainScreen].bounds.size;
+        
+        // 根据当前的 edges 动态拦截
+        if (self.systemEdgePan.edges == UIRectEdgeLeft || self.systemEdgePan.edges == UIRectEdgeRight) {
+            // 垂直方向边缘（Portrait）: 限制 Y 轴
+            if (location.y < safeArea.top + 10 || location.y > screenSize.height - safeArea.bottom - 10) {
+                return NO;
+            }
+        } else if (self.systemEdgePan.edges == UIRectEdgeTop || self.systemEdgePan.edges == UIRectEdgeBottom) {
+            // 水平方向边缘（Landscape）: 限制 X 轴
+            if (location.x < safeArea.left + 10 || location.x > screenSize.width - safeArea.right - 10) {
+                return NO;
+            }
+        }
+        
         return YES;
     }
     return YES;
