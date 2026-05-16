@@ -637,8 +637,12 @@ static NSMutableArray *floatingWindows = nil;
         UIPanGestureRecognizer *restorePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleRestorePan:)];
         [self.stashGrabber addGestureRecognizer:restorePan];
 
-        self.stashGrabber.userInteractionEnabled = YES;
+        // 核心功能：长按移动图标位置
+        UILongPressGestureRecognizer *stashMove = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleStashMove:)];
+        stashMove.minimumPressDuration = 0.5;
+        [self.stashGrabber addGestureRecognizer:stashMove];
 
+        self.stashGrabber.userInteractionEnabled = YES;
         // Snap Preview View (Hidden by default)
         self.snapPreviewView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
         self.snapPreviewView.backgroundColor = [[UIColor cyanColor] colorWithAlphaComponent:0.1];
@@ -1611,6 +1615,55 @@ static NSMutableArray *floatingWindows = nil;
                 self.frame = stashedFrame;
             } completion:nil];
         }
+    }
+}
+
+- (void)handleStashMove:(UILongPressGestureRecognizer *)gesture {
+    if (!self.isStashed) return;
+    
+    CGPoint location = [gesture locationInView:nil];
+    CGRect screen = [UIScreen mainScreen].bounds;
+    
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        [UIView animateWithDuration:0.2 animations:^{
+            self.transform = CGAffineTransformMakeScale(1.15, 1.15);
+            self.layer.shadowOpacity = 0.8;
+            self.layer.shadowRadius = 15.0;
+        }];
+        UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+        [gen impactOccurred];
+    } else if (gesture.state == UIGestureRecognizerStateChanged) {
+        // 允许自由拖动，但稍微增加阻尼
+        self.center = location;
+    } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
+            self.transform = CGAffineTransformIdentity;
+            self.layer.shadowOpacity = 0.4;
+            self.layer.shadowRadius = 5.0;
+            
+            // 自动吸附至最近的侧边
+            BOOL isNearLeft = (self.center.x < screen.size.width / 2.0);
+            CGFloat targetX = isNearLeft ? 0 : screen.size.width - 44;
+            
+            // 限制上下边界，防止被状态栏或 Home 条遮挡
+            CGFloat safeY = MAX(60.0, MIN(screen.size.height - 100.0, self.frame.origin.y));
+            
+            self.frame = CGRectMake(targetX, safeY, 44, 44);
+            self.stashedSide = isNearLeft ? 1 : 2;
+            
+            // 重要：更新 preStashFrame 的 Y 轴，确保还原时位置与图标一致
+            CGRect psf = self.preStashFrame;
+            psf.origin.y = safeY + 22 - psf.size.height/2.0;
+            self.preStashFrame = psf;
+            
+        } completion:^(BOOL finished) {
+            // 重新计算所有图标的堆叠，防止重叠
+            for (CV3FloatingAppWindow *win in floatingWindows) {
+                if (win.isStashed) [win updateGrabberStack];
+            }
+            UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+            [gen impactOccurred];
+        }];
     }
 }
 
