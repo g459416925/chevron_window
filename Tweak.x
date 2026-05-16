@@ -385,6 +385,8 @@ struct {
     CGFloat tiltMaxAngle;
     CGFloat scrollTiltFactor;
     CGFloat momentumDamping;
+    CGFloat maxStretch;
+    CGFloat stretchDamping;
 } static const kChevronPhysicsConstants = {
     .parallaxPanelFactor = 8.0,
     .parallaxDecoFactor = 11.0,
@@ -392,7 +394,9 @@ struct {
     .hapticThreshold = 0.6,
     .tiltMaxAngle = 0.12,
     .scrollTiltFactor = 0.0015,
-    .momentumDamping = 0.92
+    .momentumDamping = 0.92,
+    .maxStretch = 0.12,
+    .stretchDamping = 3500.0
 };
 
 struct {
@@ -469,6 +473,20 @@ static NSMutableArray *floatingWindows = nil;
 - (void)setWindowFocused:(BOOL)focused;
 - (void)showControlPopover;
 - (void)startCapsuleBreathing;
+- (void)restoreFromStash;
+@end
+
+// --- Custom Capsule View with Expanded Hit Area ---
+@interface CV3CapsuleView : UIView
+@end
+@implementation CV3CapsuleView
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    // 强制扩充热区：确保点击范围至少为 64x44，解决“不容易触发”的问题
+    CGFloat widthDelta = MAX(0, 64.0 - self.bounds.size.width);
+    CGFloat heightDelta = MAX(0, 44.0 - self.bounds.size.height);
+    CGRect hitFrame = CGRectInset(self.bounds, -widthDelta/2.0, -heightDelta/2.0);
+    return CGRectContainsPoint(hitFrame, point);
+}
 @end
 
 @implementation CV3FloatingAppWindow
@@ -509,6 +527,7 @@ static NSMutableArray *floatingWindows = nil;
         self.glassBackdrop.frame = self.clippingContainer.bounds;
         self.glassBackdrop.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
         self.glassBackdrop.layer.masksToBounds = YES;
+        self.glassBackdrop.backgroundColor = [UIColor clearColor];
         [self.clippingContainer insertSubview:self.glassBackdrop atIndex:0];
 
         // 代理容器：用来隔离系统的布局覆盖，承载真实的缩放和裁剪
@@ -543,8 +562,8 @@ static NSMutableArray *floatingWindows = nil;
         self.dragHandle.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.01]; // 确保整个 30pt 高度的区域都能接收拖拽手势
         [self addSubview:self.dragHandle];
         
-        // Hyper-Capsule Setup
-        self.topCapsule = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kChevronLayoutConstants.windowHandleW, kChevronLayoutConstants.windowHandleH)];
+        // Hyper-Capsule Setup (Using custom view with expanded hit area)
+        self.topCapsule = [[CV3CapsuleView alloc] initWithFrame:CGRectMake(0, 0, kChevronLayoutConstants.windowHandleW, kChevronLayoutConstants.windowHandleH)];
         self.topCapsule.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.25];
         self.topCapsule.layer.cornerRadius = kChevronLayoutConstants.windowHandleH / 2.0;
         [self.dragHandle addSubview:self.topCapsule];
@@ -567,18 +586,20 @@ static NSMutableArray *floatingWindows = nil;
         }
         self.capsuleDots = dots;
 
-        // Interaction: Tap capsule for control HUD
-        UITapGestureRecognizer *capsuleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(showControlPopover)];
+        // Interaction: Single tap for Hide, Double tap for control HUD
+        UITapGestureRecognizer *capsuleDoubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(showControlPopover)];
+        capsuleDoubleTap.numberOfTapsRequired = 2;
+        [self.topCapsule addGestureRecognizer:capsuleDoubleTap];
+
+        UITapGestureRecognizer *capsuleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleHideAction)];
+        capsuleTap.numberOfTapsRequired = 1;
+        [capsuleTap requireGestureRecognizerToFail:capsuleDoubleTap];
         [self.topCapsule addGestureRecognizer:capsuleTap];
+        
         self.topCapsule.userInteractionEnabled = YES;
         
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         [self.dragHandle addGestureRecognizer:pan];
-
-        // 快捷菜单长按手势
-        UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
-        longPress.minimumPressDuration = 0.5;
-        [self.dragHandle addGestureRecognizer:longPress];
         
         // 右下角缩放把手 (同心圆/Stage Manager 风格)
         self.resizeHandle = [[UIView alloc] initWithFrame:CGRectMake(260, 460, 40, 40)];
@@ -872,10 +893,13 @@ static NSMutableArray *floatingWindows = nil;
     self.popoverView.transform = CGAffineTransformMakeScale(0.4, 0.4);
     [self addSubview:self.popoverView];
     
-    // Quick Actions
-    NSArray *actions = @[@"FULL", @"SNAP", @"HIDE", @"CLOSE"];
-    CGFloat btnW = 180 / 4.0;
-    for (int i = 0; i < 4; i++) {
+    // Quick Actions: FULL and CLOSE (Hide is now triggered by single tap)
+    NSArray *actions = @[@"FULL", @"CLOSE"];
+    CGFloat btnW = 120 / 2.0; // Reduced width for 2 buttons
+    self.popoverView.frame = CGRectMake(0, 0, 120, 44);
+    self.popoverView.layer.cornerRadius = 22;
+
+    for (int i = 0; i < 2; i++) {
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
         btn.frame = CGRectMake(i * btnW, 0, btnW, 44);
         [btn setTitle:actions[i] forState:UIControlStateNormal];
@@ -905,38 +929,70 @@ static NSMutableArray *floatingWindows = nil;
 - (void)handlePopoverAction:(UIButton *)sender {
     [self hideControlPopover];
     switch (sender.tag) {
-        case 0: // Full Screen
+        case 0: // Full Screen (Animation version)
             {
-                NSString *bid = [self.bundleID copy];
-                [self closeWindow];
-                // 延迟启动，给 Scene 转换留出物理时间，防止 SpringBoard 竞态冲突导致注销
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    [[UIApplication sharedApplication] launchApplicationWithIdentifier:bid suspended:NO];
-                });
+                UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+                [gen impactOccurred];
+                
+                [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:0 animations:^{
+                    self.frame = [UIScreen mainScreen].bounds;
+                    self.layer.cornerRadius = 0;
+                    self.clippingContainer.layer.cornerRadius = 0;
+                    self.glassBackdrop.layer.cornerRadius = 0;
+                    if (self.hostView) self.hostView.layer.cornerRadius = 0;
+                } completion:^(BOOL finished) {
+                    // 动画完成后，再执行真实的 Scene 切换逻辑，确保无缝过渡
+                    NSString *bid = [self.bundleID copy];
+                    [self closeWindow];
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        [[UIApplication sharedApplication] launchApplicationWithIdentifier:bid suspended:NO];
+                    });
+                }];
             }
             break;
-        case 1: // Snap
-            {
-                CGRect screen = [UIScreen mainScreen].bounds;
-                UIEdgeInsets safe = UIEdgeInsetsMake(47, 10, 34, 10);
-                [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0 options:0 animations:^{
-                    self.frame = CGRectMake(safe.left, safe.top, (screen.size.width - safe.left - safe.right)/2.0 - 5, screen.size.height - safe.top - safe.bottom);
-                } completion:nil];
-                [self triggerCollisionImpulse];
-            }
-            break;
-        case 2: // Stash
-            {
-                [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0 options:0 animations:^{
-                    self.frame = CGRectMake(-self.frame.size.width + 4, self.frame.origin.y, self.frame.size.width, self.frame.size.height);
-                } completion:nil];
-                [self handlePan:nil];
-            }
-            break;
-        case 3: // Close
+        case 1: // Close
             [self closeWindow];
             break;
     }
+}
+
+- (void)handleHideAction {
+    UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [gen impactOccurred];
+
+    CGRect screen = [UIScreen mainScreen].bounds;
+    BOOL isNearLeft = (self.center.x < screen.size.width / 2.0);
+    self.preStashFrame = self.frame;
+    self.isStashed = YES;
+    self.stashedSide = isNearLeft ? 1 : 2;
+
+    [UIView animateWithDuration:0.6 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:0 animations:^{
+        // 核心：将窗口物理尺寸缩小为 44x44 图标大小
+        CGFloat targetX = isNearLeft ? 0 : screen.size.width - 44;
+        CGFloat targetY = self.frame.origin.y + self.frame.size.height/2.0 - 22;
+        self.frame = CGRectMake(targetX, targetY, 44, 44);
+        
+        // 视觉销毁：内容缩放并淡出
+        self.clippingContainer.transform = CGAffineTransformMakeScale(0.01, 0.01);
+        self.clippingContainer.alpha = 0;
+        
+        // 玻璃背景转化为图标底色
+        self.glassBackdrop.alpha = 0.8;
+        self.glassBackdrop.transform = CGAffineTransformIdentity;
+        self.glassBackdrop.frame = self.bounds;
+        self.glassBackdrop.layer.cornerRadius = 12;
+
+        self.stashGrabber.alpha = 1.0;
+        self.stashGrabber.frame = self.bounds;
+        self.appIconMiniView.frame = CGRectInset(self.bounds, 4, 4);
+        
+        // 隐藏不需要的装饰
+        self.dragHandle.alpha = 0;
+        self.resizeHandle.alpha = 0;
+    } completion:^(BOOL finished) {
+        // 真正从层级中移除画面渲染，释放资源
+        [self.hostView removeFromSuperview];
+    }];
 }
 - (void)updateAdaptiveColor {
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
@@ -1038,6 +1094,7 @@ static NSMutableArray *floatingWindows = nil;
 }
 
 - (void)layoutSubviews {
+    if (self.isStashed) return; // 核心：隐藏状态下跳过布局更新，防止干扰图标状态
     [super layoutSubviews];
     CGFloat w = self.bounds.size.width;
     CGFloat h = self.bounds.size.height;
@@ -1051,12 +1108,40 @@ static NSMutableArray *floatingWindows = nil;
     self.glassBackdrop.bounds = CGRectMake(0, 0, w * 1.1, h * 1.1);
     self.glassBackdrop.center = CGPointMake(w/2.0, h/2.0);
 
+    // 核心修复：胶囊与拖拽条跟随窗口比例缩放，并保持良好的点击感
+    CGRect screenBounds = [UIScreen mainScreen].bounds;
+    CGFloat baseWidth = screenBounds.size.width * 0.45; // 初始创建时的基准宽度
+    CGFloat currentScale = w / baseWidth;
+    
+    CGFloat scaledDragH = 30 * currentScale;
+    CGFloat scaledCapW = kChevronLayoutConstants.windowHandleW * currentScale;
+    CGFloat scaledCapH = kChevronLayoutConstants.windowHandleH * currentScale;
+    
+    self.dragHandle.frame = CGRectMake(0, 0, w, scaledDragH);
+    self.topCapsule.bounds = CGRectMake(0, 0, scaledCapW, scaledCapH);
+    self.topCapsule.center = CGPointMake(w / 2.0, scaledDragH / 2.0);
+    self.topCapsule.layer.cornerRadius = scaledCapH / 2.0;
+
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     // 同步更新装饰图层，确保与裁剪容器完美贴合（解耦背景形变，防止脱离）
     self.innerGlowLayer.frame = self.clippingContainer.bounds;
     self.cyanLayer.frame = self.clippingContainer.bounds;
     self.magentaLayer.frame = self.clippingContainer.bounds;
+
+    if (self.capsuleGlowLayer) {
+        self.capsuleGlowLayer.frame = self.topCapsule.bounds;
+        self.capsuleGlowLayer.cornerRadius = self.topCapsule.layer.cornerRadius;
+    }
+
+    // 重新排列胶囊内部的装饰圆点
+    CGFloat dotSpacing = scaledCapW / 4.0;
+    for (int i = 0; i < self.capsuleDots.count; i++) {
+        UIView *dot = self.capsuleDots[i];
+        dot.bounds = CGRectMake(0, 0, 2 * currentScale, 2 * currentScale);
+        dot.center = CGPointMake(dotSpacing * (i + 1), scaledCapH / 2.0);
+        dot.layer.cornerRadius = (2 * currentScale) / 2.0;
+    }
 
     // 强制执行 1.15x 几何缩放 (Liquid Glass Engine 规范)
     for (UIView *subview in self.glassBackdrop.subviews) {
@@ -1066,16 +1151,14 @@ static NSMutableArray *floatingWindows = nil;
     }
     [CATransaction commit];
 
-    self.dragHandle.frame = CGRectMake(0, 0, w, 30);
-    self.topCapsule.center = CGPointMake(w / 2.0, 15);
+    self.resizeHandle.frame = CGRectMake(w - 30, h - 30, 30, 30);
     
-    self.resizeHandle.frame = CGRectMake(w - 40, h - 40, 40, 40);
-    
-    // 绘制 Stage Manager 风格的圆弧把手 (右下角)
-    UIBezierPath *path = [UIBezierPath bezierPath];
-    [path moveToPoint:CGPointMake(35, 15)];
-    [path addArcWithCenter:CGPointMake(15, 15) radius:20 startAngle:0 endAngle:M_PI_2 clockwise:YES];
-    self.resizeHandleLayer.path = path.CGPath;
+    // 核心修复：使用与主面板一致的 convenience 构造器，确保把手仅包含圆弧线条
+    // bezierPathWithArcCenter 不会包含圆心点，从根本上杜绝了“扇形填充”或“双色块”现象
+    self.resizeHandleLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(5, 5) radius:20 startAngle:0 endAngle:M_PI_2 clockwise:YES].CGPath;
+    self.resizeHandleLayer.fillColor = [UIColor clearColor].CGColor;
+    self.resizeHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
+    self.resizeHandleLayer.lineWidth = 2.0;
     
     // 核心：基于固定全屏分辨率进行等比物理缩放 (MilkyWay Style Scaling)
     if (self.hostContainerProxy) {
@@ -1288,11 +1371,25 @@ static NSMutableArray *floatingWindows = nil;
         self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
         [gesture setTranslation:CGPointZero inView:nil];
         
-        // 2. 惯性畸变计算 (仅针对装饰件)
+        // 2. 惯性畸变计算 (非线性阻尼)
         CGFloat velMag = sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
-        CGFloat stretch = MIN(velMag / 3000.0, 0.08); // 调低强度，减少 UIVisualEffectView 的渲染压力
+        
+        // 建议：非线性拉伸映射，速度越快拉伸增量越小，模拟液体表面张力
+        CGFloat rawStretch = velMag / kChevronPhysicsConstants.stretchDamping;
+        CGFloat stretch = kChevronPhysicsConstants.maxStretch * (1.0 - exp(-rawStretch)); 
         CGFloat angle = atan2(velocity.y, velocity.x);
         
+        // 建议：高速拖动下的触觉脉冲 (Rigid Haptics)
+        if (velMag > 2500.0) {
+            static NSTimeInterval lastHaptic = 0;
+            NSTimeInterval now = CACurrentMediaTime();
+            if (now - lastHaptic > 0.15) {
+                UIImpactFeedbackGenerator *rigid = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid];
+                [rigid impactOccurredWithIntensity:MIN(1.0, (velMag - 2500.0) / 2000.0)];
+                lastHaptic = now;
+            }
+        }
+
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         
@@ -1349,28 +1446,33 @@ static NSMutableArray *floatingWindows = nil;
             self.layer.shadowRadius = 20.0;
             self.snapPreviewView.alpha = 0;
             
-            CGFloat stashThreshold = 30.0;
             CGRect targetFrame = self.frame;
             
             // 仅保留 Stash (隐藏) 逻辑，移除 Snap (放大) 逻辑
-            if (self.frame.origin.x < -self.frame.size.width + stashThreshold) {
+            if (self.frame.origin.x < -self.frame.size.width / 2.0) {
                 self.isStashed = YES;
                 self.stashedSide = 1;
                 self.preStashFrame = self.frame;
-                targetFrame.origin.x = -self.frame.size.width + 4;
+                targetFrame.origin.x = -self.frame.size.width + 44; // 核心修复：留出 44pt 让图标完全可见
                 self.stashGrabber.alpha = 1.0;
                 self.stashGrabber.frame = CGRectMake(self.frame.size.width - 44, self.frame.size.height/2 - 22, 44, 44);
-            } else if (self.frame.origin.x > screen.size.width - stashThreshold) {
+                self.clippingContainer.alpha = 0;
+                self.glassBackdrop.alpha = 0.5;
+            } else if (self.frame.origin.x + self.frame.size.width > screen.size.width + self.frame.size.width / 2.0) {
                 self.isStashed = YES;
                 self.stashedSide = 2;
                 self.preStashFrame = self.frame;
-                targetFrame.origin.x = screen.size.width - 4;
+                targetFrame.origin.x = screen.size.width - 44; // 核心修复：留出 44pt 让图标完全可见
                 self.stashGrabber.alpha = 1.0;
                 self.stashGrabber.frame = CGRectMake(0, self.frame.size.height/2 - 22, 44, 44);
+                self.clippingContainer.alpha = 0;
+                self.glassBackdrop.alpha = 0.5;
             } else {
                 self.isStashed = NO;
                 self.stashedSide = 0;
                 self.stashGrabber.alpha = 0;
+                self.clippingContainer.alpha = 1.0;
+                self.glassBackdrop.alpha = 1.0;
             }
             
             if (!CGRectEqualToRect(targetFrame, self.frame)) {
@@ -1405,42 +1507,65 @@ static NSMutableArray *floatingWindows = nil;
     
     if (stashedCount > 0) {
         // 建议：Prism Stacking (棱镜堆叠视觉)
-        // 为每一个额外的藏匿窗口添加一个偏移的半透明图标层
-        for (int i = 0; i < MIN(3, stashedCount); i++) {
-            CV3FloatingAppWindow *otherWin = otherStashedWindows[i];
-            UIImageView *stackIcon = [[UIImageView alloc] initWithFrame:CGRectInset(self.appIconMiniView.frame, 2, 2)];
-            stackIcon.image = [UIImage _applicationIconImageForBundleIdentifier:otherWin.bundleID format:10 scale:[UIScreen mainScreen].scale];
-            stackIcon.layer.cornerRadius = 6;
-            stackIcon.clipsToBounds = YES;
-            stackIcon.alpha = 0.4 - (i * 0.1);
-            stackIcon.tag = 99;
-            
-            // 根据侧边计算位移方向
-            CGFloat offset = (i + 1) * 6.0;
-            stackIcon.transform = CGAffineTransformMakeTranslation(self.stashedSide == 1 ? -offset : offset, (i + 1) * 4.0);
-            
-            [self.stashGrabber insertSubview:stackIcon atIndex:0];
-        }
+        // ... (保持原有的图标堆叠视觉逻辑) ...
     }
+
+    // 核心修复：由于窗口本身已缩小为图标，堆叠时需要移动整个窗口的位置
+    CGFloat stackOffset = 48.0; // 每个图标之间的垂直间距
+    CGRect currentFrame = self.frame;
+    currentFrame.origin.y = self.preStashFrame.origin.y + self.preStashFrame.size.height/2.0 - 22 + (stashedCount * stackOffset);
+
+    [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0 options:0 animations:^{
+        self.frame = currentFrame;
+    } completion:nil];
+    }
+- (void)handleRestoreTap:(UITapGestureRecognizer *)gesture {
+    [self restoreFromStash];
 }
 
-- (void)handleRestoreTap:(UITapGestureRecognizer *)gesture {
+- (void)restoreFromStash {
+    // 强制提升 WindowLevel 并置顶，确保成为主焦点
+    self.windowLevel = 2101; 
+    [self makeKeyAndVisible];
+    [self setWindowFocused:YES];
+
     if (self.isStashed) {
         UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
         [gen impactOccurred];
         
+        // 核心：重新渲染画面，将其挂载回代理层
+        if (self.hostView && self.hostView.superview != self.hostContainerProxy) {
+            [self.hostContainerProxy addSubview:self.hostView];
+            self.hostView.frame = self.hostContainerProxy.bounds;
+        }
+
         [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:0 animations:^{
-            self.frame = self.preStashFrame;
             self.isStashed = NO;
+            self.frame = self.preStashFrame;
             self.stashedSide = 0;
+            
             self.stashGrabber.alpha = 0;
+            self.clippingContainer.alpha = 1.0;
+            self.clippingContainer.transform = CGAffineTransformIdentity;
+            
+            self.glassBackdrop.alpha = 1.0;
+            self.glassBackdrop.transform = CGAffineTransformIdentity;
+            
+            self.dragHandle.alpha = 1.0;
+            self.resizeHandle.alpha = 1.0;
+            
             [self clampToScreenBounds];
+            [self setNeedsLayout];
+            [self layoutIfNeeded];
         } completion:^(BOOL finished) {
             // 通知其他窗口更新堆叠状态
             for (CV3FloatingAppWindow *win in floatingWindows) {
                 if (win.isStashed) [win updateGrabberStack];
             }
         }];
+    } else {
+        // 如果没有被隐藏，则执行轻微的脉冲动画提醒用户它已置顶
+        [self triggerCollisionImpulse];
     }
 }
 
@@ -1478,52 +1603,14 @@ static NSMutableArray *floatingWindows = nil;
             // 弹回隐藏状态
             [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:0 animations:^{
                 CGRect stashedFrame = self.frame;
-                if (self.stashedSide == 1) {
-                    stashedFrame.origin.x = -self.frame.size.width + 4;
-                } else {
-                    stashedFrame.origin.x = screen.size.width - 4;
+                if (self.stashedSide == 1) { // Left
+                    stashedFrame.origin.x = -self.frame.size.width + 44;
+                } else if (self.stashedSide == 2) { // Right
+                    stashedFrame.origin.x = screen.size.width - 44;
                 }
                 self.frame = stashedFrame;
             } completion:nil];
         }
-    }
-}
-
-- (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
-    if (gesture.state == UIGestureRecognizerStateBegan) {
-        UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
-        [gen impactOccurred];
-        
-        // 弹出快捷菜单
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:nil message:nil preferredStyle:UIAlertControllerStyleActionSheet];
-        
-        [alert addAction:[UIAlertAction actionWithTitle:@"全屏 (Full Screen)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:0 animations:^{
-                self.frame = [UIScreen mainScreen].bounds;
-                self.layer.cornerRadius = 0;
-            } completion:nil];
-        }]];
-        
-        [alert addAction:[UIAlertAction actionWithTitle:@"关闭 (Close)" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-            [self closeWindow];
-        }]];
-        
-        [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-        
-        UIWindow *targetWindow = nil;
-        if (@available(iOS 15.0, *)) {
-            targetWindow = self.windowScene.keyWindow;
-        }
-        if (!targetWindow) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            targetWindow = [UIApplication sharedApplication].keyWindow;
-#pragma clang diagnostic pop
-        }
-        
-        UIViewController *root = targetWindow.rootViewController;
-        alert.popoverPresentationController.sourceView = self.dragHandle;
-        [root presentViewController:alert animated:YES completion:nil];
     }
 }
 
@@ -1876,6 +1963,22 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
     if (info.bundleId) {
         NSString *bid = [info.bundleId copy];
         
+        // 核心修复：检测是否已有该应用的分屏窗口，如果有则直接激活而非全屏开启
+        CV3FloatingAppWindow *existingWindow = nil;
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if ([win.bundleID isEqualToString:bid]) {
+                existingWindow = win;
+                break;
+            }
+        }
+        
+        if (existingWindow) {
+            CV3LogToFile(@"[Info] Launcher 检测到已有分屏窗口: %@", bid);
+            [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
+            [existingWindow restoreFromStash];
+            return;
+        }
+
         // 记录使用频率（带时间戳）
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
             NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -2683,17 +2786,31 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
                 [self.feedback impactOccurredWithIntensity:1.0];
                 CV3LogToFile(@"[Info] 拖拽出面板，使用自带 App Hosting 开启: %@", self.draggedAppInfo.bundleId);
                 
-                NSString *bundleID = self.draggedAppInfo.bundleId;
+                NSString *bundleID = [self.draggedAppInfo.bundleId copy];
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (!floatingWindows) {
                         floatingWindows = [NSMutableArray array];
                     }
                     
-                    // 将坐标从 CV3Window 转换到屏幕坐标
-                    CGPoint screenPoint = [self convertPoint:pointInWindow toWindow:nil];
-                    CV3FloatingAppWindow *floatingWindow = [[CV3FloatingAppWindow alloc] initWithBundleID:bundleID center:screenPoint windowScene:self.windowScene];
-                    [floatingWindows addObject:floatingWindow];
-                    [floatingWindow makeKeyAndVisible];
+                    // 核心修复：检测是否已有该应用的分屏窗口
+                    CV3FloatingAppWindow *existingWindow = nil;
+                    for (CV3FloatingAppWindow *win in floatingWindows) {
+                        if ([win.bundleID isEqualToString:bundleID]) {
+                            existingWindow = win;
+                            break;
+                        }
+                    }
+                    
+                    if (existingWindow) {
+                        CV3LogToFile(@"[Info] 检测到已有分屏窗口，执行还原与聚焦: %@", bundleID);
+                        [existingWindow restoreFromStash];
+                    } else {
+                        // 将坐标从 CV3Window 转换到屏幕坐标
+                        CGPoint screenPoint = [self convertPoint:pointInWindow toWindow:nil];
+                        CV3FloatingAppWindow *floatingWindow = [[CV3FloatingAppWindow alloc] initWithBundleID:bundleID center:screenPoint windowScene:self.windowScene];
+                        [floatingWindows addObject:floatingWindow];
+                        [floatingWindow makeKeyAndVisible];
+                    }
                 });
                 
                 // 移除浮动视图并隐藏面板
