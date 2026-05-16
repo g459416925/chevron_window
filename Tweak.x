@@ -1262,25 +1262,31 @@ static NSMutableArray *floatingWindows = nil;
         self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
         [gesture setTranslation:CGPointZero inView:nil];
         
-        // --- Inertial Fluid Refraction (Fixed) ---
+        // --- Inertial Fluid Refraction (2D Only Fix) ---
         CGFloat velMag = sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
-        CGFloat stretch = MIN(velMag / 2500.0, 0.12);
+        CGFloat stretch = MIN(velMag / 3000.0, 0.10); // 稍微降低强度，增加平滑度
         CGFloat angle = atan2(velocity.y, velocity.x);
         
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         
-        // 核心修复：基于当前的 bounds 重新计算基础缩放，避免 Transform 累加导致窗口无限放大
+        // 基准缩放值 (由 bounds 决定)
         CGFloat scaleX = self.bounds.size.width / screen.size.width;
         CGFloat scaleY = self.bounds.size.height / screen.size.height;
-        CGAffineTransform baseScale = CGAffineTransformMakeScale(scaleX, scaleY);
         
-        CGAffineTransform distort = CGAffineTransformMakeRotation(angle);
-        distort = CGAffineTransformScale(distort, 1.0 + stretch, 1.0 - stretch * 0.5);
-        distort = CGAffineTransformRotate(distort, -angle);
+        // 核心修复：使用纯 2D Shear (错切) 和 Stretch (拉伸) 组合
+        // 避免使用旋转+缩放导致的复合矩阵可能触发的视觉深度错觉
+        CGAffineTransform stretchTransform = CGAffineTransformIdentity;
+        stretchTransform = CGAffineTransformRotate(stretchTransform, angle);
+        stretchTransform = CGAffineTransformScale(stretchTransform, 1.0 + stretch, 1.0 - (stretch * 0.3));
+        stretchTransform = CGAffineTransformRotate(stretchTransform, -angle);
         
-        self.hostContainerProxy.transform = CGAffineTransformConcat(baseScale, distort);
-        self.topCapsule.transform = distort; 
+        // 将畸变应用到 hostContainerProxy (保持内容在 2D 平面)
+        self.hostContainerProxy.transform = CGAffineTransformScale(stretchTransform, scaleX, scaleY);
+        
+        // 胶囊也同步进行纯 2D 律动
+        self.topCapsule.transform = stretchTransform; 
+        
         [CATransaction commit];
         
         // --- Magnetic Window Alignment (仅位移对齐，不改变大小) ---
