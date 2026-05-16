@@ -428,6 +428,7 @@ static NSMutableArray *floatingWindows = nil;
 
 @interface CV3FloatingAppWindow : UIWindow
 @property (nonatomic, copy) NSString *bundleID;
+@property (nonatomic, strong) UIView *clippingContainer; // New: Non-scaled clipping layer
 @property (nonatomic, strong) UIView *hostContainerProxy;
 @property (nonatomic, strong) UIView *hostView;
 @property (nonatomic, strong) UIView *dragHandle;
@@ -452,6 +453,7 @@ static NSMutableArray *floatingWindows = nil;
 
 // Pro Enhancements
 @property (nonatomic, assign) BOOL isFocused;
+@property (nonatomic, assign) BOOL isClosing; 
 @property (nonatomic, assign) CGPoint lastVelocity;
 @property (nonatomic, strong) UIView *crystalPreviewContainer;
 
@@ -490,12 +492,18 @@ static NSMutableArray *floatingWindows = nil;
         self.layer.shadowRadius = 20.0;
         self.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
         
+        // 核心修复：引入非缩放裁剪层 (Clipping Container)
+        // 该层的大小始终等于窗口大小，负责强制执行圆角裁剪，不受内部缩放影响
+        self.clippingContainer = [[UIView alloc] initWithFrame:self.bounds];
+        self.clippingContainer.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+        self.clippingContainer.layer.masksToBounds = YES;
+        self.clippingContainer.backgroundColor = [UIColor clearColor];
+        [self addSubview:self.clippingContainer];
+
         // 代理容器：用来隔离系统的布局覆盖，承载真实的缩放和裁剪
         self.hostContainerProxy = [[UIView alloc] initWithFrame:self.bounds];
-        self.hostContainerProxy.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
-        self.hostContainerProxy.layer.masksToBounds = YES;
         self.hostContainerProxy.backgroundColor = [UIColor clearColor];
-        [self addSubview:self.hostContainerProxy];
+        [self.clippingContainer addSubview:self.hostContainerProxy];
 
         // --- Liquid Glass Visuals ---
         self.innerGlowLayer = [CALayer layer];
@@ -623,8 +631,8 @@ static NSMutableArray *floatingWindows = nil;
 }
 
 - (void)setHidden:(BOOL)hidden {
-    // 核心修复：禁止系统强制隐藏窗口（除非是明确的关闭操作）
-    if (hidden && !self.isStashed) {
+    // 核心修复：禁止系统强制隐藏窗口（除非是明确的关闭操作或 Stash）
+    if (hidden && !self.isStashed && !self.isClosing) {
         CV3LogToFile(@"[Persistence] 拦截到系统对窗口 (%@) 的隐藏请求", self.bundleID);
         [super setHidden:NO];
         [self attachToCurrentActiveScene];
@@ -887,8 +895,14 @@ static NSMutableArray *floatingWindows = nil;
     [self hideControlPopover];
     switch (sender.tag) {
         case 0: // Full Screen
-            [self closeWindow];
-            [[UIApplication sharedApplication] launchApplicationWithIdentifier:self.bundleID suspended:NO];
+            {
+                NSString *bid = [self.bundleID copy];
+                [self closeWindow];
+                // 延迟启动，给 Scene 转换留出物理时间，防止 SpringBoard 竞态冲突导致注销
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    [[UIApplication sharedApplication] launchApplicationWithIdentifier:bid suspended:NO];
+                });
+            }
             break;
         case 1: // Snap
             {
@@ -905,7 +919,7 @@ static NSMutableArray *floatingWindows = nil;
                 [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0 options:0 animations:^{
                     self.frame = CGRectMake(-self.frame.size.width + 4, self.frame.origin.y, self.frame.size.width, self.frame.size.height);
                 } completion:nil];
-                [self handlePan:nil]; 
+                [self handlePan:nil];
             }
             break;
         case 3: // Close
@@ -913,7 +927,6 @@ static NSMutableArray *floatingWindows = nil;
             break;
     }
 }
-
 - (void)updateAdaptiveColor {
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         UIImage *icon = [UIImage _applicationIconImageForBundleIdentifier:self.bundleID format:10 scale:[UIScreen mainScreen].scale];
@@ -1024,6 +1037,9 @@ static NSMutableArray *floatingWindows = nil;
     self.cyanLayer.frame = CGRectInset(self.bounds, -0.3, -0.3);
     self.magentaLayer.frame = CGRectInset(self.bounds, 0.3, 0.3);
     [CATransaction commit];
+
+    // 核心修复：更新裁剪层布局
+    self.clippingContainer.frame = self.bounds;
 
     self.dragHandle.frame = CGRectMake(0, 0, w, 30);
     self.topCapsule.center = CGPointMake(w / 2.0, 15);
@@ -1615,28 +1631,27 @@ static NSMutableArray *floatingWindows = nil;
 }
 
 - (void)closeWindow {
+    self.isClosing = YES;
     self.hidden = YES;
     [self syncWindowBoundsToClient];
-    
+
     @try {
-        FBScene *targetScene = [self getSceneForBundleID:self.bundleID];
-        if (targetScene) {
-            FBSMutableSceneSettings *settings = [[targetScene settings] mutableCopy];
+        if (self.targetScene) {
+            FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
             [settings setBackgrounded:YES];
             [settings setForeground:NO];
-            [targetScene updateSettings:settings withTransitionContext:nil];
-            if ([targetScene respondsToSelector:@selector(_setContentState:)]) {
-                [targetScene _setContentState:0];
+            [self.targetScene updateSettings:settings withTransitionContext:nil];
+            if ([self.targetScene respondsToSelector:@selector(_setContentState:)]) {
+                [self.targetScene _setContentState:0];
             }
         }
     } @catch (NSException *e) {}
-    
-    self.hidden = YES;
+
     [self.hostView removeFromSuperview];
     self.hostView = nil;
+    self.windowScene = nil; // Clear scene attachment
     [floatingWindows removeObject:self];
-}
-@end
+}@end
 
 #pragma mark - Main Window
 @interface CV3Window : UIWindow <UIGestureRecognizerDelegate, UICollectionViewDataSource, UICollectionViewDelegate, UITextFieldDelegate>
