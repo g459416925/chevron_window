@@ -409,6 +409,20 @@ struct {
     .springVelocity = 0.8
 };
 
+#pragma mark - Helper: Color Extraction
+static UIColor *CV3AverageColorFromImage(UIImage *image) {
+    if (!image) return nil;
+    CGSize size = {1, 1};
+    UIGraphicsBeginImageContext(size);
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    CGContextSetInterpolationQuality(ctx, kCGInterpolationMedium);
+    [image drawInRect:(CGRect){.size = size} blendMode:kCGBlendModeCopy alpha:1];
+    uint8_t *data = (uint8_t *)CGBitmapContextGetData(ctx);
+    UIColor *color = [UIColor colorWithRed:data[0]/255.0 green:data[1]/255.0 blue:data[2]/255.0 alpha:1.0];
+    UIGraphicsEndImageContext();
+    return color;
+}
+
 #pragma mark - Floating App Window (MilkyWay2-style)
 static NSMutableArray *floatingWindows = nil;
 
@@ -426,7 +440,19 @@ static NSMutableArray *floatingWindows = nil;
 @property (nonatomic, assign) NSInteger stashedSide; // 0: None, 1: Left, 2: Right
 @property (nonatomic, assign) CGRect preStashFrame;
 @property (nonatomic, strong) UIView *stashGrabber;
+@property (nonatomic, strong) UIImageView *appIconMiniView; // New: Mini icon for the grabber
+
+// Snap & Visual FX Enhancements
+@property (nonatomic, strong) UIVisualEffectView *snapPreviewView;
+@property (nonatomic, strong) CALayer *innerGlowLayer;
+@property (nonatomic, strong) CALayer *cyanLayer;
+@property (nonatomic, strong) CALayer *magentaLayer;
+@property (nonatomic, assign) CGRect lastTargetSnapFrame;
+@property (nonatomic, strong) UIColor *adaptiveAppColor; // New: Color from app icon
+
 - (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene;
+- (void)triggerCollisionImpulse;
+- (void)updateAdaptiveColor;
 @end
 
 @implementation CV3FloatingAppWindow
@@ -457,6 +483,28 @@ static NSMutableArray *floatingWindows = nil;
         self.hostContainerProxy.layer.masksToBounds = YES;
         self.hostContainerProxy.backgroundColor = [UIColor clearColor];
         [self addSubview:self.hostContainerProxy];
+
+        // --- Liquid Glass Visuals ---
+        self.innerGlowLayer = [CALayer layer];
+        self.innerGlowLayer.frame = self.bounds;
+        self.innerGlowLayer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.45].CGColor;
+        self.innerGlowLayer.borderWidth = 0.3;
+        self.innerGlowLayer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+        [self.layer addSublayer:self.innerGlowLayer];
+
+        self.cyanLayer = [CALayer layer];
+        self.cyanLayer.frame = CGRectInset(self.bounds, -0.3, -0.3);
+        self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.12].CGColor;
+        self.cyanLayer.borderWidth = 0.3;
+        self.cyanLayer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+        [self.layer addSublayer:self.cyanLayer];
+
+        self.magentaLayer = [CALayer layer];
+        self.magentaLayer.frame = CGRectInset(self.bounds, 0.3, 0.3);
+        self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:0.12].CGColor;
+        self.magentaLayer.borderWidth = 0.3;
+        self.magentaLayer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+        [self.layer addSublayer:self.magentaLayer];
         
         // 顶部拖拽区域
         self.dragHandle = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 300, 30)];
@@ -503,25 +551,82 @@ static NSMutableArray *floatingWindows = nil;
         [self.resizeHandle addGestureRecognizer:resizePan];
         self.resizeHandle.userInteractionEnabled = YES;
         
-        // 侧边隐藏拉手 (Grabber)
-        self.stashGrabber = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 8, 60)];
-        self.stashGrabber.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.4];
-        self.stashGrabber.layer.cornerRadius = 4;
+        // 侧边隐藏拉手 (Grabber -> Prism Switcher)
+        self.stashGrabber = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 44, 44)]; // Wider for icon
+        self.stashGrabber.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.3];
+        self.stashGrabber.layer.cornerRadius = 12;
+        self.stashGrabber.layer.borderWidth = 0.5;
+        self.stashGrabber.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.2].CGColor;
         self.stashGrabber.alpha = 0; // 初始隐藏
         [self addSubview:self.stashGrabber];
-        
+
+        self.appIconMiniView = [[UIImageView alloc] initWithFrame:CGRectMake(4, 4, 36, 36)];
+        self.appIconMiniView.layer.cornerRadius = 8;
+        self.appIconMiniView.clipsToBounds = YES;
+        [self.stashGrabber addSubview:self.appIconMiniView];
+
         UITapGestureRecognizer *restoreTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleRestoreTap:)];
         [self.stashGrabber addGestureRecognizer:restoreTap];
-        
+
         UIPanGestureRecognizer *restorePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleRestorePan:)];
         [self.stashGrabber addGestureRecognizer:restorePan];
-        
+
         self.stashGrabber.userInteractionEnabled = YES;
-        
+
+        // Snap Preview View (Hidden by default)
+        self.snapPreviewView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
+        self.snapPreviewView.backgroundColor = [[UIColor cyanColor] colorWithAlphaComponent:0.1];
+        self.snapPreviewView.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+        self.snapPreviewView.layer.masksToBounds = YES;
+        self.snapPreviewView.layer.borderWidth = 1.5;
+        self.snapPreviewView.layer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.3].CGColor;
+        self.snapPreviewView.alpha = 0;
+
         [self clampToScreenBounds];
+        [self updateAdaptiveColor];
         [self loadAppScene];
-    }
-    return self;
+        }
+        return self;
+        }
+
+        - (void)updateAdaptiveColor {
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        UIImage *icon = [UIImage _applicationIconImageForBundleIdentifier:self.bundleID format:10 scale:[UIScreen mainScreen].scale];
+        UIColor *avgColor = CV3AverageColorFromImage(icon);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.adaptiveAppColor = avgColor ?: [UIColor labelColor];
+            self.appIconMiniView.image = icon;
+
+            [UIView animateWithDuration:0.8 animations:^{
+                self.topCapsule.backgroundColor = [self.adaptiveAppColor colorWithAlphaComponent:0.6];
+                self.innerGlowLayer.borderColor = [self.adaptiveAppColor colorWithAlphaComponent:0.6].CGColor;
+                self.innerGlowLayer.borderWidth = 0.8;
+                self.stashGrabber.layer.borderColor = [self.adaptiveAppColor colorWithAlphaComponent:0.5].CGColor;
+            }];
+        });
+        });
+        }
+- (void)triggerCollisionImpulse {
+    [CATransaction begin];
+    [CATransaction setAnimationDuration:0.12];
+    [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut]];
+    
+    CAKeyframeAnimation *cyanAnim = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation"];
+    cyanAnim.values = @[[NSValue valueWithCGPoint:CGPointMake(-4, -4)], [NSValue valueWithCGPoint:CGPointZero]];
+    [self.cyanLayer addAnimation:cyanAnim forKey:@"collision"];
+    
+    CAKeyframeAnimation *magAnim = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation"];
+    magAnim.values = @[[NSValue valueWithCGPoint:CGPointMake(4, 4)], [NSValue valueWithCGPoint:CGPointZero]];
+    [self.magentaLayer addAnimation:magAnim forKey:@"collision"];
+    
+    CAKeyframeAnimation *glowAnim = [CAKeyframeAnimation animationWithKeyPath:@"borderWidth"];
+    glowAnim.values = @[@2.5, @0.8];
+    [self.innerGlowLayer addAnimation:glowAnim forKey:@"collision"];
+    
+    [CATransaction commit];
+    
+    UIImpactFeedbackGenerator *rigid = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid];
+    [rigid impactOccurredWithIntensity:1.0];
 }
 
 - (void)layoutSubviews {
@@ -529,6 +634,13 @@ static NSMutableArray *floatingWindows = nil;
     CGFloat w = self.bounds.size.width;
     CGFloat h = self.bounds.size.height;
     
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.innerGlowLayer.frame = self.bounds;
+    self.cyanLayer.frame = CGRectInset(self.bounds, -0.3, -0.3);
+    self.magentaLayer.frame = CGRectInset(self.bounds, 0.3, 0.3);
+    [CATransaction commit];
+
     self.dragHandle.frame = CGRectMake(0, 0, w, 30);
     self.topCapsule.center = CGPointMake(w / 2.0, 15);
     
@@ -546,6 +658,17 @@ static NSMutableArray *floatingWindows = nil;
         CGFloat scaleX = w / screenBounds.size.width;
         CGFloat scaleY = h / screenBounds.size.height;
         
+        // 动态同步场景分辨率：确保 App 始终以全屏分辨率渲染，由宿主进行物理缩合
+        if (self.targetScene) {
+            @try {
+                FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
+                if (!CGRectEqualToRect(settings.frame, screenBounds)) {
+                    [settings setFrame:screenBounds];
+                    [self.targetScene updateSettings:settings withTransitionContext:nil];
+                }
+            } @catch (NSException *e) {}
+        }
+
         self.hostContainerProxy.transform = CGAffineTransformIdentity;
         self.hostContainerProxy.frame = screenBounds; 
         
@@ -649,7 +772,7 @@ static NSMutableArray *floatingWindows = nil;
                 [settings setForeground:YES];
                 
                 if ([settings respondsToSelector:@selector(setFrame:)]) {
-                    [settings setFrame:self.bounds];
+                    [settings setFrame:[UIScreen mainScreen].bounds];
                 }
                 
                 [targetScene updateSettings:settings withTransitionContext:nil];
@@ -681,7 +804,7 @@ static NSMutableArray *floatingWindows = nil;
                         hostedView.layer.masksToBounds = YES;
                         
                         self.hostView = hostedView;
-                        [self addSubview:hostedView];
+                        [self.hostContainerProxy addSubview:hostedView]; // Fix: Add to proxy
                         [self bringSubviewToFront:self.dragHandle];
                         [self bringSubviewToFront:self.resizeHandle];
                         CV3LogToFile(@"[Debug] 成功通过 _UISceneLayerHostContainerView 创建渲染视图");
@@ -721,26 +844,70 @@ static NSMutableArray *floatingWindows = nil;
 
 - (void)handlePan:(UIPanGestureRecognizer *)gesture {
     CGPoint translation = [gesture translationInView:nil];
+    CGPoint location = [gesture locationInView:nil];
+    CGRect screen = [UIScreen mainScreen].bounds;
+    UIEdgeInsets safe = UIEdgeInsetsMake(47, 10, 34, 10);
+    
     if (gesture.state == UIGestureRecognizerStateBegan) {
         [UIView animateWithDuration:0.3 animations:^{
             self.transform = CGAffineTransformMakeScale(1.02, 1.02);
             self.layer.shadowOpacity = 0.6;
         }];
+        
+        UIWindow *keyWin = nil;
+        if (@available(iOS 15.0, *)) {
+            keyWin = self.windowScene.keyWindow;
+        }
+        if (!keyWin) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            keyWin = [UIApplication sharedApplication].keyWindow;
+#pragma clang diagnostic pop
+        }
+        
+        if (keyWin && !self.snapPreviewView.superview) {
+            [keyWin addSubview:self.snapPreviewView];
+        }
+        self.lastTargetSnapFrame = CGRectZero;
     }
     
     if (gesture.state == UIGestureRecognizerStateChanged) {
         self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
         [gesture setTranslation:CGPointZero inView:nil];
         
-        // 建议：边缘预警视觉反馈 (Snap Preview)
-        CGRect screen = [UIScreen mainScreen].bounds;
-        CGFloat threshold = 40.0;
-        if (self.center.x < threshold || self.center.x > screen.size.width - threshold) {
-            self.layer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.5].CGColor;
-            self.layer.borderWidth = 2.0;
-        } else {
-            self.layer.borderColor = [[UIColor clearColor] CGColor];
-            self.layer.borderWidth = 0.0;
+        // --- Snap Layouts 2.0 Logic ---
+        CGRect targetSnapFrame = CGRectZero;
+        CGFloat snapThreshold = 60.0;
+        
+        if (location.x < snapThreshold) {
+            // 左半屏
+            targetSnapFrame = CGRectMake(safe.left, safe.top, (screen.size.width - safe.left - safe.right)/2.0 - 5, screen.size.height - safe.top - safe.bottom);
+        } else if (location.x > screen.size.width - snapThreshold) {
+            // 右半屏
+            CGFloat halfW = (screen.size.width - safe.left - safe.right)/2.0 - 5;
+            targetSnapFrame = CGRectMake(screen.size.width - safe.right - halfW, safe.top, halfW, screen.size.height - safe.top - safe.bottom);
+        } else if (location.y < snapThreshold) {
+            // 上半屏 (全屏预览)
+            targetSnapFrame = CGRectMake(safe.left, safe.top, screen.size.width - safe.left - safe.right, screen.size.height - safe.top - safe.bottom);
+        }
+        
+        if (!CGRectEqualToRect(targetSnapFrame, self.lastTargetSnapFrame)) {
+            if (!CGRectIsEmpty(targetSnapFrame)) {
+                [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
+                    self.snapPreviewView.alpha = 1.0;
+                    self.snapPreviewView.frame = targetSnapFrame;
+                } completion:nil];
+                
+                if (CGRectIsEmpty(self.lastTargetSnapFrame)) {
+                    UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+                    [gen impactOccurred];
+                }
+            } else {
+                [UIView animateWithDuration:0.3 animations:^{
+                    self.snapPreviewView.alpha = 0;
+                }];
+            }
+            self.lastTargetSnapFrame = targetSnapFrame;
         }
     }
     
@@ -748,38 +915,30 @@ static NSMutableArray *floatingWindows = nil;
         [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:UIViewAnimationOptionCurveEaseInOut animations:^{
             self.transform = CGAffineTransformIdentity;
             self.layer.shadowOpacity = 0.4;
+            self.snapPreviewView.alpha = 0;
             
-            CGRect screen = [UIScreen mainScreen].bounds;
-            UIEdgeInsets safe = UIEdgeInsetsMake(47, 10, 34, 10);
             CGFloat stashThreshold = 30.0;
-            CGFloat snapThreshold = 60.0;
-            
             CGRect targetFrame = self.frame;
             
-            // 1. 侧边隐藏 (Stash) 判定 - 优先级最高
+            // 1. Stash 判定
             if (self.frame.origin.x < -self.frame.size.width + stashThreshold) {
-                // 向左侧隐藏
                 self.isStashed = YES;
                 self.stashedSide = 1;
                 self.preStashFrame = self.frame;
-                targetFrame.origin.x = -self.frame.size.width + 4; // 留出一点边距用于拉手
+                targetFrame.origin.x = -self.frame.size.width + 4;
                 self.stashGrabber.alpha = 1.0;
-                self.stashGrabber.frame = CGRectMake(self.frame.size.width - 8, self.frame.size.height/2 - 30, 8, 60);
+                self.stashGrabber.frame = CGRectMake(self.frame.size.width - 44, self.frame.size.height/2 - 22, 44, 44);
             } else if (self.frame.origin.x > screen.size.width - stashThreshold) {
-                // 向右侧隐藏
                 self.isStashed = YES;
                 self.stashedSide = 2;
                 self.preStashFrame = self.frame;
                 targetFrame.origin.x = screen.size.width - 4;
                 self.stashGrabber.alpha = 1.0;
-                self.stashGrabber.frame = CGRectMake(0, self.frame.size.height/2 - 30, 8, 60);
+                self.stashGrabber.frame = CGRectMake(0, self.frame.size.height/2 - 22, 44, 44);
             } else {
-                // 2. 边缘吸附 (Snapping) 判定
-                if (self.center.x < snapThreshold) {
-                    targetFrame = CGRectMake(safe.left, safe.top, (screen.size.width - safe.left - safe.right)/2.0 - 5, screen.size.height - safe.top - safe.bottom);
-                } else if (self.center.x > screen.size.width - snapThreshold) {
-                    CGFloat halfW = (screen.size.width - safe.left - safe.right)/2.0 - 5;
-                    targetFrame = CGRectMake(screen.size.width - safe.right - halfW, safe.top, halfW, screen.size.height - safe.top - safe.bottom);
+                // 2. Snap 判定 (使用之前计算好的 targetSnapFrame)
+                if (!CGRectIsEmpty(self.lastTargetSnapFrame)) {
+                    targetFrame = self.lastTargetSnapFrame;
                 }
                 self.isStashed = NO;
                 self.stashedSide = 0;
@@ -787,13 +946,11 @@ static NSMutableArray *floatingWindows = nil;
             }
             
             if (!CGRectEqualToRect(targetFrame, self.frame)) {
-                UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-                [gen impactOccurred];
+                [self triggerCollisionImpulse];
                 self.frame = targetFrame;
                 
                 if (self.isStashed) {
                     [self updateGrabberStack];
-                    // 通知同侧其他窗口也更新视觉
                     for (CV3FloatingAppWindow *win in floatingWindows) {
                         if (win != self && win.isStashed) [win updateGrabberStack];
                     }
@@ -801,8 +958,6 @@ static NSMutableArray *floatingWindows = nil;
             }
             
             [self clampToScreenBounds];
-            self.layer.borderColor = [[UIColor clearColor] CGColor];
-            self.layer.borderWidth = 0.0;
         } completion:nil];
     }
 }
@@ -814,19 +969,32 @@ static NSMutableArray *floatingWindows = nil;
     }
     
     int stashedCount = 0;
+    NSMutableArray *otherStashedWindows = [NSMutableArray array];
     for (CV3FloatingAppWindow *win in floatingWindows) {
         if (win.isStashed && win.stashedSide == self.stashedSide && win != self) {
             stashedCount++;
+            [otherStashedWindows addObject:win];
         }
     }
     
     if (stashedCount > 0) {
-        // 添加一个偏移的层模拟堆叠感
-        UIView *stackLayer = [[UIView alloc] initWithFrame:CGRectMake(2, 4, 8, 60)];
-        stackLayer.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.2];
-        stackLayer.layer.cornerRadius = 4;
-        stackLayer.tag = 99;
-        [self.stashGrabber insertSubview:stackLayer atIndex:0];
+        // 建议：Prism Stacking (棱镜堆叠视觉)
+        // 为每一个额外的藏匿窗口添加一个偏移的半透明图标层
+        for (int i = 0; i < MIN(3, stashedCount); i++) {
+            CV3FloatingAppWindow *otherWin = otherStashedWindows[i];
+            UIImageView *stackIcon = [[UIImageView alloc] initWithFrame:CGRectInset(self.appIconMiniView.frame, 2, 2)];
+            stackIcon.image = [UIImage _applicationIconImageForBundleIdentifier:otherWin.bundleID format:10 scale:[UIScreen mainScreen].scale];
+            stackIcon.layer.cornerRadius = 6;
+            stackIcon.clipsToBounds = YES;
+            stackIcon.alpha = 0.4 - (i * 0.1);
+            stackIcon.tag = 99;
+            
+            // 根据侧边计算位移方向
+            CGFloat offset = (i + 1) * 6.0;
+            stackIcon.transform = CGAffineTransformMakeTranslation(self.stashedSide == 1 ? -offset : offset, (i + 1) * 4.0);
+            
+            [self.stashGrabber insertSubview:stackIcon atIndex:0];
+        }
     }
 }
 
@@ -1122,18 +1290,6 @@ static CGFloat CGPointDistance(CGPoint p1, CGPoint p2) {
 }
 
 #pragma mark - Helper: Color Extraction
-static UIColor *CV3AverageColorFromImage(UIImage *image) {
-    if (!image) return nil;
-    CGSize size = {1, 1};
-    UIGraphicsBeginImageContext(size);
-    CGContextRef ctx = UIGraphicsGetCurrentContext();
-    CGContextSetInterpolationQuality(ctx, kCGInterpolationMedium);
-    [image drawInRect:(CGRect){.size = size} blendMode:kCGBlendModeCopy alpha:1];
-    uint8_t *data = (uint8_t *)CGBitmapContextGetData(ctx);
-    UIColor *color = [UIColor colorWithRed:data[0]/255.0 green:data[1]/255.0 blue:data[2]/255.0 alpha:1.0];
-    UIGraphicsEndImageContext();
-    return color;
-}
 
 static void CV3UpdateAdaptiveTint(NSString *bundleId) {
     if (!sharedWindow || !bundleId) return;
@@ -4023,6 +4179,19 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
 %end
 
 %hook FBScene
+
+- (void)_setContentState:(NSInteger)state {
+    if (floatingWindows) {
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if ([self.identifier containsString:win.bundleID] && !win.hidden) {
+                %orig(2); // 强行拦截为 2 (Ready 状态)
+                return;
+            }
+        }
+    }
+    %orig;
+}
+
 - (void)updateSettings:(id)arg1 withTransitionContext:(id)arg2 {
     if (floatingWindows) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
