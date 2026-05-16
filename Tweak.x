@@ -594,8 +594,58 @@ static NSMutableArray *floatingWindows = nil;
         
         // Auto-focus on creation
         [self setWindowFocused:YES];
+
+        // 核心修复：监听 Scene 变更与系统通知，确保窗口持久存在
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(attachToCurrentActiveScene) name:UISceneDidActivateNotification object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(enforceSceneForegroundState) name:UISceneDidEnterBackgroundNotification object:nil];
     }
     return self;
+}
+
+- (void)setHidden:(BOOL)hidden {
+    // 核心修复：禁止系统强制隐藏窗口（除非是明确的关闭操作）
+    if (hidden && !self.isStashed) {
+        CV3LogToFile(@"[Persistence] 拦截到系统对窗口 (%@) 的隐藏请求", self.bundleID);
+        [super setHidden:NO];
+        [self attachToCurrentActiveScene];
+        return;
+    }
+    [super setHidden:hidden];
+}
+
+- (void)attachToCurrentActiveScene {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            UIWindowScene *targetScene = nil;
+            if ([NSClassFromString(@"SBWindowScene") respondsToSelector:@selector(mainDisplayWindowScene)]) {
+                targetScene = [NSClassFromString(@"SBWindowScene") performSelector:@selector(mainDisplayWindowScene)];
+            }
+            
+            if (targetScene && self.windowScene != targetScene) {
+                CV3LogToFile(@"[Persistence] 迁移窗口 (%@) 至系统主场景", self.bundleID);
+                self.windowScene = targetScene;
+                [super setHidden:NO];
+                [self setNeedsLayout];
+            }
+            [self enforceSceneForegroundState];
+        } @catch (NSException *e) {}
+    });
+}
+
+- (void)enforceSceneForegroundState {
+    if (!self.targetScene) return;
+    
+    // 核心修复：物理强制 App Scene 处于活跃渲染状态，即使在桌面
+    @try {
+        FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
+        [settings setBackgrounded:NO];
+        [settings setForeground:YES];
+        [self.targetScene updateSettings:settings withTransitionContext:nil];
+        
+        if ([self.targetScene respondsToSelector:@selector(_setContentState:)]) {
+            [self.targetScene _setContentState:2]; // Ready
+        }
+    } @catch (NSException *e) {}
 }
 
 - (void)setWindowFocused:(BOOL)focused {
@@ -3994,6 +4044,13 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 - (void)monitorState {
     @try {
         [self attachToCurrentActiveScene];
+        
+        // 核心修复：同步监控所有浮动窗口的持久状态
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if ([win respondsToSelector:@selector(attachToCurrentActiveScene)]) {
+                [win attachToCurrentActiveScene];
+            }
+        }
     } @catch (NSException *e) {
     }
 }
