@@ -1244,32 +1244,17 @@ static NSMutableArray *floatingWindows = nil;
 
 - (void)handlePan:(UIPanGestureRecognizer *)gesture {
     CGPoint translation = [gesture translationInView:nil];
-    CGPoint location = [gesture locationInView:nil];
     CGPoint velocity = [gesture velocityInView:nil];
     CGRect screen = [UIScreen mainScreen].bounds;
-    UIEdgeInsets safe = UIEdgeInsetsMake(47, 10, 34, 10);
     
     if (gesture.state == UIGestureRecognizerStateBegan) {
         [self setWindowFocused:YES];
         [UIView animateWithDuration:0.3 animations:^{
-            self.transform = CGAffineTransformScale(self.transform, 1.05, 1.05);
+            // 移除了 1.05x 的放大，仅增加阴影深度，确保视觉上“浮起”但不“变大”
             self.layer.shadowOpacity = 0.8;
+            self.layer.shadowRadius = 35.0;
         }];
         
-        UIWindow *keyWin = nil;
-        if (@available(iOS 15.0, *)) {
-            keyWin = self.windowScene.keyWindow;
-        }
-        if (!keyWin) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            keyWin = [UIApplication sharedApplication].keyWindow;
-#pragma clang diagnostic pop
-        }
-        
-        if (keyWin && !self.snapPreviewView.superview) {
-            [keyWin addSubview:self.snapPreviewView];
-        }
         self.lastTargetSnapFrame = CGRectZero;
     }
     
@@ -1277,74 +1262,42 @@ static NSMutableArray *floatingWindows = nil;
         self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
         [gesture setTranslation:CGPointZero inView:nil];
         
-        // --- Inertial Fluid Refraction ---
+        // --- Inertial Fluid Refraction (Fixed) ---
         CGFloat velMag = sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
-        CGFloat stretch = MIN(velMag / 2000.0, 0.15);
+        CGFloat stretch = MIN(velMag / 2500.0, 0.12);
         CGFloat angle = atan2(velocity.y, velocity.x);
         
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
-        // Distort hostContainerProxy and topCapsule based on movement
+        
+        // 核心修复：基于当前的 bounds 重新计算基础缩放，避免 Transform 累加导致窗口无限放大
+        CGFloat scaleX = self.bounds.size.width / screen.size.width;
+        CGFloat scaleY = self.bounds.size.height / screen.size.height;
+        CGAffineTransform baseScale = CGAffineTransformMakeScale(scaleX, scaleY);
+        
         CGAffineTransform distort = CGAffineTransformMakeRotation(angle);
         distort = CGAffineTransformScale(distort, 1.0 + stretch, 1.0 - stretch * 0.5);
         distort = CGAffineTransformRotate(distort, -angle);
-        self.hostContainerProxy.transform = CGAffineTransformConcat(self.hostContainerProxy.transform, distort);
-        self.topCapsule.transform = distort; // Weight feedback
+        
+        self.hostContainerProxy.transform = CGAffineTransformConcat(baseScale, distort);
+        self.topCapsule.transform = distort; 
         [CATransaction commit];
         
-        // --- Magnetic Window Alignment ---
-        CGRect targetSnapFrame = CGRectZero;
-        CGFloat snapThreshold = 60.0;
+        // --- Magnetic Window Alignment (仅位移对齐，不改变大小) ---
         CGFloat magnetThreshold = 30.0;
-        
-        // Edge Snapping
-        if (location.x < snapThreshold) {
-            targetSnapFrame = CGRectMake(safe.left, safe.top, (screen.size.width - safe.left - safe.right)/2.0 - 5, screen.size.height - safe.top - safe.bottom);
-        } else if (location.x > screen.size.width - snapThreshold) {
-            CGFloat halfW = (screen.size.width - safe.left - safe.right)/2.0 - 5;
-            targetSnapFrame = CGRectMake(screen.size.width - safe.right - halfW, safe.top, halfW, screen.size.height - safe.top - safe.bottom);
-        } else if (location.y < snapThreshold) {
-            targetSnapFrame = CGRectMake(safe.left, safe.top, screen.size.width - safe.left - safe.right, screen.size.height - safe.top - safe.bottom);
-        }
-        
-        // Window-to-Window Magnetism
-        if (CGRectIsEmpty(targetSnapFrame)) {
-            for (CV3FloatingAppWindow *other in floatingWindows) {
-                if (other == self || other.isStashed) continue;
-                
-                CGRect otherFrame = other.frame;
-                // Magnetically snap to other window edges
-                if (fabs(CGRectGetMaxX(self.frame) - otherFrame.origin.x) < magnetThreshold) {
-                    CGPoint c = self.center;
-                    c.x = otherFrame.origin.x - self.frame.size.width / 2.0 - 5.0;
-                    self.center = c;
-                    [self triggerCollisionImpulseAtPoint:CGPointMake(CGRectGetMaxX(self.frame), self.center.y)];
-                } else if (fabs(self.frame.origin.x - CGRectGetMaxX(otherFrame)) < magnetThreshold) {
-                    CGPoint c = self.center;
-                    c.x = CGRectGetMaxX(otherFrame) + self.frame.size.width / 2.0 + 5.0;
-                    self.center = c;
-                    [self triggerCollisionImpulseAtPoint:CGPointMake(self.frame.origin.x, self.center.y)];
-                }
+        for (CV3FloatingAppWindow *other in floatingWindows) {
+            if (other == self || other.isStashed || ![other isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+            
+            CGRect otherFrame = other.frame;
+            if (fabs(CGRectGetMaxX(self.frame) - otherFrame.origin.x) < magnetThreshold) {
+                CGPoint c = self.center;
+                c.x = otherFrame.origin.x - self.frame.size.width / 2.0 - 5.0;
+                self.center = c;
+            } else if (fabs(self.frame.origin.x - CGRectGetMaxX(otherFrame)) < magnetThreshold) {
+                CGPoint c = self.center;
+                c.x = CGRectGetMaxX(otherFrame) + self.frame.size.width / 2.0 + 5.0;
+                self.center = c;
             }
-        }
-        
-        if (!CGRectEqualToRect(targetSnapFrame, self.lastTargetSnapFrame)) {
-            if (!CGRectIsEmpty(targetSnapFrame)) {
-                [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
-                    self.snapPreviewView.alpha = 1.0;
-                    self.snapPreviewView.frame = targetSnapFrame;
-                } completion:nil];
-                
-                if (CGRectIsEmpty(self.lastTargetSnapFrame)) {
-                    UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-                    [gen impactOccurred];
-                }
-            } else {
-                [UIView animateWithDuration:0.3 animations:^{
-                    self.snapPreviewView.alpha = 0;
-                }];
-            }
-            self.lastTargetSnapFrame = targetSnapFrame;
         }
     }
     
@@ -1353,11 +1306,13 @@ static NSMutableArray *floatingWindows = nil;
             self.transform = CGAffineTransformIdentity;
             self.topCapsule.transform = CGAffineTransformIdentity;
             self.layer.shadowOpacity = 0.4;
+            self.layer.shadowRadius = 20.0;
             self.snapPreviewView.alpha = 0;
             
             CGFloat stashThreshold = 30.0;
             CGRect targetFrame = self.frame;
             
+            // 仅保留 Stash (隐藏) 逻辑，移除 Snap (放大) 逻辑
             if (self.frame.origin.x < -self.frame.size.width + stashThreshold) {
                 self.isStashed = YES;
                 self.stashedSide = 1;
@@ -1373,22 +1328,17 @@ static NSMutableArray *floatingWindows = nil;
                 self.stashGrabber.alpha = 1.0;
                 self.stashGrabber.frame = CGRectMake(0, self.frame.size.height/2 - 22, 44, 44);
             } else {
-                if (!CGRectIsEmpty(self.lastTargetSnapFrame)) {
-                    targetFrame = self.lastTargetSnapFrame;
-                }
                 self.isStashed = NO;
                 self.stashedSide = 0;
                 self.stashGrabber.alpha = 0;
             }
             
             if (!CGRectEqualToRect(targetFrame, self.frame)) {
-                [self triggerCollisionImpulse];
                 self.frame = targetFrame;
-                
                 if (self.isStashed) {
                     [self updateGrabberStack];
                     for (CV3FloatingAppWindow *win in floatingWindows) {
-                        if (win != self && win.isStashed) [win updateGrabberStack];
+                        if (win != self && [win isKindOfClass:[CV3FloatingAppWindow class]] && win.isStashed) [win updateGrabberStack];
                     }
                 }
             }
