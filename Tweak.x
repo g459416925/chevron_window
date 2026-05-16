@@ -428,7 +428,8 @@ static NSMutableArray *floatingWindows = nil;
 
 @interface CV3FloatingAppWindow : UIWindow
 @property (nonatomic, copy) NSString *bundleID;
-@property (nonatomic, strong) UIView *clippingContainer; // New: Non-scaled clipping layer
+@property (nonatomic, strong) UIVisualEffectView *glassBackdrop; // New: Fluid background
+@property (nonatomic, strong) UIView *clippingContainer; 
 @property (nonatomic, strong) UIView *hostContainerProxy;
 @property (nonatomic, strong) UIView *hostView;
 @property (nonatomic, strong) UIView *dragHandle;
@@ -499,6 +500,13 @@ static NSMutableArray *floatingWindows = nil;
         self.clippingContainer.layer.masksToBounds = YES;
         self.clippingContainer.backgroundColor = [UIColor clearColor];
         [self addSubview:self.clippingContainer];
+
+        // 核心视觉：引入液态玻璃背景
+        self.glassBackdrop = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial]];
+        self.glassBackdrop.frame = self.bounds;
+        self.glassBackdrop.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+        self.glassBackdrop.layer.masksToBounds = YES;
+        [self insertSubview:self.glassBackdrop belowSubview:self.clippingContainer];
 
         // 代理容器：用来隔离系统的布局覆盖，承载真实的缩放和裁剪
         self.hostContainerProxy = [[UIView alloc] initWithFrame:self.bounds];
@@ -1040,6 +1048,7 @@ static NSMutableArray *floatingWindows = nil;
 
     // 核心修复：更新裁剪层布局
     self.clippingContainer.frame = self.bounds;
+    self.glassBackdrop.frame = self.bounds;
 
     self.dragHandle.frame = CGRectMake(0, 0, w, 30);
     self.topCapsule.center = CGPointMake(w / 2.0, 15);
@@ -1262,31 +1271,39 @@ static NSMutableArray *floatingWindows = nil;
         self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
         [gesture setTranslation:CGPointZero inView:nil];
         
-        // --- Inertial Fluid Refraction (2D Only Fix) ---
+        // --- Inertial Fluid Refraction (Visual Only Fix) ---
         CGFloat velMag = sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
-        CGFloat stretch = MIN(velMag / 3000.0, 0.10); // 稍微降低强度，增加平滑度
+        CGFloat stretch = MIN(velMag / 2500.0, 0.12); 
         CGFloat angle = atan2(velocity.y, velocity.x);
         
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         
-        // 基准缩放值 (由 bounds 决定)
+        // 1. 基准缩放值 (由 bounds 决定) - 必须保持稳定
         CGFloat scaleX = self.bounds.size.width / screen.size.width;
         CGFloat scaleY = self.bounds.size.height / screen.size.height;
+        CGAffineTransform baseScale = CGAffineTransformMakeScale(scaleX, scaleY);
         
-        // 核心修复：使用纯 2D Shear (错切) 和 Stretch (拉伸) 组合
-        // 避免使用旋转+缩放导致的复合矩阵可能触发的视觉深度错觉
+        // 2. 惯性拉伸变换 (仅用于背景装饰)
         CGAffineTransform stretchTransform = CGAffineTransformIdentity;
         stretchTransform = CGAffineTransformRotate(stretchTransform, angle);
-        stretchTransform = CGAffineTransformScale(stretchTransform, 1.0 + stretch, 1.0 - (stretch * 0.3));
+        stretchTransform = CGAffineTransformScale(stretchTransform, 1.0 + stretch, 1.0 - (stretch * 0.4));
         stretchTransform = CGAffineTransformRotate(stretchTransform, -angle);
         
-        // 将畸变应用到 hostContainerProxy (保持内容在 2D 平面)
-        self.hostContainerProxy.transform = CGAffineTransformScale(stretchTransform, scaleX, scaleY);
+        // 核心修复：
+        // A. 内部画面 (App Content) 使用 baseScale，保持绝对平整、无扭曲
+        self.hostContainerProxy.transform = baseScale;
         
-        // 胶囊也同步进行纯 2D 律动
+        // B. 玻璃背景、装饰胶囊、外框层应用 stretchTransform，产生“液态玻璃”在流动的错觉
+        self.glassBackdrop.transform = stretchTransform;
         self.topCapsule.transform = stretchTransform; 
         
+        // 为图层应用错切律动
+        CATransform3D layerStretch = CATransform3DMakeAffineTransform(stretchTransform);
+        self.innerGlowLayer.transform = layerStretch;
+        self.cyanLayer.transform = layerStretch;
+        self.magentaLayer.transform = layerStretch;
+
         [CATransaction commit];
         
         // --- Magnetic Window Alignment (仅位移对齐，不改变大小) ---
