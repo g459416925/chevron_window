@@ -440,7 +440,7 @@ static NSMutableArray *floatingWindows = nil;
 @property (nonatomic, assign) NSInteger stashedSide; // 0: None, 1: Left, 2: Right
 @property (nonatomic, assign) CGRect preStashFrame;
 @property (nonatomic, strong) UIView *stashGrabber;
-@property (nonatomic, strong) UIImageView *appIconMiniView; // New: Mini icon for the grabber
+@property (nonatomic, strong) UIImageView *appIconMiniView;
 
 // Snap & Visual FX Enhancements
 @property (nonatomic, strong) UIVisualEffectView *snapPreviewView;
@@ -448,17 +448,24 @@ static NSMutableArray *floatingWindows = nil;
 @property (nonatomic, strong) CALayer *cyanLayer;
 @property (nonatomic, strong) CALayer *magentaLayer;
 @property (nonatomic, assign) CGRect lastTargetSnapFrame;
-@property (nonatomic, strong) UIColor *adaptiveAppColor; // New: Color from app icon
+@property (nonatomic, strong) UIColor *adaptiveAppColor;
 
 // Pro Enhancements
 @property (nonatomic, assign) BOOL isFocused;
 @property (nonatomic, assign) CGPoint lastVelocity;
-@property (nonatomic, strong) UIView *crystalPreviewContainer; // For thumbnail previews
+@property (nonatomic, strong) UIView *crystalPreviewContainer;
+
+// Hyper-Capsule Evolution
+@property (nonatomic, strong) CAGradientLayer *capsuleGlowLayer;
+@property (nonatomic, strong) UIVisualEffectView *popoverView;
+@property (nonatomic, strong) NSArray *capsuleDots;
 
 - (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene;
 - (void)triggerCollisionImpulse;
 - (void)updateAdaptiveColor;
 - (void)setWindowFocused:(BOOL)focused;
+- (void)showControlPopover;
+- (void)startCapsuleBreathing;
 @end
 
 @implementation CV3FloatingAppWindow
@@ -517,21 +524,34 @@ static NSMutableArray *floatingWindows = nil;
         self.dragHandle.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.01]; // 确保整个 30pt 高度的区域都能接收拖拽手势
         [self addSubview:self.dragHandle];
         
-        // iPadOS 风格多任务胶囊
+        // Hyper-Capsule Setup
         self.topCapsule = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kChevronLayoutConstants.windowHandleW, kChevronLayoutConstants.windowHandleH)];
         self.topCapsule.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.25];
         self.topCapsule.layer.cornerRadius = kChevronLayoutConstants.windowHandleH / 2.0;
-        self.topCapsule.userInteractionEnabled = NO;
         [self.dragHandle addSubview:self.topCapsule];
         
-        // 模拟三个圆点
+        // Capsule Glow (Adaptive)
+        self.capsuleGlowLayer = [CAGradientLayer layer];
+        self.capsuleGlowLayer.frame = self.topCapsule.bounds;
+        self.capsuleGlowLayer.cornerRadius = self.topCapsule.layer.cornerRadius;
+        self.capsuleGlowLayer.opacity = 0; 
+        [self.topCapsule.layer insertSublayer:self.capsuleGlowLayer atIndex:0];
+
+        NSMutableArray *dots = [NSMutableArray array];
         CGFloat dotSpacing = kChevronLayoutConstants.windowHandleW / 4.0;
         for (int i = 0; i < 3; i++) {
             UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(dotSpacing * (i + 1) - 1, 1.5, 2, 2)];
             dot.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.4];
             dot.layer.cornerRadius = 1;
             [self.topCapsule addSubview:dot];
+            [dots addObject:dot];
         }
+        self.capsuleDots = dots;
+
+        // Interaction: Tap capsule for control HUD
+        UITapGestureRecognizer *capsuleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(showControlPopover)];
+        [self.topCapsule addGestureRecognizer:capsuleTap];
+        self.topCapsule.userInteractionEnabled = YES;
         
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         [self.dragHandle addGestureRecognizer:pan];
@@ -614,19 +634,35 @@ static NSMutableArray *floatingWindows = nil;
 }
 
 - (void)attachToCurrentActiveScene {
+    // 核心优化：改“动态跟随”为“静态持久挂载”，消除迁移导致的闪烁
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
             UIWindowScene *targetScene = nil;
+            
+            // 1. 优先获取 SpringBoard 核心主场景 (最稳定，不随 App 切换消失)
             if ([NSClassFromString(@"SBWindowScene") respondsToSelector:@selector(mainDisplayWindowScene)]) {
                 targetScene = [NSClassFromString(@"SBWindowScene") performSelector:@selector(mainDisplayWindowScene)];
             }
             
-            if (targetScene && self.windowScene != targetScene) {
-                CV3LogToFile(@"[Persistence] 迁移窗口 (%@) 至系统主场景", self.bundleID);
+            // 2. 如果主场景不可用，才尝试寻找当前活跃场景 (兜底)
+            if (!targetScene) {
+                for (UIScene *scene in [[UIApplication sharedApplication].connectedScenes allObjects]) {
+                    if ([scene isKindOfClass:[UIWindowScene class]] && scene.activationState == UISceneActivationStateForegroundActive) {
+                        targetScene = (UIWindowScene *)scene;
+                        break;
+                    }
+                }
+            }
+            
+            // 3. 只有当确实没有 Scene 或者当前 Scene 已失效时才重新赋值
+            if (targetScene && (self.windowScene != targetScene || !self.windowScene)) {
+                CV3LogToFile(@"[Persistence] 稳定化挂载窗口 (%@) 至主场景: %@", self.bundleID, targetScene);
                 self.windowScene = targetScene;
                 [super setHidden:NO];
                 [self setNeedsLayout];
             }
+            
+            // 4. 无论如何，强制维持内部 App 场景的活跃状态
             [self enforceSceneForegroundState];
         } @catch (NSException *e) {}
     });
@@ -635,15 +671,37 @@ static NSMutableArray *floatingWindows = nil;
 - (void)enforceSceneForegroundState {
     if (!self.targetScene) return;
     
-    // 核心修复：物理强制 App Scene 处于活跃渲染状态，即使在桌面
+    // 强制 Scene 状态，防止被系统挂起导致画面黑屏
     @try {
         FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
-        [settings setBackgrounded:NO];
-        [settings setForeground:YES];
-        [self.targetScene updateSettings:settings withTransitionContext:nil];
+        BOOL needsUpdate = NO;
         
-        if ([self.targetScene respondsToSelector:@selector(_setContentState:)]) {
-            [self.targetScene _setContentState:2]; // Ready
+        // 兼容性检查：优先通过 KVC 获取，因为编译器不认识 FBSMutableSceneSettings 的私有 getter
+        BOOL currentBackgrounded = YES;
+        @try {
+            currentBackgrounded = [[settings valueForKey:@"backgrounded"] boolValue];
+        } @catch (NSException *e) {
+            // 如果 backgrounded key 不存在，尝试 fallback
+        }
+
+        if (currentBackgrounded) {
+            [settings setBackgrounded:NO];
+            needsUpdate = YES;
+        }
+
+        @try {
+            BOOL currentForeground = [[settings valueForKey:@"foreground"] boolValue];
+            if (!currentForeground) {
+                [settings setForeground:YES];
+                needsUpdate = YES;
+            }
+        } @catch (NSException *e) {}
+        
+        if (needsUpdate) {
+            [self.targetScene updateSettings:settings withTransitionContext:nil];
+            if ([self.targetScene respondsToSelector:@selector(_setContentState:)]) {
+                [self.targetScene _setContentState:2]; 
+            }
         }
     } @catch (NSException *e) {}
 }
@@ -742,7 +800,121 @@ static NSMutableArray *floatingWindows = nil;
         }];
     }
 }
-        - (void)updateAdaptiveColor {
+
+- (void)startCapsuleBreathing {
+    [self.capsuleGlowLayer removeAllAnimations];
+    
+    self.capsuleGlowLayer.colors = @[
+        (id)[self.adaptiveAppColor colorWithAlphaComponent:0.8].CGColor,
+        (id)[self.adaptiveAppColor colorWithAlphaComponent:0.2].CGColor
+    ];
+    self.capsuleGlowLayer.startPoint = CGPointMake(0, 0.5);
+    self.capsuleGlowLayer.endPoint = CGPointMake(1, 0.5);
+    
+    CABasicAnimation *breath = [CABasicAnimation animationWithKeyPath:@"opacity"];
+    breath.fromValue = @0.3;
+    breath.toValue = @1.0;
+    breath.duration = 2.0;
+    breath.autoreverses = YES;
+    breath.repeatCount = HUGE_VALF;
+    [self.capsuleGlowLayer addAnimation:breath forKey:@"breath"];
+    
+    // Status Dot Pulse (Center dot)
+    if (self.capsuleDots.count >= 2) {
+        UIView *centerDot = self.capsuleDots[1];
+        CABasicAnimation *pulse = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
+        pulse.fromValue = @1.0;
+        pulse.toValue = @1.5;
+        pulse.duration = 1.0;
+        pulse.autoreverses = YES;
+        pulse.repeatCount = HUGE_VALF;
+        [centerDot.layer addAnimation:pulse forKey:@"pulse"];
+    }
+}
+
+- (void)showControlPopover {
+    if (self.popoverView) {
+        [self hideControlPopover];
+        return;
+    }
+    
+    UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [gen impactOccurred];
+    
+    self.popoverView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial]];
+    self.popoverView.frame = CGRectMake(0, 0, 180, 44);
+    self.popoverView.layer.cornerRadius = 22;
+    self.popoverView.clipsToBounds = YES;
+    self.popoverView.layer.borderWidth = 0.5;
+    self.popoverView.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.2].CGColor;
+    
+    self.popoverView.center = CGPointMake(self.topCapsule.center.x, self.topCapsule.center.y + 40);
+    self.popoverView.alpha = 0;
+    self.popoverView.transform = CGAffineTransformMakeScale(0.4, 0.4);
+    [self addSubview:self.popoverView];
+    
+    // Quick Actions
+    NSArray *actions = @[@"FULL", @"SNAP", @"HIDE", @"CLOSE"];
+    CGFloat btnW = 180 / 4.0;
+    for (int i = 0; i < 4; i++) {
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+        btn.frame = CGRectMake(i * btnW, 0, btnW, 44);
+        [btn setTitle:actions[i] forState:UIControlStateNormal];
+        btn.titleLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightBold];
+        btn.tintColor = [UIColor whiteColor];
+        btn.tag = i;
+        [btn addTarget:self action:@selector(handlePopoverAction:) forControlEvents:UIControlEventTouchUpInside];
+        [self.popoverView.contentView addSubview:btn];
+    }
+    
+    [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
+        self.popoverView.alpha = 1.0;
+        self.popoverView.transform = CGAffineTransformIdentity;
+    } completion:nil];
+}
+
+- (void)hideControlPopover {
+    [UIView animateWithDuration:0.3 animations:^{
+        self.popoverView.alpha = 0;
+        self.popoverView.transform = CGAffineTransformMakeScale(0.4, 0.4);
+    } completion:^(BOOL finished) {
+        [self.popoverView removeFromSuperview];
+        self.popoverView = nil;
+    }];
+}
+
+- (void)handlePopoverAction:(UIButton *)sender {
+    [self hideControlPopover];
+    switch (sender.tag) {
+        case 0: // Full Screen
+            [self closeWindow];
+            [[UIApplication sharedApplication] launchApplicationWithIdentifier:self.bundleID suspended:NO];
+            break;
+        case 1: // Snap
+            {
+                CGRect screen = [UIScreen mainScreen].bounds;
+                UIEdgeInsets safe = UIEdgeInsetsMake(47, 10, 34, 10);
+                [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0 options:0 animations:^{
+                    self.frame = CGRectMake(safe.left, safe.top, (screen.size.width - safe.left - safe.right)/2.0 - 5, screen.size.height - safe.top - safe.bottom);
+                } completion:nil];
+                [self triggerCollisionImpulse];
+            }
+            break;
+        case 2: // Stash
+            {
+                [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0 options:0 animations:^{
+                    self.frame = CGRectMake(-self.frame.size.width + 4, self.frame.origin.y, self.frame.size.width, self.frame.size.height);
+                } completion:nil];
+                [self handlePan:nil]; 
+            }
+            break;
+        case 3: // Close
+            [self closeWindow];
+            break;
+    }
+}
+
+- (void)updateAdaptiveColor {
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         UIImage *icon = [UIImage _applicationIconImageForBundleIdentifier:self.bundleID format:10 scale:[UIScreen mainScreen].scale];
         UIColor *avgColor = CV3AverageColorFromImage(icon);
@@ -756,9 +928,11 @@ static NSMutableArray *floatingWindows = nil;
                 self.innerGlowLayer.borderWidth = 0.8;
                 self.stashGrabber.layer.borderColor = [self.adaptiveAppColor colorWithAlphaComponent:0.5].CGColor;
             }];
+            
+            [self startCapsuleBreathing];
         });
-        });
-        }
+    });
+}
 - (void)triggerCollisionImpulseAtPoint:(CGPoint)point {
     [CATransaction begin];
     [CATransaction setAnimationDuration:0.12];
@@ -1094,11 +1268,12 @@ static NSMutableArray *floatingWindows = nil;
         
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
-        // Distort hostContainerProxy based on movement
+        // Distort hostContainerProxy and topCapsule based on movement
         CGAffineTransform distort = CGAffineTransformMakeRotation(angle);
         distort = CGAffineTransformScale(distort, 1.0 + stretch, 1.0 - stretch * 0.5);
         distort = CGAffineTransformRotate(distort, -angle);
         self.hostContainerProxy.transform = CGAffineTransformConcat(self.hostContainerProxy.transform, distort);
+        self.topCapsule.transform = distort; // Weight feedback
         [CATransaction commit];
         
         // --- Magnetic Window Alignment ---
@@ -1160,6 +1335,7 @@ static NSMutableArray *floatingWindows = nil;
     if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
         [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:UIViewAnimationOptionCurveEaseInOut animations:^{
             self.transform = CGAffineTransformIdentity;
+            self.topCapsule.transform = CGAffineTransformIdentity;
             self.layer.shadowOpacity = 0.4;
             self.snapPreviewView.alpha = 0;
             
