@@ -1275,45 +1275,39 @@ static NSMutableArray *floatingWindows = nil;
     }
     
     if (gesture.state == UIGestureRecognizerStateChanged) {
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        
+        // 1. 优先更新窗口物理位置 (不延迟，不进入 Transaction，确保手感扎实)
         self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
         [gesture setTranslation:CGPointZero inView:nil];
         
-        // --- Inertial Fluid Refraction (Visual Only Fix) ---
+        // 2. 惯性畸变计算 (仅针对装饰件)
         CGFloat velMag = sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
-        CGFloat stretch = MIN(velMag / 2500.0, 0.12); 
+        CGFloat stretch = MIN(velMag / 3000.0, 0.08); // 调低强度，减少 UIVisualEffectView 的渲染压力
         CGFloat angle = atan2(velocity.y, velocity.x);
         
-        // 1. 基准缩放值 (由 bounds 决定) - 必须保持稳定
-        CGFloat scaleX = self.bounds.size.width / screen.size.width;
-        CGFloat scaleY = self.bounds.size.height / screen.size.height;
-        CGAffineTransform baseScale = CGAffineTransformMakeScale(scaleX, scaleY);
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
         
-        // 2. 惯性拉伸变换 (仅用于背景装饰)
+        // 3. 计算装饰件专用变换
         CGAffineTransform stretchTransform = CGAffineTransformIdentity;
         stretchTransform = CGAffineTransformRotate(stretchTransform, angle);
-        stretchTransform = CGAffineTransformScale(stretchTransform, 1.0 + stretch, 1.0 - (stretch * 0.4));
+        stretchTransform = CGAffineTransformScale(stretchTransform, 1.0 + stretch, 1.0 - (stretch * 0.3));
         stretchTransform = CGAffineTransformRotate(stretchTransform, -angle);
         
         // 核心修复：
-        // A. 内部画面 (App Content) 使用 baseScale，保持绝对平整、无扭曲
-        self.hostContainerProxy.transform = baseScale;
-        
-        // B. 玻璃背景、装饰胶囊、外框层应用 stretchTransform，产生“液态玻璃”在流动的错觉
+        // A. 玻璃背景、装饰胶囊应用 stretchTransform。
+        // B. 子图层 (InnerGlow, Cyan, Magenta) 由于已嵌套，会自动跟随背景形变，禁止重复设置 transform 导致“飞出”
         self.glassBackdrop.transform = stretchTransform;
         self.topCapsule.transform = stretchTransform; 
         
-        // 为图层应用错切律动
-        CATransform3D layerStretch = CATransform3DMakeAffineTransform(stretchTransform);
-        self.innerGlowLayer.transform = layerStretch;
-        self.cyanLayer.transform = layerStretch;
-        self.magentaLayer.transform = layerStretch;
+        // C. 画面内容保持基准缩放，绝不参与惯性形变，确保文字清晰且不产生“残影”
+        CGRect screen = [UIScreen mainScreen].bounds;
+        CGFloat scaleX = self.bounds.size.width / screen.size.width;
+        CGFloat scaleY = self.bounds.size.height / screen.size.height;
+        self.hostContainerProxy.transform = CGAffineTransformMakeScale(scaleX, scaleY);
 
         [CATransaction commit];
         
-        // --- Magnetic Window Alignment (仅位移对齐，不改变大小) ---
+        // --- Magnetic Window Alignment (仅位移对齐) ---
         CGFloat magnetThreshold = 30.0;
         for (CV3FloatingAppWindow *other in floatingWindows) {
             if (other == self || other.isStashed || ![other isKindOfClass:[CV3FloatingAppWindow class]]) continue;
