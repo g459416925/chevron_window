@@ -346,6 +346,21 @@ static void CV3LogToFile(NSString *format, ...) {
 @implementation CV3RootViewController
 @end
 
+#pragma mark - Window Level Constants
+struct {
+    CGFloat maxBound;
+    CGFloat floatingApp;
+    CGFloat panel;
+    CGFloat background;
+    CGFloat keyboard;
+} static const kChevronWindowLevels = {
+    .maxBound = 2100.0,
+    .floatingApp = 2099.5,
+    .panel = 2099.0,
+    .background = -1.0,
+    .keyboard = 10000.0
+};
+
 #pragma mark - Layout & Physics Constants
 struct {
     CGFloat panelW;
@@ -504,7 +519,7 @@ static NSMutableArray *floatingWindows = nil;
         self.frame = CGRectMake(0, 0, minW, minH);
         self.bundleID = bundleID;
         self.center = center;
-        self.windowLevel = 2101; // 覆盖在面板之上
+        self.windowLevel = kChevronWindowLevels.floatingApp; // 覆盖在面板之上，但不超过控制中心 (kChevronWindowLevels.maxBound)
         self.backgroundColor = [UIColor clearColor];
         
         // 动态阴影容器
@@ -722,11 +737,52 @@ static NSMutableArray *floatingWindows = nil;
     });
 }
 
+- (void)refreshHostViewPresentation {
+    if (!self.targetScene || !self.hostView) return;
+    
+    @try {
+        // 1. 强制重置渲染上下文，这是防止白屏/模糊层的核心
+        UIScenePresentationContext *context = [[%c(UIScenePresentationContext) alloc] _initWithDefaultValues];
+        if ([context respondsToSelector:@selector(setPresentedLayerTypes:)]) {
+            [context setPresentedLayerTypes:26]; 
+        }
+        if ([context respondsToSelector:@selector(setAppearanceStyle:)]) {
+            [context setAppearanceStyle:2];
+        }
+        if ([context respondsToSelector:@selector(setClipsToBounds:)]) {
+            [context setClipsToBounds:YES];
+        }
+        
+        if ([self.hostView respondsToSelector:@selector(_setPresentationContext:)]) {
+            [self.hostView performSelector:@selector(_setPresentationContext:) withObject:context];
+        }
+        
+        // 2. 确保容器层级可见，防止被系统动画剥离
+        self.hostView.alpha = 1.0;
+        self.hostView.hidden = NO;
+        
+        CV3LogToFile(@"[Debug] 已热刷新渲染上下文: %@", self.bundleID);
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Error] 热刷新渲染失败: %@", e);
+    }
+}
+
 - (void)enforceSceneForegroundState {
     if (!self.targetScene) return;
     
     // 强制 Scene 状态，防止被系统挂起导致画面黑屏
     @try {
+        // 核心修复：检查 Scene 是否已经失效（例如系统回收），如果失效则重新加载
+        if ([self.targetScene respondsToSelector:@selector(isValid)] && ![(id)self.targetScene isValid]) {
+            CV3LogToFile(@"[Recovery] 检测到 Scene 已经失效 (%@)，准备重新拉起...", self.bundleID);
+            if (self.hostView) {
+                [self.hostView removeFromSuperview];
+                self.hostView = nil;
+            }
+            [self loadAppScene];
+            return;
+        }
+
         FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
         BOOL needsUpdate = NO;
         
@@ -757,6 +813,22 @@ static NSMutableArray *floatingWindows = nil;
                 [self.targetScene _setContentState:2]; 
             }
         }
+
+        // 核心修复：即使 Settings 没变，也要重新激活 Context，防止图层树被系统断开导致白屏模糊
+        if (self.hostView && [self.hostView respondsToSelector:@selector(_setPresentationContext:)]) {
+            UIScenePresentationContext *context = [[%c(UIScenePresentationContext) alloc] _initWithDefaultValues];
+            if ([context respondsToSelector:@selector(setPresentedLayerTypes:)]) {
+                [context setPresentedLayerTypes:26]; // 强制包含所有图层类型
+            }
+            if ([context respondsToSelector:@selector(setAppearanceStyle:)]) {
+                [context setAppearanceStyle:2];
+            }
+            if ([context respondsToSelector:@selector(setClipsToBounds:)]) {
+                [context setClipsToBounds:YES];
+            }
+            [self.hostView performSelector:@selector(_setPresentationContext:) withObject:context];
+        }
+
     } @catch (NSException *e) {}
 }
 
@@ -1342,6 +1414,7 @@ static NSMutableArray *floatingWindows = nil;
                         hostedView.layer.masksToBounds = YES;
                         
                         self.hostView = hostedView;
+                        self.hostView.accessibilityIdentifier = @"ChevronV3Host";
                         [self.hostContainerProxy addSubview:hostedView]; // Fix: Add to proxy
                         [self bringSubviewToFront:self.dragHandle];
                         [self bringSubviewToFront:self.resizeHandle];
@@ -1554,8 +1627,8 @@ static NSMutableArray *floatingWindows = nil;
 }
 
 - (void)restoreFromStash {
-    // 强制提升 WindowLevel 并置顶，确保成为主焦点
-    self.windowLevel = 2101; 
+    // 强制提升 WindowLevel 并置顶，确保成为主焦点，但不能超过控制中心 (kChevronWindowLevels.maxBound)
+    self.windowLevel = kChevronWindowLevels.floatingApp; 
     [self makeKeyAndVisible];
     [self setWindowFocused:YES];
 
@@ -4530,8 +4603,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
 - (void)applyAdaptiveLevel {
     // 建议：层级对齐 (Level Alignment)
-    // 根据 GEMINI.md 规范，锁定在 2099 以确保覆盖所有第三方 App，且保持在控制中心（2100）之下
-    CGFloat targetLevel = 2099.0; 
+    // 根据 GEMINI.md 规范，锁定在 panel (2099) 以确保覆盖所有第三方 App，且保持在控制中心之下
+    CGFloat targetLevel = kChevronWindowLevels.panel; 
     
     if (self.windowLevel != targetLevel) {
         self.windowLevel = targetLevel;
@@ -4581,7 +4654,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         CV3LogToFile(@"[Debug] 拦截到非法的 unhide 请求 (当前处于系统压制状态)");
         [super setHidden:YES];
         self.alpha = 0;
-        self.windowLevel = -1; // 降到最低层
+        self.windowLevel = kChevronWindowLevels.background; // 降到最低层
         return;
     }
     
@@ -4817,7 +4890,7 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                 } else {
                     cv3_keyboardWindow = [[CV3PassthroughWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
                 }
-                cv3_keyboardWindow.windowLevel = 10000;
+                cv3_keyboardWindow.windowLevel = kChevronWindowLevels.keyboard;
                 cv3_keyboardWindow.backgroundColor = [UIColor clearColor];
                 cv3_keyboardWindow.hidden = NO;
             }
@@ -4830,6 +4903,23 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
         }
     }
 }
+
+// 核心修复：防止系统在过渡期间将宿主容器透明化
+- (void)setAlpha:(CGFloat)alpha {
+    if (alpha < 1.0 && [self.accessibilityIdentifier isEqualToString:@"ChevronV3Host"]) {
+        %orig(1.0);
+        return;
+    }
+    %orig(alpha);
+}
+
+- (void)setHidden:(BOOL)hidden {
+    if (hidden && [self.accessibilityIdentifier isEqualToString:@"ChevronV3Host"]) {
+        %orig(NO);
+        return;
+    }
+    %orig(hidden);
+}
 %end
 
 %hook FBScene
@@ -4838,7 +4928,22 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
     if (floatingWindows) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if ([self.identifier containsString:win.bundleID] && !win.hidden) {
+                // 如果场景已经无效，立刻关闭窗口并移除，防止显示白屏
+                if ([self respondsToSelector:@selector(isValid)] && ![(id)self isValid]) {
+                    CV3LogToFile(@"[Recovery] 检测到 Scene 已彻底失效 (%@)，触发自动关闭...", win.bundleID);
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [win closeWindow];
+                        [win removeFromSuperview];
+                    });
+                    return;
+                }
+                
                 %orig(2); // 强行拦截为 2 (Ready 状态)
+                
+                // 核心优化：直接请求 HostView 刷新渲染上下文，不需要完全重拉 App
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [win refreshHostViewPresentation];
+                });
                 return;
             }
         }
@@ -4851,6 +4956,16 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
         for (CV3FloatingAppWindow *win in floatingWindows) {
             // 只保护未隐藏的分屏窗口
             if ([self.identifier containsString:win.bundleID] && !win.hidden) {
+                
+                // 如果场景已经无效，触发关闭
+                if ([self respondsToSelector:@selector(isValid)] && ![(id)self isValid]) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [win closeWindow];
+                        [win removeFromSuperview];
+                    });
+                    return;
+                }
+
                 // 强制将 settings 转为 mutable，从而合法修改属性
                 id mutableSettings = [arg1 mutableCopy];
                 if ([mutableSettings respondsToSelector:@selector(setForeground:)]) {
@@ -4860,9 +4975,13 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                     [mutableSettings setBackgrounded:NO];
                 }
                 
-                // 移除 setFrame 覆写，保持原生全屏分辨率
-                
                 %orig(mutableSettings, arg2);
+                
+                // 核心优化：触发热刷新而非重载 App
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [win refreshHostViewPresentation];
+                });
+                
                 return;
             }
         }
