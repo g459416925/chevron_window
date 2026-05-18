@@ -300,11 +300,7 @@ static void CV3LogToFile(NSString *format, ...) {
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
 
-    // 过滤日志，只记录包含“尺寸已同步”或特定分辨率相关的日志
-    if (![message containsString:@"尺寸已同步"] && ![message containsString:@"分辨率"]) {
-        return;
-    }
-
+    // 移除之前的特定关键词过滤，允许记录所有关键事件
     // 立即输出到系统日志，作为第一层保障
     NSLog(@"[ChevronV3] %@", message);
 
@@ -322,9 +318,9 @@ static void CV3LogToFile(NSString *format, ...) {
             if (![fm fileExistsAtPath:logPath]) {
                 [fm createFileAtPath:logPath contents:nil attributes:nil];
             } else {
-                // 建议3：日志轮转 (Log Rotation) - 限制在 5MB 以内
+                // 日志轮转 (Log Rotation) - 限制在 10MB 以内，支持更详尽的追踪
                 unsigned long long fileSize = [[fm attributesOfItemAtPath:logPath error:nil] fileSize];
-                if (fileSize > 5 * 1024 * 1024) {
+                if (fileSize > 10 * 1024 * 1024) {
                     [fm removeItemAtPath:logPath error:nil];
                     [fm createFileAtPath:logPath contents:nil attributes:nil];
                 }
@@ -334,8 +330,7 @@ static void CV3LogToFile(NSString *format, ...) {
             if (handle) {
                 [handle seekToEndOfFile];
                 NSString *timestamp = [NSDateFormatter localizedStringFromDate:[NSDate date] dateStyle:NSDateFormatterShortStyle timeStyle:NSDateFormatterMediumStyle];
-                NSString *finalLog = [NSString stringWithFormat:@"[%@] [Host] %@\n", timestamp, message];
-                // 确保使用 UTF-8 编码写入文件
+                NSString *finalLog = [NSString stringWithFormat:@"[%@] %@\n", timestamp, message];
                 [handle writeData:[finalLog dataUsingEncoding:NSUTF8StringEncoding]];
                 [handle closeFile];
             }
@@ -506,6 +501,26 @@ static NSMutableArray *floatingWindows = nil;
 }
 @end
 
+%hook UIWindow
+- (NSString *)_role {
+    if ([self isKindOfClass:[CV3FloatingAppWindow class]]) {
+        return @"SBWindowRoleFloatingCanHostLaunchpad";
+    }
+    return %orig;
+}
+
+- (void)setAlpha:(CGFloat)alpha {
+    if ([self isKindOfClass:[CV3FloatingAppWindow class]]) {
+        CV3FloatingAppWindow *win = (CV3FloatingAppWindow *)self;
+        if (alpha < 1.0 && !win.isClosing && !win.isStashed) {
+            %orig(1.0);
+            return;
+        }
+    }
+    %orig(alpha);
+}
+%end
+
 @implementation CV3FloatingAppWindow
 - (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene {
     if (windowScene) {
@@ -523,6 +538,7 @@ static NSMutableArray *floatingWindows = nil;
         self.center = center;
         self.windowLevel = kChevronWindowLevels.floatingApp; // 覆盖在面板之上，但不超过控制中心 (kChevronWindowLevels.maxBound)
         self.backgroundColor = [UIColor clearColor];
+        self.alpha = 1.0;
         
         // 动态阴影容器
         self.layer.shadowColor = [UIColor blackColor].CGColor;
@@ -724,45 +740,59 @@ static NSMutableArray *floatingWindows = nil;
 - (void)setHidden:(BOOL)hidden {
     // 核心修复：禁止系统强制隐藏窗口（除非是明确的关闭操作或 Stash）
     if (hidden && !self.isStashed && !self.isClosing) {
-        CV3LogToFile(@"[Persistence] 拦截到系统对窗口 (%@) 的隐藏请求", self.bundleID);
+        CV3LogToFile(@"[Visibility] 拦截系统隐藏请求: %@", self.bundleID);
         [super setHidden:NO];
         [self attachToCurrentActiveScene];
         return;
     }
+    CV3LogToFile(@"[Visibility] 窗口 Hidden 状态变更 -> %d: %@", hidden, self.bundleID);
     [super setHidden:hidden];
 }
 
 - (void)attachToCurrentActiveScene {
-    // 核心优化：移除异步延迟，改为绝对同步挂载。
-    // 在系统手势期间，哪怕 1ms 的延迟也会导致画面被系统剥离。
+    CV3LogToFile(@"[Scene] 开始尝试同步挂载场景: %@", self.bundleID);
     @try {
         UIWindowScene *targetScene = nil;
         
-        // 1. 优先获取 SpringBoard 核心主场景 (最稳定，不随 App 切换消失)
+        // 1. 终极优先：获取 SpringBoard 核心主场景 (SBWindowSceneSessionRoleMain)
         if ([NSClassFromString(@"SBWindowScene") respondsToSelector:@selector(mainDisplayWindowScene)]) {
             targetScene = [NSClassFromString(@"SBWindowScene") performSelector:@selector(mainDisplayWindowScene)];
         }
         
-        // 2. 如果主场景不可用，才尝试寻找当前活跃场景 (针对某些特殊手势状态)
+        // 2. 备选方案：遍历场景并严格过滤非显示角色
         if (!targetScene) {
             for (UIScene *scene in [[UIApplication sharedApplication].connectedScenes allObjects]) {
-                if ([scene isKindOfClass:[UIWindowScene class]] && scene.activationState == UISceneActivationStateForegroundActive) {
-                    targetScene = (UIWindowScene *)scene;
-                    break;
+                if ([scene isKindOfClass:[UIWindowScene class]]) {
+                    UIWindowScene *ws = (UIWindowScene *)scene;
+                    NSString *role = ws.session.role;
+                    
+                    // 核心修正：严格排除灵动岛相关的幕帘场景
+                    // 这些场景在上滑 Home 条时会活跃，但会导致我们的窗口被系统优化掉
+                    if ([role containsString:@"Aperture"] || [role containsString:@"Curtain"]) {
+                        continue;
+                    }
+                    
+                    if (ws.activationState == UISceneActivationStateForegroundActive) {
+                        targetScene = ws;
+                        break;
+                    }
                 }
             }
         }
         
         // 3. 强制同步场景挂载。
         if (targetScene && (self.windowScene != targetScene || !self.windowScene)) {
-            CV3LogToFile(@"[Persistence] 实时同步挂载窗口 (%@) 至场景: %@", self.bundleID, targetScene);
+            NSString *role = targetScene.session.role ?: @"Unknown";
+            CV3LogToFile(@"[Scene] 成功将窗口 (%@) 挂载至主场景: %@ (Role: %@)", self.bundleID, targetScene, role);
             self.windowScene = targetScene;
             [self setHidden:NO];
             [self setNeedsLayout];
             [self layoutIfNeeded];
+        } else if (!targetScene) {
+            CV3LogToFile(@"[Scene] 警告：未能找到可用的显示级 targetScene: %@", self.bundleID);
         }
         
-        // 4. 强制维持内部 App 场景的活跃状态
+        // 4. 无论如何，强制维持内部 App 场景的活跃状态
         [self enforceSceneForegroundState];
     } @catch (NSException *e) {
         CV3LogToFile(@"[Error] attachToCurrentActiveScene 异常: %@", e);
@@ -770,9 +800,13 @@ static NSMutableArray *floatingWindows = nil;
 }
 
 - (void)refreshHostViewPresentation {
-    if (!self.targetScene || !self.hostView) return;
+    if (!self.targetScene || !self.hostView) {
+        CV3LogToFile(@"[Render] 跳过热刷新，Scene 或 HostView 为空: %@", self.bundleID);
+        return;
+    }
     
     @try {
+        CV3LogToFile(@"[Render] 执行渲染上下文热刷新: %@", self.bundleID);
         // 1. 强制重置渲染上下文，这是防止白屏/模糊层的核心
         UIScenePresentationContext *context = [[%c(UIScenePresentationContext) alloc] _initWithDefaultValues];
         if ([context respondsToSelector:@selector(setPresentedLayerTypes:)]) {
@@ -793,7 +827,6 @@ static NSMutableArray *floatingWindows = nil;
         self.hostView.alpha = 1.0;
         self.hostView.hidden = NO;
         
-        CV3LogToFile(@"[Debug] 已热刷新渲染上下文: %@", self.bundleID);
     } @catch (NSException *e) {
         CV3LogToFile(@"[Error] 热刷新渲染失败: %@", e);
     }
@@ -807,7 +840,7 @@ static NSMutableArray *floatingWindows = nil;
         BOOL sceneValid = [self.targetScene respondsToSelector:@selector(isValid)] ? [(id)self.targetScene isValid] : YES;
         
         if (!sceneValid) {
-            CV3LogToFile(@"[Recovery] 检测到 Scene 已经失效或断开 (%@)，执行重连逻辑...", self.bundleID);
+            CV3LogToFile(@"[Recovery] 场景失效，触发重连机制: %@", self.bundleID);
             if (self.hostView) {
                 [self.hostView removeFromSuperview];
                 self.hostView = nil;
@@ -826,6 +859,7 @@ static NSMutableArray *floatingWindows = nil;
         } @catch (NSException *e) {}
 
         if (currentBackgrounded) {
+            CV3LogToFile(@"[Lifecycle] 检测到 App 被设为 Backgrounded，强制拉回: %@", self.bundleID);
             [settings setBackgrounded:NO];
             needsUpdate = YES;
         }
@@ -833,6 +867,7 @@ static NSMutableArray *floatingWindows = nil;
         @try {
             BOOL currentForeground = [[settings valueForKey:@"foreground"] boolValue];
             if (!currentForeground) {
+                CV3LogToFile(@"[Lifecycle] 检测到 App 被设为非 Foreground，强制拉回: %@", self.bundleID);
                 [settings setForeground:YES];
                 needsUpdate = YES;
             }
@@ -843,7 +878,6 @@ static NSMutableArray *floatingWindows = nil;
             if ([self.targetScene respondsToSelector:@selector(_setContentState:)]) {
                 [self.targetScene _setContentState:2]; 
             }
-            CV3LogToFile(@"[Recovery] 已强制同步 Scene 前台状态: %@", self.bundleID);
         }
 
         // 重新激活 Context，防止系统掉线
@@ -4899,13 +4933,30 @@ static NSTimeInterval lastLogTime = 0;
 %end
 
 %hook SBMainWorkspace
+- (void)transaction:(id)arg1 willBeginLayoutTransitionWithContext:(id)arg2 {
+    CV3LogToFile(@"[Workspace] Layout 转换即将开始...");
+    %orig;
+    // 核心：在转换全周期高频维持分屏 App 的活跃度
+    if (floatingWindows) {
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if ([win isKindOfClass:[CV3FloatingAppWindow class]] && !win.isClosing) {
+                [win attachToCurrentActiveScene];
+                [win refreshHostViewPresentation];
+                CV3LogToFile(@"[Workspace] 转换启动瞬间锁定渲染: %@", win.bundleID);
+            }
+        }
+    }
+}
+
 - (void)executeTransitionRequest:(id)arg1 {
+    CV3LogToFile(@"[Workspace] 收到执行转换请求: %@", arg1);
     if (floatingWindows && floatingWindows.count > 0) {
         @try {
-            // 核心：监控转换请求。如果系统试图在切换 App 时清理我们的托管 App，后续 FBScene 的 Hook 会确保其 Settings 不变。
             for (CV3FloatingAppWindow *win in floatingWindows) {
                 if (win.isClosing) continue;
-                CV3LogToFile(@"[Workspace] 手势转换中，维持托管 App 生命周期: %@", win.bundleID);
+                // 转换期间强制重置渲染上下文，防止系统卸载
+                [win refreshHostViewPresentation];
+                CV3LogToFile(@"[Workspace] 过渡发起，强制预热渲染管道: %@", win.bundleID);
             }
         } @catch (NSException *e) {}
     }
@@ -4914,21 +4965,22 @@ static NSTimeInterval lastLogTime = 0;
 
 - (void)workspace:(id)arg1 didExecuteTransitionRequest:(id)arg2 {
     %orig;
-    if (sharedWindow) {
-        [sharedWindow attachToCurrentActiveScene];
-
-        // 核心修复：在上滑 Home 条等场景转换后，强制遍历所有分屏窗口进行场景重挂载
-        // 这一步是解决“空白画面”的关键，因为它处理了 UIScene 级别的生命周期流转
+    CV3LogToFile(@"[Workspace] 转换请求已执行完毕，执行最终渲染对齐");
+    if (floatingWindows) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if ([win isKindOfClass:[CV3FloatingAppWindow class]] && !win.isClosing) {
-                dispatch_async(dispatch_get_main_queue(), ^{
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     [win attachToCurrentActiveScene];
                     [win refreshHostViewPresentation];
+                    CV3LogToFile(@"[Workspace] 转换后延迟对齐完成: %@", win.bundleID);
                 });
             }
         }
+    }
 
-        // 尝试获取当前活跃应用的 Bundle ID 以进行取色
+    // 恢复对主窗口的场景同步及取色逻辑
+    if (sharedWindow) {
+        [sharedWindow attachToCurrentActiveScene];
         @try {
             id activeItem = nil;
             if ([self respondsToSelector:@selector(activeDisplayItem)]) {
@@ -5089,6 +5141,7 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
 // 核心修复：防止系统在过渡期间将宿主容器透明化
 - (void)setAlpha:(CGFloat)alpha {
     if (alpha < 1.0 && [self.accessibilityIdentifier isEqualToString:@"ChevronV3Host"]) {
+        CV3LogToFile(@"[Container] 拦截系统透明化请求: alpha=%.2f", alpha);
         %orig(1.0);
         return;
     }
@@ -5097,6 +5150,7 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
 
 - (void)setHidden:(BOOL)hidden {
     if (hidden && [self.accessibilityIdentifier isEqualToString:@"ChevronV3Host"]) {
+        CV3LogToFile(@"[Container] 拦截系统隐藏请求");
         %orig(NO);
         return;
     }
@@ -5150,6 +5204,7 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
     if (floatingWindows) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if ([self.identifier containsString:win.bundleID] && !win.isClosing) {
+                CV3LogToFile(@"[FBScene] 捕捉到 Settings 更新请求: %@", win.bundleID);
                 id mutableSettings = [arg1 mutableCopy];
                 BOOL modified = NO;
 
@@ -5165,11 +5220,13 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                 // 核心：iOS 16 关键拦截。防止在切换 App 时被标记为不可见。
                 @try {
                     if ([mutableSettings respondsToSelector:@selector(setOccluded:)]) {
+                        CV3LogToFile(@"[FBScene] 拦截到 Occluded 请求 -> YES，强制修正为 NO: %@", win.bundleID);
                         [mutableSettings setValue:@NO forKey:@"occluded"];
                         modified = YES;
                     }
                     // 增加对可见性标志的强力拦截
                     if ([mutableSettings respondsToSelector:@selector(setVisibility:)]) {
+                        CV3LogToFile(@"[FBScene] 拦截到 Visibility 变更请求，强制修正为 2: %@", win.bundleID);
                         [mutableSettings setValue:@2 forKey:@"visibility"]; // 2 通常代表完全可见
                         modified = YES;
                     }
@@ -5181,14 +5238,81 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                     %orig(arg1, arg2);
                 }
                 
-                dispatch_async(dispatch_get_main_queue(), ^{
+                if ([NSThread isMainThread]) {
                     [win refreshHostViewPresentation];
-                });
+                } else {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [win refreshHostViewPresentation];
+                    });
+                }
                 return;
             }
         }
     }
     %orig;
+}
+
+- (void)updateSettings:(id)arg1 withTransitionContext:(id)arg2 completion:(id)arg3 {
+    if (floatingWindows) {
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if ([self.identifier containsString:win.bundleID] && !win.isClosing) {
+                CV3LogToFile(@"[FBScene] 捕捉到 Settings 更新请求 (带 completion): %@", win.bundleID);
+                id mutableSettings = [arg1 mutableCopy];
+                BOOL modified = NO;
+
+                if ([mutableSettings respondsToSelector:@selector(setForeground:)]) {
+                    [mutableSettings setForeground:YES];
+                    modified = YES;
+                }
+                if ([mutableSettings respondsToSelector:@selector(setBackgrounded:)]) {
+                    [mutableSettings setBackgrounded:NO];
+                    modified = YES;
+                }
+                
+                @try {
+                    if ([mutableSettings respondsToSelector:@selector(setOccluded:)]) {
+                        [mutableSettings setValue:@NO forKey:@"occluded"];
+                        modified = YES;
+                    }
+                    if ([mutableSettings respondsToSelector:@selector(setVisibility:)]) {
+                        [mutableSettings setValue:@2 forKey:@"visibility"];
+                        modified = YES;
+                    }
+                } @catch (NSException *e) {}
+
+                if (modified) {
+                    %orig(mutableSettings, arg2, arg3);
+                } else {
+                    %orig(arg1, arg2, arg3);
+                }
+                
+                if ([NSThread isMainThread]) {
+                    [win refreshHostViewPresentation];
+                } else {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [win refreshHostViewPresentation];
+                    });
+                }
+                return;
+            }
+        }
+    }
+    %orig;
+}
+
+- (void)_setContentState:(NSInteger)arg1 {
+    if (floatingWindows) {
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if ([self.identifier containsString:win.bundleID] && !win.isClosing) {
+                if (arg1 != 2) {
+                    CV3LogToFile(@"[FBScene] 拦截到 contentState 降级 -> %ld，强制恢复为 2: %@", (long)arg1, win.bundleID);
+                    arg1 = 2;
+                }
+                break;
+            }
+        }
+    }
+    %orig(arg1);
 }
 %end
 
