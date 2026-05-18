@@ -468,11 +468,13 @@ static NSMutableArray *floatingWindows = nil;
 
 // Pro Enhancements
 @property (nonatomic, assign) BOOL isFocused;
-@property (nonatomic, assign) BOOL isClosing; 
+@property (nonatomic, assign) BOOL isClosing;
 @property (nonatomic, assign) CGPoint lastVelocity;
 @property (nonatomic, strong) UIView *crystalPreviewContainer;
 @property (nonatomic, strong) UIView *splashView;
 @property (nonatomic, strong) UIImageView *largeSplashIcon;
+@property (nonatomic, assign) UIInterfaceOrientation targetOrientation;
+@property (nonatomic, assign) CGAffineTransform baseRotationTransform;
 
 // Hyper-Capsule Evolution
 @property (nonatomic, strong) CAGradientLayer *capsuleGlowLayer;
@@ -486,6 +488,7 @@ static NSMutableArray *floatingWindows = nil;
 - (void)showControlPopover;
 - (void)startCapsuleBreathing;
 - (void)restoreFromStash;
+- (void)applyCurrentTransformWithScale:(CGFloat)scale;
 @end
 
 // --- Custom Capsule View with Expanded Hit Area ---
@@ -677,13 +680,13 @@ static NSMutableArray *floatingWindows = nil;
         UITapGestureRecognizer *restoreTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleRestoreTap:)];
         [self.stashGrabber addGestureRecognizer:restoreTap];
 
-        UIPanGestureRecognizer *restorePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleRestorePan:)];
+        UIPanGestureRecognizer *restorePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleStashPan:)];
         [self.stashGrabber addGestureRecognizer:restorePan];
 
-        // 核心功能：长按移动图标位置
-        UILongPressGestureRecognizer *stashMove = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleStashMove:)];
-        stashMove.minimumPressDuration = 0.5;
-        [self.stashGrabber addGestureRecognizer:stashMove];
+        // 核心功能：长按结束分屏
+        UILongPressGestureRecognizer *stashClose = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleStashLongPress:)];
+        stashClose.minimumPressDuration = 0.8; 
+        [self.stashGrabber addGestureRecognizer:stashClose];
 
         self.stashGrabber.userInteractionEnabled = YES;
         // Snap Preview View (Hidden by default)
@@ -900,7 +903,7 @@ static NSMutableArray *floatingWindows = nil;
     
     [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
         if (focused) {
-            self.transform = CGAffineTransformMakeScale(1.02, 1.02);
+            [self applyCurrentTransformWithScale:1.02];
             self.layer.shadowOpacity = 0.7;
             self.layer.shadowRadius = 30.0;
             self.hostContainerProxy.alpha = 1.0;
@@ -914,7 +917,7 @@ static NSMutableArray *floatingWindows = nil;
             pulse.repeatCount = HUGE_VALF;
             [self.innerGlowLayer addAnimation:pulse forKey:@"focusPulse"];
         } else {
-            self.transform = CGAffineTransformIdentity;
+            [self applyCurrentTransformWithScale:1.0];
             self.layer.shadowOpacity = 0.4;
             self.layer.shadowRadius = 20.0;
             self.hostContainerProxy.alpha = 0.85; // Dim inactive windows
@@ -1254,8 +1257,48 @@ static NSMutableArray *floatingWindows = nil;
     [self triggerCollisionImpulseAtPoint:self.center];
 }
 
+- (void)applyCurrentTransformWithScale:(CGFloat)scale {
+    CGAffineTransform transform = self.baseRotationTransform;
+    if (scale != 1.0) {
+        transform = CGAffineTransformScale(transform, scale, scale);
+    }
+    self.transform = transform;
+}
+
 - (void)layoutSubviews {
     if (self.isStashed) return; // 核心：隐藏状态下跳过布局更新，防止干扰图标状态
+
+    // 核心强制规范：从当前场景实时探测界面方向
+    if (self.windowScene) {
+        UIInterfaceOrientation currentOrientation = self.windowScene.interfaceOrientation;
+        if (currentOrientation != UIInterfaceOrientationUnknown && currentOrientation != self.targetOrientation) {
+            self.targetOrientation = currentOrientation;
+            CV3LogToFile(@"[Orientation] 分屏窗口 (%@) 自动检测到方向变更: %ld", self.bundleID, (long)currentOrientation);
+        }
+    }
+
+    UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+    CGAffineTransform targetRotation = CGAffineTransformIdentity;
+    BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
+
+    switch (orientation) {
+        case UIInterfaceOrientationLandscapeLeft: targetRotation = CGAffineTransformMakeRotation(-M_PI_2); break;
+        case UIInterfaceOrientationLandscapeRight: targetRotation = CGAffineTransformMakeRotation(M_PI_2); break;
+        case UIInterfaceOrientationPortraitUpsideDown: targetRotation = CGAffineTransformMakeRotation(M_PI); break;
+        default: targetRotation = CGAffineTransformIdentity; break;
+    }
+
+    self.baseRotationTransform = targetRotation;
+
+    BOOL currentBoundsIsLandscape = self.bounds.size.width > self.bounds.size.height;
+    if (isLandscape && !currentBoundsIsLandscape) {
+        self.bounds = CGRectMake(0, 0, self.bounds.size.height, self.bounds.size.width);
+    } else if (!isLandscape && currentBoundsIsLandscape) {
+        self.bounds = CGRectMake(0, 0, self.bounds.size.height, self.bounds.size.width);
+    }
+
+    [self applyCurrentTransformWithScale:self.isFocused ? 1.02 : 1.0];
+
     [super layoutSubviews];
     CGFloat w = self.bounds.size.width;
     CGFloat h = self.bounds.size.height;
@@ -1336,12 +1379,28 @@ static NSMutableArray *floatingWindows = nil;
         CGFloat scaleX = w / screenBounds.size.width;
         CGFloat scaleY = h / screenBounds.size.height;
         
-        // 动态同步场景分辨率：确保 App 始终以全屏分辨率渲染，由宿主进行物理缩合
+        // 动态同步场景分辨率与方向：确保 App 始终以全屏分辨率渲染，由宿主进行物理缩合
         if (self.targetScene) {
             @try {
                 FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
+                BOOL needsUpdate = NO;
                 if (!CGRectEqualToRect(settings.frame, screenBounds)) {
                     [settings setFrame:screenBounds];
+                    needsUpdate = YES;
+                }
+                
+                // 核心：强制同步场景方向，确保内部 App 画面跟随旋转
+                if ([settings respondsToSelector:@selector(setInterfaceOrientation:)]) {
+                    [settings performSelector:@selector(setInterfaceOrientation:) withObject:@(orientation)];
+                    needsUpdate = YES;
+                } else {
+                    @try {
+                        [settings setValue:@(orientation) forKey:@"interfaceOrientation"];
+                        needsUpdate = YES;
+                    } @catch (NSException *e) {}
+                }
+
+                if (needsUpdate) {
                     [self.targetScene updateSettings:settings withTransitionContext:nil];
                 }
             } @catch (NSException *e) {}
@@ -1751,96 +1810,75 @@ static NSMutableArray *floatingWindows = nil;
     }
 }
 
-- (void)handleRestorePan:(UIPanGestureRecognizer *)gesture {
+- (void)handleStashLongPress:(UILongPressGestureRecognizer *)gesture {
+    if (!self.isStashed) return;
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
+        [gen impactOccurred];
+        
+        [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:0 animations:^{
+            self.transform = CGAffineTransformMakeScale(0.01, 0.01);
+            self.alpha = 0;
+        } completion:^(BOOL finished) {
+            [self closeWindow];
+        }];
+    }
+}
+
+- (void)handleStashPan:(UIPanGestureRecognizer *)gesture {
     if (!self.isStashed) return;
     
     CGPoint translation = [gesture translationInView:nil];
     CGRect screen = [UIScreen mainScreen].bounds;
     
     if (gesture.state == UIGestureRecognizerStateBegan) {
-        // 无需额外操作
-    } else if (gesture.state == UIGestureRecognizerStateChanged) {
-        CGRect currentFrame = self.frame;
-        if (self.stashedSide == 1) { // Left
-            CGFloat delta = MAX(0, translation.x);
-            currentFrame.origin.x = (-self.preStashFrame.size.width + 4) + delta;
-        } else { // Right
-            CGFloat delta = MIN(0, translation.x);
-            currentFrame.origin.x = (screen.size.width - 4) + delta;
-        }
-        self.frame = currentFrame;
-    } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
-        CGPoint velocity = [gesture velocityInView:nil];
-        BOOL shouldRestore = NO;
-        
-        if (self.stashedSide == 1) {
-            shouldRestore = (velocity.x > 500 || self.frame.origin.x > -self.frame.size.width / 2.0);
-        } else {
-            shouldRestore = (velocity.x < -500 || self.frame.origin.x < screen.size.width - self.frame.size.width / 2.0);
-        }
-        
-        if (shouldRestore) {
-            [self handleRestoreTap:nil];
-        } else {
-            // 弹回隐藏状态
-            [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:0 animations:^{
-                CGRect stashedFrame = self.frame;
-                if (self.stashedSide == 1) { // Left
-                    stashedFrame.origin.x = -self.frame.size.width + 44;
-                } else if (self.stashedSide == 2) { // Right
-                    stashedFrame.origin.x = screen.size.width - 44;
-                }
-                self.frame = stashedFrame;
-            } completion:nil];
-        }
-    }
-}
-
-- (void)handleStashMove:(UILongPressGestureRecognizer *)gesture {
-    if (!self.isStashed) return;
-    
-    CGPoint location = [gesture locationInView:nil];
-    CGRect screen = [UIScreen mainScreen].bounds;
-    
-    if (gesture.state == UIGestureRecognizerStateBegan) {
         [UIView animateWithDuration:0.2 animations:^{
-            self.transform = CGAffineTransformMakeScale(1.15, 1.15);
+            [self applyCurrentTransformWithScale:1.15];
             self.layer.shadowOpacity = 0.8;
             self.layer.shadowRadius = 15.0;
         }];
         UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
         [gen impactOccurred];
     } else if (gesture.state == UIGestureRecognizerStateChanged) {
-        // 允许自由拖动，但稍微增加阻尼
-        self.center = location;
+        // 核心修复：使用增量平移 (Incremental Translation) 替代绝对位置设置，解决“跳动”问题
+        self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
+        [gesture setTranslation:CGPointZero inView:nil];
     } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
         [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
-            self.transform = CGAffineTransformIdentity;
+            [self applyCurrentTransformWithScale:1.0];
             self.layer.shadowOpacity = 0.4;
             self.layer.shadowRadius = 5.0;
             
-            // 自动吸附至最近的侧边
-            BOOL isNearLeft = (self.center.x < screen.size.width / 2.0);
-            CGFloat targetX = isNearLeft ? 0 : screen.size.width - 44;
+            // 自由拖动位置：保持在安全区域内，但不强制吸附至侧边
+            UIWindow *keyWindow = nil;
+            if (@available(iOS 15.0, *)) {
+                keyWindow = self.windowScene.keyWindow;
+            }
+            UIEdgeInsets safeArea = keyWindow ? keyWindow.safeAreaInsets : UIEdgeInsetsMake(47, 0, 34, 0);
             
-            // 限制上下边界，防止被状态栏或 Home 条遮挡
-            CGFloat safeY = MAX(60.0, MIN(screen.size.height - 100.0, self.frame.origin.y));
+            CGRect frame = self.frame;
+            if (frame.origin.x < safeArea.left) frame.origin.x = safeArea.left;
+            if (frame.origin.y < safeArea.top) frame.origin.y = safeArea.top;
+            if (CGRectGetMaxX(frame) > screen.size.width - safeArea.right) frame.origin.x = screen.size.width - safeArea.right - frame.size.width;
+            if (CGRectGetMaxY(frame) > screen.size.height - safeArea.bottom) frame.origin.y = screen.size.height - safeArea.bottom - frame.size.height;
+            self.frame = frame;
             
-            self.frame = CGRectMake(targetX, safeY, 44, 44);
-            self.stashedSide = isNearLeft ? 1 : 2;
-            
-            // 重要：更新 preStashFrame 的 Y 轴，确保还原时位置与图标一致
+            // 重要：更新 preStashFrame，确保从当前图标位置还原
             CGRect psf = self.preStashFrame;
-            psf.origin.y = safeY + 22 - psf.size.height/2.0;
+            psf.origin.x = self.frame.origin.x + 22 - psf.size.width / 2.0;
+            psf.origin.y = self.frame.origin.y + 22 - psf.size.height / 2.0;
             self.preStashFrame = psf;
             
+            // 重新判定 stashedSide 以便堆叠逻辑参考 (以中线为界)
+            self.stashedSide = (self.center.x < screen.size.width / 2.0) ? 1 : 2;
+            
         } completion:^(BOOL finished) {
-            // 重新计算所有图标的堆叠，防止重叠
+            UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+            [gen impactOccurred];
+            
             for (CV3FloatingAppWindow *win in floatingWindows) {
                 if (win.isStashed) [win updateGrabberStack];
             }
-            UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-            [gen impactOccurred];
         }];
     }
 }
@@ -2040,6 +2078,7 @@ static NSMutableArray *floatingWindows = nil;
 @property (nonatomic, strong) UIImageView *draggedIconView;
 @property (nonatomic, strong) CV3AppInfo *draggedAppInfo;
 @property (nonatomic, assign) CGPoint dragStartCenter;
+@property (nonatomic, assign) CGPoint dragTouchOffset; // 新增：记录触碰点与图标中心的偏移量
 
 - (void)show;
 - (void)loadAppsAsync;
@@ -2989,8 +3028,13 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
             // 创建拖拽的浮动图标
             if (cell.iconView.image) {
                 self.draggedIconView = [[UIImageView alloc] initWithImage:cell.iconView.image];
-                self.draggedIconView.frame = [self convertRect:cell.iconView.bounds fromView:cell.iconView];
+                CGRect iconFrameInWindow = [self convertRect:cell.iconView.bounds fromView:cell.iconView];
+                self.draggedIconView.frame = iconFrameInWindow;
                 self.dragStartCenter = self.draggedIconView.center;
+                
+                // 核心修复：记录初始触碰偏移量，解决“跳动”问题
+                self.dragTouchOffset = CGPointMake(pointInWindow.x - self.dragStartCenter.x, pointInWindow.y - self.dragStartCenter.y);
+                
                 [self addSubview:self.draggedIconView];
                 
                 [UIView animateWithDuration:0.2 animations:^{
@@ -3002,7 +3046,8 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
         }
     } else if (gesture.state == UIGestureRecognizerStateChanged) {
         if (self.draggedIconView) {
-            self.draggedIconView.center = pointInWindow;
+            // 应用偏移量，使图标跟随手指但保持初始抓取点
+            self.draggedIconView.center = CGPointMake(pointInWindow.x - self.dragTouchOffset.x, pointInWindow.y - self.dragTouchOffset.y);
         }
     } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
         // 恢复 CollectionView 滚动
@@ -3671,6 +3716,15 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 - (void)layoutSubviews {
     [super layoutSubviews];
     
+    // 核心强制规范：从当前场景实时探测界面方向
+    if (self.windowScene) {
+        UIInterfaceOrientation currentOrientation = self.windowScene.interfaceOrientation;
+        if (currentOrientation != UIInterfaceOrientationUnknown && currentOrientation != self.targetOrientation) {
+            self.targetOrientation = currentOrientation;
+            CV3LogToFile(@"[Orientation] 主窗口自动检测到方向变更: %ld", (long)currentOrientation);
+        }
+    }
+
     UIEdgeInsets safe = self.safeAreaInsets;
     CGRect bounds = self.bounds;
     CGFloat w = bounds.size.width;
@@ -4835,6 +4889,16 @@ static NSTimeInterval lastLogTime = 0;
                     sharedWindow.targetOrientation = currentOrientation;
                     [sharedWindow attachToCurrentActiveScene];
                     [sharedWindow setNeedsLayout];
+                }
+                
+                if (floatingWindows) {
+                    for (CV3FloatingAppWindow *win in floatingWindows) {
+                        if ([win isKindOfClass:[CV3FloatingAppWindow class]] && !win.isClosing) {
+                            win.targetOrientation = currentOrientation; // 核心：同步目标方向
+                            [win attachToCurrentActiveScene];
+                            [win setNeedsLayout];
+                        }
+                    }
                 }
             });
             isUpdating = NO;
