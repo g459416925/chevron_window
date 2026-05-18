@@ -476,6 +476,8 @@ static NSMutableArray *floatingWindows = nil;
 @property (nonatomic, assign) BOOL isClosing; 
 @property (nonatomic, assign) CGPoint lastVelocity;
 @property (nonatomic, strong) UIView *crystalPreviewContainer;
+@property (nonatomic, strong) UIView *splashView;
+@property (nonatomic, strong) UIImageView *largeSplashIcon;
 
 // Hyper-Capsule Evolution
 @property (nonatomic, strong) CAGradientLayer *capsuleGlowLayer;
@@ -679,6 +681,34 @@ static NSMutableArray *floatingWindows = nil;
 
         [self clampToScreenBounds];
         [self updateAdaptiveColor];
+
+        // --- Setup Splash View (App Startup Experience) ---
+        self.splashView = [[UIView alloc] initWithFrame:self.clippingContainer.bounds];
+        self.splashView.backgroundColor = [UIColor clearColor];
+        self.splashView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [self.clippingContainer addSubview:self.splashView];
+
+        UIVisualEffectView *splashBlur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial]];
+        splashBlur.frame = self.splashView.bounds;
+        splashBlur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [self.splashView addSubview:splashBlur];
+
+        self.largeSplashIcon = [[UIImageView alloc] initWithFrame:CGRectMake(0, 0, 80, 80)];
+        self.largeSplashIcon.center = CGPointMake(self.splashView.bounds.size.width/2.0, self.splashView.bounds.size.height/2.0);
+        self.largeSplashIcon.layer.cornerRadius = 18;
+        self.largeSplashIcon.clipsToBounds = YES;
+        self.largeSplashIcon.alpha = 0; // 初始透明，由 updateAdaptiveColor 激活
+        [self.splashView addSubview:self.largeSplashIcon];
+
+        // 启动时的呼吸缩放动画
+        CABasicAnimation *pulse = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
+        pulse.fromValue = @0.95;
+        pulse.toValue = @1.05;
+        pulse.duration = 1.2;
+        pulse.autoreverses = YES;
+        pulse.repeatCount = HUGE_VALF;
+        [self.largeSplashIcon.layer addAnimation:pulse forKey:@"splashPulse"];
+
         [self loadAppScene];
         
         // Auto-focus on creation
@@ -703,38 +733,40 @@ static NSMutableArray *floatingWindows = nil;
 }
 
 - (void)attachToCurrentActiveScene {
-    // 核心优化：改“动态跟随”为“静态持久挂载”，消除迁移导致的闪烁
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @try {
-            UIWindowScene *targetScene = nil;
-            
-            // 1. 优先获取 SpringBoard 核心主场景 (最稳定，不随 App 切换消失)
-            if ([NSClassFromString(@"SBWindowScene") respondsToSelector:@selector(mainDisplayWindowScene)]) {
-                targetScene = [NSClassFromString(@"SBWindowScene") performSelector:@selector(mainDisplayWindowScene)];
-            }
-            
-            // 2. 如果主场景不可用，才尝试寻找当前活跃场景 (兜底)
-            if (!targetScene) {
-                for (UIScene *scene in [[UIApplication sharedApplication].connectedScenes allObjects]) {
-                    if ([scene isKindOfClass:[UIWindowScene class]] && scene.activationState == UISceneActivationStateForegroundActive) {
-                        targetScene = (UIWindowScene *)scene;
-                        break;
-                    }
+    // 核心优化：移除异步延迟，改为绝对同步挂载。
+    // 在系统手势期间，哪怕 1ms 的延迟也会导致画面被系统剥离。
+    @try {
+        UIWindowScene *targetScene = nil;
+        
+        // 1. 优先获取 SpringBoard 核心主场景 (最稳定，不随 App 切换消失)
+        if ([NSClassFromString(@"SBWindowScene") respondsToSelector:@selector(mainDisplayWindowScene)]) {
+            targetScene = [NSClassFromString(@"SBWindowScene") performSelector:@selector(mainDisplayWindowScene)];
+        }
+        
+        // 2. 如果主场景不可用，才尝试寻找当前活跃场景 (针对某些特殊手势状态)
+        if (!targetScene) {
+            for (UIScene *scene in [[UIApplication sharedApplication].connectedScenes allObjects]) {
+                if ([scene isKindOfClass:[UIWindowScene class]] && scene.activationState == UISceneActivationStateForegroundActive) {
+                    targetScene = (UIWindowScene *)scene;
+                    break;
                 }
             }
-            
-            // 3. 只有当确实没有 Scene 或者当前 Scene 已失效时才重新赋值
-            if (targetScene && (self.windowScene != targetScene || !self.windowScene)) {
-                CV3LogToFile(@"[Persistence] 稳定化挂载窗口 (%@) 至主场景: %@", self.bundleID, targetScene);
-                self.windowScene = targetScene;
-                [super setHidden:NO];
-                [self setNeedsLayout];
-            }
-            
-            // 4. 无论如何，强制维持内部 App 场景的活跃状态
-            [self enforceSceneForegroundState];
-        } @catch (NSException *e) {}
-    });
+        }
+        
+        // 3. 强制同步场景挂载。
+        if (targetScene && (self.windowScene != targetScene || !self.windowScene)) {
+            CV3LogToFile(@"[Persistence] 实时同步挂载窗口 (%@) 至场景: %@", self.bundleID, targetScene);
+            self.windowScene = targetScene;
+            [self setHidden:NO];
+            [self setNeedsLayout];
+            [self layoutIfNeeded];
+        }
+        
+        // 4. 强制维持内部 App 场景的活跃状态
+        [self enforceSceneForegroundState];
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Error] attachToCurrentActiveScene 异常: %@", e);
+    }
 }
 
 - (void)refreshHostViewPresentation {
@@ -770,11 +802,12 @@ static NSMutableArray *floatingWindows = nil;
 - (void)enforceSceneForegroundState {
     if (!self.targetScene) return;
     
-    // 强制 Scene 状态，防止被系统挂起导致画面黑屏
     @try {
-        // 核心修复：检查 Scene 是否已经失效（例如系统回收），如果失效则重新加载
-        if ([self.targetScene respondsToSelector:@selector(isValid)] && ![(id)self.targetScene isValid]) {
-            CV3LogToFile(@"[Recovery] 检测到 Scene 已经失效 (%@)，准备重新拉起...", self.bundleID);
+        // 核心增强：除了检查 isValid，还检查是否还在连接状态
+        BOOL sceneValid = [self.targetScene respondsToSelector:@selector(isValid)] ? [(id)self.targetScene isValid] : YES;
+        
+        if (!sceneValid) {
+            CV3LogToFile(@"[Recovery] 检测到 Scene 已经失效或断开 (%@)，执行重连逻辑...", self.bundleID);
             if (self.hostView) {
                 [self.hostView removeFromSuperview];
                 self.hostView = nil;
@@ -786,13 +819,11 @@ static NSMutableArray *floatingWindows = nil;
         FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
         BOOL needsUpdate = NO;
         
-        // 兼容性检查：优先通过 KVC 获取，因为编译器不认识 FBSMutableSceneSettings 的私有 getter
+        // 兼容性检查：优先通过 KVC 获取
         BOOL currentBackgrounded = YES;
         @try {
             currentBackgrounded = [[settings valueForKey:@"backgrounded"] boolValue];
-        } @catch (NSException *e) {
-            // 如果 backgrounded key 不存在，尝试 fallback
-        }
+        } @catch (NSException *e) {}
 
         if (currentBackgrounded) {
             [settings setBackgrounded:NO];
@@ -812,24 +843,21 @@ static NSMutableArray *floatingWindows = nil;
             if ([self.targetScene respondsToSelector:@selector(_setContentState:)]) {
                 [self.targetScene _setContentState:2]; 
             }
+            CV3LogToFile(@"[Recovery] 已强制同步 Scene 前台状态: %@", self.bundleID);
         }
 
-        // 核心修复：即使 Settings 没变，也要重新激活 Context，防止图层树被系统断开导致白屏模糊
+        // 重新激活 Context，防止系统掉线
         if (self.hostView && [self.hostView respondsToSelector:@selector(_setPresentationContext:)]) {
             UIScenePresentationContext *context = [[%c(UIScenePresentationContext) alloc] _initWithDefaultValues];
-            if ([context respondsToSelector:@selector(setPresentedLayerTypes:)]) {
-                [context setPresentedLayerTypes:26]; // 强制包含所有图层类型
-            }
-            if ([context respondsToSelector:@selector(setAppearanceStyle:)]) {
-                [context setAppearanceStyle:2];
-            }
-            if ([context respondsToSelector:@selector(setClipsToBounds:)]) {
-                [context setClipsToBounds:YES];
-            }
+            if ([context respondsToSelector:@selector(setPresentedLayerTypes:)]) [context setPresentedLayerTypes:26]; 
+            if ([context respondsToSelector:@selector(setAppearanceStyle:)]) [context setAppearanceStyle:2];
+            if ([context respondsToSelector:@selector(setClipsToBounds:)]) [context setClipsToBounds:YES];
             [self.hostView performSelector:@selector(_setPresentationContext:) withObject:context];
         }
 
-    } @catch (NSException *e) {}
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Error] enforceSceneForegroundState 异常: %@", e);
+    }
 }
 
 - (void)setWindowFocused:(BOOL)focused {
@@ -1094,6 +1122,12 @@ static NSMutableArray *floatingWindows = nil;
         dispatch_async(dispatch_get_main_queue(), ^{
             self.adaptiveAppColor = avgColor ?: [UIColor labelColor];
             self.appIconMiniView.image = icon;
+            if (self.largeSplashIcon) {
+                self.largeSplashIcon.image = icon;
+                [UIView animateWithDuration:0.5 animations:^{
+                    self.largeSplashIcon.alpha = 1.0;
+                }];
+            }
 
             [UIView animateWithDuration:0.8 animations:^{
                 self.topCapsule.backgroundColor = [self.adaptiveAppColor colorWithAlphaComponent:0.6];
@@ -1421,6 +1455,17 @@ static NSMutableArray *floatingWindows = nil;
                         CV3LogToFile(@"[Debug] 成功通过 _UISceneLayerHostContainerView 创建渲染视图");
                         
                         [self syncWindowBoundsToClient];
+
+                        // --- Transition: Splash to Real Content ---
+                        if (self.splashView) {
+                            [UIView animateWithDuration:0.8 delay:0.2 options:UIViewAnimationOptionCurveEaseInOut animations:^{
+                                self.splashView.alpha = 0;
+                                self.largeSplashIcon.transform = CGAffineTransformMakeScale(1.5, 1.5);
+                            } completion:^(BOOL finished) {
+                                [self.splashView removeFromSuperview];
+                                self.splashView = nil;
+                            }];
+                        }
                     } else {
                         CV3LogToFile(@"[Error] _UISceneLayerHostContainerView 创建失败");
                     }
@@ -4764,12 +4809,125 @@ static NSTimeInterval lastLogTime = 0;
 }
 %end
 
+@interface SBWorkspaceEntity : NSObject
+- (id)applicationSceneEntity;
+@end
+
+@interface SBWorkspaceTransitionRequest : NSObject
+@property (nonatomic, copy) NSSet *entities;
+@end
+
+@interface SBMainWorkspaceTransitionRequest : SBWorkspaceTransitionRequest
+@property (nonatomic, copy) NSSet *deactivatedEntities;
+@end
+
+%hook SBMainWorkspaceTransitionRequest
+- (NSSet *)deactivatedEntities {
+    NSSet *orig = %orig;
+    if (floatingWindows && floatingWindows.count > 0 && orig.count > 0) {
+        NSMutableSet *mutableDeactivated = [orig mutableCopy];
+        BOOL modified = NO;
+        
+        for (id entity in orig) {
+            // 检查实体是否代表我们要保护的应用
+            @try {
+                NSString *bid = nil;
+                if ([entity respondsToSelector:@selector(applicationSceneEntity)]) {
+                    id appEntity = [entity performSelector:@selector(applicationSceneEntity)];
+                    if ([appEntity respondsToSelector:@selector(bundleIdentifier)]) {
+                        bid = [appEntity performSelector:@selector(bundleIdentifier)];
+                    }
+                }
+                
+                if (bid) {
+                    for (CV3FloatingAppWindow *win in floatingWindows) {
+                        if ([bid isEqualToString:win.bundleID] && !win.isClosing) {
+                            [mutableDeactivated removeObject:entity];
+                            modified = YES;
+                            CV3LogToFile(@"[Immortality] 成功从停用列表中剔除分屏应用: %@", bid);
+                        }
+                    }
+                }
+            } @catch (NSException *e) {}
+        }
+        
+        if (modified) return [mutableDeactivated copy];
+    }
+    return orig;
+}
+%end
+
+@interface SBSwitcherModifier : NSObject
+- (id)activeAppLayout;
+- (unsigned long long)activeAppLayoutIndex;
+@end
+
+@interface SBHomeGestureSwitcherModifier : SBSwitcherModifier
+@end
+
+%hook SBHomeGestureSwitcherModifier
+- (double)scaleForIndex:(unsigned long long)index {
+    if (floatingWindows && floatingWindows.count > 0) {
+        // 如果该索引对应的 App 正在分屏托管中，强制返回 1.0 缩放
+        return 1.0; 
+    }
+    return %orig;
+}
+
+- (double)opacityForIndex:(unsigned long long)index {
+    if (floatingWindows && floatingWindows.count > 0) {
+        // 强制返回 1.0 不透明度，防止手势期间画面变淡或变白
+        return 1.0;
+    }
+    return %orig;
+}
+%end
+
+%hook FBSceneManager
+- (void)destroyScene:(id)arg1 withTransitionContext:(id)arg2 {
+    if (floatingWindows && floatingWindows.count > 0) {
+        FBScene *scene = (FBScene *)arg1;
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if ([scene.identifier containsString:win.bundleID] && !win.isClosing) {
+                CV3LogToFile(@"[Immortality] 拦截到系统对托管场景 (%@) 的销毁请求，已强制豁免", win.bundleID);
+                return; // 核心：拦截销毁，赋予 Scene 永生权
+            }
+        }
+    }
+    %orig;
+}
+%end
+
 %hook SBMainWorkspace
+- (void)executeTransitionRequest:(id)arg1 {
+    if (floatingWindows && floatingWindows.count > 0) {
+        @try {
+            // 核心：监控转换请求。如果系统试图在切换 App 时清理我们的托管 App，后续 FBScene 的 Hook 会确保其 Settings 不变。
+            for (CV3FloatingAppWindow *win in floatingWindows) {
+                if (win.isClosing) continue;
+                CV3LogToFile(@"[Workspace] 手势转换中，维持托管 App 生命周期: %@", win.bundleID);
+            }
+        } @catch (NSException *e) {}
+    }
+    %orig(arg1);
+}
+
 - (void)workspace:(id)arg1 didExecuteTransitionRequest:(id)arg2 {
     %orig;
     if (sharedWindow) {
         [sharedWindow attachToCurrentActiveScene];
-        
+
+        // 核心修复：在上滑 Home 条等场景转换后，强制遍历所有分屏窗口进行场景重挂载
+        // 这一步是解决“空白画面”的关键，因为它处理了 UIScene 级别的生命周期流转
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if ([win isKindOfClass:[CV3FloatingAppWindow class]] && !win.isClosing) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [win attachToCurrentActiveScene];
+                    [win refreshHostViewPresentation];
+                });
+            }
+        }
+
         // 尝试获取当前活跃应用的 Bundle ID 以进行取色
         @try {
             id activeItem = nil;
@@ -4784,15 +4942,28 @@ static NSTimeInterval lastLogTime = 0;
     }
 }
 %end
-
 %hook SBLockScreenManager
 - (void)lockScreenViewControllerDidPresent {
     %orig;
     if (sharedWindow) sharedWindow.hidden = YES;
+    // 核心：分屏窗口在锁屏时不应被强制隐藏，除非用户手动操作
+    if (floatingWindows) {
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if ([win isKindOfClass:[CV3FloatingAppWindow class]]) {
+                [win setHidden:NO];
+                [win makeKeyAndVisible];
+            }
+        }
+    }
 }
 - (void)lockScreenViewControllerDidDismiss {
     %orig;
     if (sharedWindow) sharedWindow.hidden = NO;
+    if (floatingWindows) {
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if ([win isKindOfClass:[CV3FloatingAppWindow class]]) [win setHidden:NO];
+        }
+    }
 }
 %end
 
@@ -4803,6 +4974,12 @@ static NSTimeInterval lastLogTime = 0;
     if (sharedWindow) {
         sharedWindow.isSuppressedBySystem = YES;
         sharedWindow.hidden = YES;
+    }
+    // 控制中心弹出时，分屏不消失
+    if (floatingWindows) {
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if ([win isKindOfClass:[CV3FloatingAppWindow class]]) [win setHidden:NO];
+        }
     }
 }
 - (void)_didDismiss {
@@ -4818,9 +4995,14 @@ static NSTimeInterval lastLogTime = 0;
 - (void)setCoverSheetPresented:(BOOL)arg1 animated:(BOOL)arg2 {
     %orig;
     if (sharedWindow) {
-        // 关键：同步压制状态，防止滑动 NC 时出现重置
         sharedWindow.isSuppressedBySystem = arg1;
         sharedWindow.hidden = arg1;
+    }
+    // 通知中心/下拉盖板时不隐藏分屏
+    if (arg1 && floatingWindows) {
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if ([win isKindOfClass:[CV3FloatingAppWindow class]]) [win setHidden:NO];
+        }
     }
 }
 %end
@@ -4922,66 +5104,86 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
 }
 %end
 
-%hook FBScene
-
-- (void)_setContentState:(NSInteger)state {
-    if (floatingWindows) {
+%hook SBApplication
+- (BOOL)isBackgrounded {
+    if (floatingWindows && floatingWindows.count > 0) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
-            if ([self.identifier containsString:win.bundleID] && !win.hidden) {
-                // 如果场景已经无效，立刻关闭窗口并移除，防止显示白屏
-                if ([self respondsToSelector:@selector(isValid)] && ![(id)self isValid]) {
-                    CV3LogToFile(@"[Recovery] 检测到 Scene 已彻底失效 (%@)，触发自动关闭...", win.bundleID);
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        [win closeWindow];
-                        [win removeFromSuperview];
-                    });
-                    return;
-                }
-                
-                %orig(2); // 强行拦截为 2 (Ready 状态)
-                
-                // 核心优化：直接请求 HostView 刷新渲染上下文，不需要完全重拉 App
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [win refreshHostViewPresentation];
-                });
-                return;
+            if ([self.bundleIdentifier isEqualToString:win.bundleID] && !win.isClosing) {
+                return NO; // 核心：欺骗系统，让其认为该 App 始终在“前台”运行
             }
         }
     }
+    return %orig;
+}
+%end
+
+%hook SBMainSwitcherViewController
+- (void)setSwitcherWindowVisible:(BOOL)arg1 {
     %orig;
+    // 核心：当 Switcher 窗口状态改变时，强制刷新所有分屏窗口的显示状态
+    if (floatingWindows) {
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if ([win isKindOfClass:[CV3FloatingAppWindow class]] && !win.isClosing) {
+                [win setHidden:NO];
+                [win makeKeyAndVisible];
+                [win refreshHostViewPresentation];
+            }
+        }
+    }
 }
 
+- (void)_setMainSwitcherVisible:(BOOL)arg1 {
+    %orig;
+    if (floatingWindows) {
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if ([win isKindOfClass:[CV3FloatingAppWindow class]] && !win.isClosing) {
+                [win setHidden:NO];
+                [win refreshHostViewPresentation];
+            }
+        }
+    }
+}
+%end
+
+%hook FBScene
 - (void)updateSettings:(id)arg1 withTransitionContext:(id)arg2 {
     if (floatingWindows) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
-            // 只保护未隐藏的分屏窗口
-            if ([self.identifier containsString:win.bundleID] && !win.hidden) {
-                
-                // 如果场景已经无效，触发关闭
-                if ([self respondsToSelector:@selector(isValid)] && ![(id)self isValid]) {
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        [win closeWindow];
-                        [win removeFromSuperview];
-                    });
-                    return;
-                }
-
-                // 强制将 settings 转为 mutable，从而合法修改属性
+            if ([self.identifier containsString:win.bundleID] && !win.isClosing) {
                 id mutableSettings = [arg1 mutableCopy];
+                BOOL modified = NO;
+
                 if ([mutableSettings respondsToSelector:@selector(setForeground:)]) {
                     [mutableSettings setForeground:YES];
+                    modified = YES;
                 }
                 if ([mutableSettings respondsToSelector:@selector(setBackgrounded:)]) {
                     [mutableSettings setBackgrounded:NO];
+                    modified = YES;
                 }
                 
-                %orig(mutableSettings, arg2);
+                // 核心：iOS 16 关键拦截。防止在切换 App 时被标记为不可见。
+                @try {
+                    if ([mutableSettings respondsToSelector:@selector(setOccluded:)]) {
+                        [mutableSettings setValue:@NO forKey:@"occluded"];
+                        modified = YES;
+                    }
+                    // 增加对可见性标志的强力拦截
+                    if ([mutableSettings respondsToSelector:@selector(setVisibility:)]) {
+                        [mutableSettings setValue:@2 forKey:@"visibility"]; // 2 通常代表完全可见
+                        modified = YES;
+                    }
+                } @catch (NSException *e) {}
+
+                if (modified) {
+                    %orig(mutableSettings, arg2);
+                } else {
+                    %orig(arg1, arg2);
+                }
                 
-                // 核心优化：触发热刷新而非重载 App
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [win refreshHostViewPresentation];
                 });
-                
                 return;
             }
         }
