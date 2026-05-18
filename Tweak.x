@@ -110,6 +110,7 @@
 @interface _UISceneLayerHostContainerView : UIView
 - (instancetype)initWithScene:(FBScene *)scene debugDescription:(NSString *)debugDescription;
 - (void)_setPresentationContext:(id)context;
+- (void)invalidate;
 @end
 
 @interface UIScenePresentationContext : NSObject
@@ -1981,20 +1982,14 @@ static NSMutableArray *floatingWindows = nil;
     self.hidden = YES;
     [self syncWindowBoundsToClient];
 
-    @try {
-        if (self.targetScene) {
-            FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
-            [settings setBackgrounded:YES];
-            [settings setForeground:NO];
-            [self.targetScene updateSettings:settings withTransitionContext:nil];
-            if ([self.targetScene respondsToSelector:@selector(_setContentState:)]) {
-                [self.targetScene _setContentState:0];
-            }
+    if (self.hostView) {
+        if ([self.hostView respondsToSelector:@selector(invalidate)]) {
+            [self.hostView performSelector:@selector(invalidate)];
         }
-    } @catch (NSException *e) {}
-
-    [self.hostView removeFromSuperview];
-    self.hostView = nil;
+        [self.hostView removeFromSuperview];
+        self.hostView = nil;
+    }
+    
     self.windowScene = nil; // Clear scene attachment
     [floatingWindows removeObject:self];
 }@end
