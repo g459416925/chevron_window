@@ -4891,7 +4891,12 @@ static NSTimeInterval lastLogTime = 0;
 }
 %end
 
+@interface SBAppLayout : NSObject
+- (BOOL)containsItemWithBundleIdentifier:(NSString *)bundleIdentifier;
+@end
+
 @interface SBSwitcherModifier : NSObject
+- (NSArray *)appLayouts;
 - (id)activeAppLayout;
 - (unsigned long long)activeAppLayoutIndex;
 @end
@@ -4902,16 +4907,40 @@ static NSTimeInterval lastLogTime = 0;
 %hook SBHomeGestureSwitcherModifier
 - (double)scaleForIndex:(unsigned long long)index {
     if (floatingWindows && floatingWindows.count > 0) {
-        // 如果该索引对应的 App 正在分屏托管中，强制返回 1.0 缩放
-        return 1.0; 
+        if ([self respondsToSelector:@selector(appLayouts)]) {
+            NSArray *layouts = [self appLayouts];
+            if (index < layouts.count) {
+                SBAppLayout *layout = layouts[index];
+                if ([layout respondsToSelector:@selector(containsItemWithBundleIdentifier:)]) {
+                    for (CV3FloatingAppWindow *win in floatingWindows) {
+                        if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
+                            CV3LogToFile(@"[Gesture] 保护分屏应用在 Home 手势中的缩放: %@", win.bundleID);
+                            return 1.0;
+                        }
+                    }
+                }
+            }
+        }
     }
     return %orig;
 }
 
 - (double)opacityForIndex:(unsigned long long)index {
     if (floatingWindows && floatingWindows.count > 0) {
-        // 强制返回 1.0 不透明度，防止手势期间画面变淡或变白
-        return 1.0;
+        if ([self respondsToSelector:@selector(appLayouts)]) {
+            NSArray *layouts = [self appLayouts];
+            if (index < layouts.count) {
+                SBAppLayout *layout = layouts[index];
+                if ([layout respondsToSelector:@selector(containsItemWithBundleIdentifier:)]) {
+                    for (CV3FloatingAppWindow *win in floatingWindows) {
+                        if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
+                            CV3LogToFile(@"[Gesture] 保护分屏应用在 Home 手势中的透明度: %@", win.bundleID);
+                            return 1.0;
+                        }
+                    }
+                }
+            }
+        }
     }
     return %orig;
 }
