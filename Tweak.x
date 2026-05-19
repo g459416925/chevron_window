@@ -1341,14 +1341,15 @@ static NSMutableArray *floatingWindows = nil;
     }
     [CATransaction commit];
 
-    self.resizeHandle.frame = CGRectMake(w - 30, h - 30, 30, 30);
+    self.resizeHandle.frame = CGRectMake(w - 60, h - 60, 60, 60);
     
-    // 核心修复：将把手弧度中心与窗口 28pt 圆角中心对齐 (2,2)
-    // 半径调整为 24pt，使其与窗口圆角形成 4pt 的完美平行间距，实现“视觉同心”
-    CGFloat arcRadius = 24.0;
+    // 核心修复：将把手弧度中心与窗口 28pt 圆角中心对齐 (32,32)
+    // 半径调整为 18pt，使其与窗口 28pt 圆角形成 10pt 的完美平行间距
+    // 这种“悬浮感”设计参考了 iPadOS Stage Manager 的角把手风格，视觉上更轻盈
+    CGFloat arcRadius = 18.0;
     CGFloat centerAngle = M_PI_4;
-    CGFloat halfSweep = M_PI / 8.0; // 扩大弧度至 45 度，增强操作指引感
-    self.resizeHandleLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(2, 2) 
+    CGFloat halfSweep = M_PI / 8.0; 
+    self.resizeHandleLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(32, 32) 
                                                                radius:arcRadius 
                                                            startAngle:centerAngle - halfSweep 
                                                              endAngle:centerAngle + halfSweep 
@@ -2023,8 +2024,46 @@ static NSMutableArray *floatingWindows = nil;
     }
 }
 
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    if (self.isClosing || self.isStashed) return [super hitTest:point withEvent:event];
+
+    // 1. 深度优化：由于 App 渲染视图往往具备极高的触控优先级（尤其是带滚动的视图），
+    // 我们必须在 hitTest 阶段显式干预，优先判定装饰性交互组件。
+    
+    // 检查右下角缩放热区
+    CGPoint pInResize = [self convertPoint:point toView:self.resizeHandle];
+    if ([self.resizeHandle pointInside:pInResize withEvent:event]) {
+        return self.resizeHandle;
+    }
+    
+    // 检查顶部拖拽热区
+    CGPoint pInDrag = [self convertPoint:point toView:self.dragHandle];
+    if ([self.dragHandle pointInside:pInDrag withEvent:event]) {
+        return self.dragHandle;
+    }
+
+    // 2. 检查侧边 Stash 区域 (仅在 Stashed 时，但此处主要处理 Active 状态)
+    if (self.stashGrabber.alpha > 0.5) {
+        CGPoint pInGrabber = [self convertPoint:point toView:self.stashGrabber];
+        if ([self.stashGrabber pointInside:pInGrabber withEvent:event]) {
+            return self.stashGrabber;
+        }
+    }
+
+    return [super hitTest:point withEvent:event];
+}
+
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
     return YES;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    // 强制要求其他手势（即来自宿主 App 内部的手势）在我们自己的控制手势面前失败
+    // 这可以防止拖拽或缩放窗口时，底下的 App 还在疯狂滚动
+    if (gestureRecognizer.view == self.dragHandle || gestureRecognizer.view == self.resizeHandle) {
+        return YES;
+    }
+    return NO;
 }
 
 - (void)handleResizePan:(UIPanGestureRecognizer *)gesture {
