@@ -990,9 +990,46 @@ static NSMutableArray *floatingWindows = nil;
     }
 }
 
+- (void)updateSovereigntyAssertion {
+    if (!self.bundleID || self.isClosing) return;
+
+    @try {
+        if (self.rbsAssertion) {
+            [self.rbsAssertion invalidate];
+            self.rbsAssertion = nil;
+        }
+
+        RBSProcessIdentity *identity = [%c(RBSProcessIdentity) identityForEmbeddedApplicationIdentifier:self.bundleID];
+        RBSTarget *target = [%c(RBSTarget) targetWithProcessIdentity:identity];
+        
+        // 动态决策优先级：
+        // 1. 活跃聚焦 (isFocused): UserInteractive (最高优，模拟当前前台 App)
+        // 2. 隐藏挂起 (isStashed): UserInitiated (中优，防止被强杀但允许 CPU 降频)
+        // 3. 普通分屏: UserInteractive (维持渲染流畅)
+        NSString *attributeName = (self.isStashed) ? @"UserInitiated" : @"UserInteractive";
+        
+        RBSDomainAttribute *attr = [%c(RBSDomainAttribute) attributeWithDomain:@"com.apple.common" name:attributeName];
+        
+        self.rbsAssertion = [[%c(RBSAssertion) alloc] initWithExplanation:[NSString stringWithFormat:@"ChevronV3 Sovereignty (%@) for %@", attributeName, self.bundleID] 
+                                                                   target:target 
+                                                               attributes:@[attr]];
+        
+        NSError *error = nil;
+        if ([self.rbsAssertion acquireWithError:&error]) {
+            CV3LogToFile(@"[Immortality] 已动态更新 %@ 优先级断连 -> %@", self.bundleID, attributeName);
+        } else {
+            CV3LogToFile(@"[Error] RBSAssertion (%@) 更新失败: %@", attributeName, error);
+        }
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Error] updateSovereigntyAssertion 异常: %@", e);
+    }
+}
+
 - (void)setWindowFocused:(BOOL)focused {
     if (self.isFocused == focused) return;
     self.isFocused = focused;
+    
+    [self updateSovereigntyAssertion]; // 同步更新优先级
     
     [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
         if (focused) {
@@ -1094,6 +1131,7 @@ static NSMutableArray *floatingWindows = nil;
     self.preStashFrame = self.frame;
     self.isStashed = YES;
     self.stashedSide = isNearLeft ? 1 : 2;
+    [self updateSovereigntyAssertion]; // 降低优先级以配合系统节能
 
     [UIView animateWithDuration:0.6 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:0 animations:^{
         // 核心：将窗口物理尺寸缩小为 44x44 图标大小
@@ -1726,6 +1764,7 @@ static NSMutableArray *floatingWindows = nil;
             if (self.frame.origin.x < -self.frame.size.width / 2.0) {
                 self.isStashed = YES;
                 self.stashedSide = 1;
+                [self updateSovereigntyAssertion];
                 self.preStashFrame = self.frame;
                 targetFrame.origin.x = -self.frame.size.width + 44; // 核心修复：留出 44pt 让图标完全可见
                 self.stashGrabber.alpha = 1.0;
@@ -1735,6 +1774,7 @@ static NSMutableArray *floatingWindows = nil;
             } else if (self.frame.origin.x + self.frame.size.width > screen.size.width + self.frame.size.width / 2.0) {
                 self.isStashed = YES;
                 self.stashedSide = 2;
+                [self updateSovereigntyAssertion];
                 self.preStashFrame = self.frame;
                 targetFrame.origin.x = screen.size.width - 44; // 核心修复：留出 44pt 让图标完全可见
                 self.stashGrabber.alpha = 1.0;
@@ -1742,8 +1782,10 @@ static NSMutableArray *floatingWindows = nil;
                 self.clippingContainer.alpha = 0;
                 self.glassBackdrop.alpha = 0.5;
             } else {
+                BOOL wasStashed = self.isStashed;
                 self.isStashed = NO;
                 self.stashedSide = 0;
+                if (wasStashed) [self updateSovereigntyAssertion];
                 self.stashGrabber.alpha = 0;
                 self.clippingContainer.alpha = 1.0;
                 self.glassBackdrop.alpha = 1.0;
@@ -1817,7 +1859,8 @@ static NSMutableArray *floatingWindows = nil;
             self.isStashed = NO;
             self.frame = self.preStashFrame;
             self.stashedSide = 0;
-            
+            [self updateSovereigntyAssertion]; // 恢复高优先级
+
             self.stashGrabber.alpha = 0;
             self.clippingContainer.alpha = 1.0;
             self.clippingContainer.transform = CGAffineTransformIdentity;
@@ -1904,6 +1947,7 @@ static NSMutableArray *floatingWindows = nil;
             
             // 重新判定 stashedSide 以便堆叠逻辑参考 (以中线为界)
             self.stashedSide = (self.center.x < screen.size.width / 2.0) ? 1 : 2;
+            [self updateSovereigntyAssertion]; // 确保 Stash 态优先级同步
             
         } completion:^(BOOL finished) {
             UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
@@ -5416,8 +5460,8 @@ static NSTimeInterval lastLogTime = 0;
         FBScene *scene = (FBScene *)arg1;
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if ([scene.identifier containsString:win.bundleID] && !win.isClosing) {
-                CV3LogToFile(@"[Immortality] 拦截到系统对托管场景 (%@) 的销毁请求，已强制豁免", win.bundleID);
-                return; // 核心：拦截销毁，赋予 Scene 永生权
+                CV3LogToFile(@"[Lifecycle] 系统尝试销毁托管场景 (%@)，已放行并准备自动恢复流程", win.bundleID);
+                break;
             }
         }
     }
@@ -5693,6 +5737,8 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
     if (floatingWindows && floatingWindows.count > 0) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if ([self.bundleIdentifier isEqualToString:win.bundleID] && !win.isClosing) {
+                // 如果窗口被 Stash (侧边隐藏)，允许应用进入正常的后台挂起状态，减少 CPU/内存压力
+                if (win.isStashed) return %orig;
                 return NO; // 核心：欺骗系统，让其认为该 App 始终在“前台”运行
             }
         }
@@ -5704,6 +5750,7 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
     if (floatingWindows && floatingWindows.count > 0) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if ([self.bundleIdentifier isEqualToString:win.bundleID] && !win.isClosing) {
+                if (win.isStashed) return %orig;
                 return NO; 
             }
         }
@@ -5745,6 +5792,13 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
     if (floatingWindows) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if ([self.identifier containsString:win.bundleID] && !win.isClosing) {
+                // 如果窗口被 Stash (侧边隐藏)，且系统正在尝试将其置于后台，我们不再强制拉回前台
+                // 这能有效避免系统判定应用“违规占据前台”而触发的杀进程行为 (0xDEAD10CC)
+                if (win.isStashed) {
+                    %orig(arg1, arg2);
+                    return;
+                }
+
                 CV3LogToFile(@"[FBScene] 捕捉到 Settings 更新请求: %@", win.bundleID);
                 id mutableSettings = [arg1 mutableCopy];
                 BOOL modified = NO;
@@ -5809,6 +5863,11 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
     if (floatingWindows) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if ([self.identifier containsString:win.bundleID] && !win.isClosing) {
+                if (win.isStashed) {
+                    %orig(arg1, arg2, arg3);
+                    return;
+                }
+
                 CV3LogToFile(@"[FBScene] 捕捉到 Settings 更新请求 (带 completion): %@", win.bundleID);
                 id mutableSettings = [arg1 mutableCopy];
                 BOOL modified = NO;
@@ -5872,6 +5931,11 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
     if (floatingWindows) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if ([self.identifier containsString:win.bundleID] && !win.isClosing) {
+                // 如果窗口被 Stash (侧边隐藏)，允许场景进入非 Ready 状态，配合系统节能
+                if (win.isStashed) {
+                    %orig(arg1);
+                    return;
+                }
                 if (arg1 != 2) {
                     CV3LogToFile(@"[FBScene] 拦截到 contentState 降级 -> %ld，强制恢复为 2: %@", (long)arg1, win.bundleID);
                     arg1 = 2;
