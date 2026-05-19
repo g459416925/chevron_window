@@ -2030,12 +2030,19 @@ static NSMutableArray *floatingWindows = nil;
         }
         UIEdgeInsets safeArea = keyWin ? keyWin.safeAreaInsets : UIEdgeInsetsMake(47, 0, 34, 0);
         
-        if (newFrame.origin.x < safeArea.left) newFrame.origin.x = safeArea.left;
-        if (newFrame.origin.y < safeArea.top) newFrame.origin.y = safeArea.top;
-        if (CGRectGetMaxX(newFrame) > screenBounds.size.width - safeArea.right) 
-            newFrame.origin.x = screenBounds.size.width - safeArea.right - finalWidth;
-        if (CGRectGetMaxY(newFrame) > screenBounds.size.height - safeArea.bottom) 
-            newFrame.origin.y = screenBounds.size.height - safeArea.bottom - finalHeight;
+        // 核心修复：缩放过程中暂时禁用安全区域的强制钳位，防止窗口边缘与安全区域边界（如灵动岛）发生高频物理冲突导致抖动
+        // 仅在手指松开 (Ended) 后再执行最终的边界修正
+        if (gesture.state == UIGestureRecognizerStateChanged) {
+            // 允许窗口在缩放时暂时超出顶部安全区域，避免“弹簧效应”
+            newFrame.origin.y = initialCenter.y - finalHeight / 2.0;
+        } else {
+            if (newFrame.origin.x < safeArea.left) newFrame.origin.x = safeArea.left;
+            if (newFrame.origin.y < safeArea.top) newFrame.origin.y = safeArea.top;
+            if (CGRectGetMaxX(newFrame) > screenBounds.size.width - safeArea.right) 
+                newFrame.origin.x = screenBounds.size.width - safeArea.right - finalWidth;
+            if (CGRectGetMaxY(newFrame) > screenBounds.size.height - safeArea.bottom) 
+                newFrame.origin.y = screenBounds.size.height - safeArea.bottom - finalHeight;
+        }
             
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
@@ -2043,7 +2050,8 @@ static NSMutableArray *floatingWindows = nil;
         self.bounds = CGRectMake(0, 0, finalWidth, finalHeight);
         self.center = CGPointMake(CGRectGetMidX(newFrame), CGRectGetMidY(newFrame));
         
-        [self layoutIfNeeded];
+        // 核心修复：缩放时强制重置灵动岛引力特效，防止装饰层发生位移纠缠
+        self.innerGlowLayer.affineTransform = CGAffineTransformIdentity;
         
         // --- Suggestion 3: Resize Stress Distortion ---
         // 根据缩放速度计算“应力畸变” (Chromatic Aberration)
