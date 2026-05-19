@@ -448,7 +448,6 @@ static NSMutableArray *floatingWindows = nil;
 @property (nonatomic, strong) UIView *hostContainerProxy;
 @property (nonatomic, strong) UIView *hostView;
 @property (nonatomic, strong) UIView *dragHandle;
-@property (nonatomic, strong) UIView *topCapsule;
 @property (nonatomic, strong) UIView *resizeHandle;
 @property (nonatomic, strong) CAShapeLayer *resizeHandleLayer;
 @property (nonatomic, strong) FBScene *targetScene;
@@ -477,32 +476,12 @@ static NSMutableArray *floatingWindows = nil;
 @property (nonatomic, assign) UIInterfaceOrientation targetOrientation;
 @property (nonatomic, assign) CGAffineTransform baseRotationTransform;
 
-// Hyper-Capsule Evolution
-@property (nonatomic, strong) CAGradientLayer *capsuleGlowLayer;
-@property (nonatomic, strong) UIVisualEffectView *popoverView;
-@property (nonatomic, strong) NSArray *capsuleDots;
-
 - (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene;
 - (void)triggerCollisionImpulse;
 - (void)updateAdaptiveColor;
 - (void)setWindowFocused:(BOOL)focused;
-- (void)showControlPopover;
-- (void)startCapsuleBreathing;
 - (void)restoreFromStash;
 - (void)applyCurrentTransformWithScale:(CGFloat)scale;
-@end
-
-// --- Custom Capsule View with Expanded Hit Area ---
-@interface CV3CapsuleView : UIView
-@end
-@implementation CV3CapsuleView
-- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
-    // 强制扩充热区：确保点击范围至少为 64x44，解决“不容易触发”的问题
-    CGFloat widthDelta = MAX(0, 64.0 - self.bounds.size.width);
-    CGFloat heightDelta = MAX(0, 44.0 - self.bounds.size.height);
-    CGRect hitFrame = CGRectInset(self.bounds, -widthDelta/2.0, -heightDelta/2.0);
-    return CGRectContainsPoint(hitFrame, point);
-}
 @end
 
 // --- Custom Resize Handle with Expanded Hit Area ---
@@ -627,52 +606,6 @@ static NSMutableArray *floatingWindows = nil;
         self.dragHandle.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.01]; // 确保整个 30pt 高度的区域都能接收拖拽手势
         [self addSubview:self.dragHandle];
         
-        // Hyper-Capsule Setup (Using custom view with expanded hit area)
-        self.topCapsule = [[CV3CapsuleView alloc] initWithFrame:CGRectMake(0, 0, kChevronLayoutConstants.windowHandleW, kChevronLayoutConstants.windowHandleH)];
-        self.topCapsule.backgroundColor = [[UIColor labelColor] colorWithAlphaComponent:0.08]; // 极其微弱的底色
-        self.topCapsule.layer.cornerRadius = kChevronLayoutConstants.windowHandleH / 2.0;
-        self.topCapsule.layer.borderWidth = 0.5;
-        self.topCapsule.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.1].CGColor;
-        
-        // 增加玻璃材质感
-        UIVisualEffectView *capsuleBlur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
-        capsuleBlur.frame = self.topCapsule.bounds;
-        capsuleBlur.layer.cornerRadius = self.topCapsule.layer.cornerRadius;
-        capsuleBlur.clipsToBounds = YES;
-        capsuleBlur.userInteractionEnabled = NO;
-        [self.topCapsule addSubview:capsuleBlur];
-        [self.dragHandle addSubview:self.topCapsule];
-        
-        // Capsule Glow (Adaptive)
-        self.capsuleGlowLayer = [CAGradientLayer layer];
-        self.capsuleGlowLayer.frame = self.topCapsule.bounds;
-        self.capsuleGlowLayer.cornerRadius = self.topCapsule.layer.cornerRadius;
-        self.capsuleGlowLayer.opacity = 0; 
-        [self.topCapsule.layer insertSublayer:self.capsuleGlowLayer atIndex:0];
-
-        NSMutableArray *dots = [NSMutableArray array];
-        for (int i = 0; i < 3; i++) {
-            // 圆点改得更小更精致 (1.5pt)
-            UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1.5, 1.5)];
-            dot.backgroundColor = [[UIColor labelColor] colorWithAlphaComponent:0.4];
-            dot.layer.cornerRadius = 0.75;
-            [self.topCapsule addSubview:dot];
-            [dots addObject:dot];
-        }
-        self.capsuleDots = dots;
-
-        // Interaction: Single tap for Hide, Double tap for control HUD
-        UITapGestureRecognizer *capsuleDoubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(showControlPopover)];
-        capsuleDoubleTap.numberOfTapsRequired = 2;
-        [self.topCapsule addGestureRecognizer:capsuleDoubleTap];
-
-        UITapGestureRecognizer *capsuleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleHideAction)];
-        capsuleTap.numberOfTapsRequired = 1;
-        [capsuleTap requireGestureRecognizerToFail:capsuleDoubleTap];
-        [self.topCapsule addGestureRecognizer:capsuleTap];
-        
-        self.topCapsule.userInteractionEnabled = YES;
-        
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         [self.dragHandle addGestureRecognizer:pan];
         
@@ -690,6 +623,10 @@ static NSMutableArray *floatingWindows = nil;
         
         UIPanGestureRecognizer *resizePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleResizePan:)];
         [self.resizeHandle addGestureRecognizer:resizePan];
+
+        UITapGestureRecognizer *resizeTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleHideAction)];
+        [self.resizeHandle addGestureRecognizer:resizeTap];
+        
         self.resizeHandle.userInteractionEnabled = YES;
         
         // 侧边隐藏拉手 (Grabber -> Prism Switcher)
@@ -1032,128 +969,6 @@ static NSMutableArray *floatingWindows = nil;
     }
 }
 
-- (void)startCapsuleBreathing {
-    [self.capsuleGlowLayer removeAllAnimations];
-    
-    self.capsuleGlowLayer.colors = @[
-        (id)[self.adaptiveAppColor colorWithAlphaComponent:0.8].CGColor,
-        (id)[self.adaptiveAppColor colorWithAlphaComponent:0.2].CGColor
-    ];
-    self.capsuleGlowLayer.startPoint = CGPointMake(0, 0.5);
-    self.capsuleGlowLayer.endPoint = CGPointMake(1, 0.5);
-    
-    CABasicAnimation *breath = [CABasicAnimation animationWithKeyPath:@"opacity"];
-    breath.fromValue = @0.3;
-    breath.toValue = @1.0;
-    breath.duration = 2.0;
-    breath.autoreverses = YES;
-    breath.repeatCount = HUGE_VALF;
-    [self.capsuleGlowLayer addAnimation:breath forKey:@"breath"];
-    
-    // Status Dot Pulse (Center dot)
-    if (self.capsuleDots.count >= 2) {
-        UIView *centerDot = self.capsuleDots[1];
-        CABasicAnimation *pulse = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
-        pulse.fromValue = @1.0;
-        pulse.toValue = @1.5;
-        pulse.duration = 1.0;
-        pulse.autoreverses = YES;
-        pulse.repeatCount = HUGE_VALF;
-        [centerDot.layer addAnimation:pulse forKey:@"pulse"];
-    }
-}
-
-- (void)showControlPopover {
-    if (self.popoverView) {
-        [self hideControlPopover];
-        return;
-    }
-    
-    UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-    [gen impactOccurred];
-    
-    // 核心设计：iPadOS 极简精致 HUD (100x32)
-    self.popoverView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
-    self.popoverView.frame = CGRectMake(0, 0, 100, 32);
-    self.popoverView.layer.cornerRadius = 16;
-    self.popoverView.clipsToBounds = YES;
-    self.popoverView.layer.borderWidth = 0.5;
-    self.popoverView.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.15].CGColor;
-    
-    // 紧贴胶囊下方，保持视觉上的呼吸感
-    self.popoverView.center = CGPointMake(self.topCapsule.center.x, self.topCapsule.center.y + 26);
-    self.popoverView.alpha = 0;
-    self.popoverView.transform = CGAffineTransformMakeScale(0.85, 0.85); // 稍微缩放即可
-    [self addSubview:self.popoverView];
-    
-    // Quick Actions: FULL and CLOSE
-    NSArray *actions = @[@"FULL", @"CLOSE"];
-    CGFloat btnW = 100 / 2.0;
-    for (int i = 0; i < 2; i++) {
-        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-        btn.frame = CGRectMake(i * btnW, 0, btnW, 32);
-        [btn setTitle:actions[i] forState:UIControlStateNormal];
-        // 字体改得更小更精致
-        btn.titleLabel.font = [UIFont systemFontOfSize:9 weight:UIFontWeightBold];
-        btn.tintColor = [UIColor whiteColor];
-        btn.tag = i;
-        [btn addTarget:self action:@selector(handlePopoverAction:) forControlEvents:UIControlEventTouchUpInside];
-        [self.popoverView.contentView addSubview:btn];
-        
-        // 增加中间的分割线
-        if (i == 0) {
-            UIView *sep = [[UIView alloc] initWithFrame:CGRectMake(btnW - 0.25, 10, 0.5, 12)];
-            sep.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.15];
-            [self.popoverView.contentView addSubview:sep];
-        }
-    }
-    
-    [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0 options:0 animations:^{
-        self.popoverView.alpha = 1.0;
-        self.popoverView.transform = CGAffineTransformIdentity;
-    } completion:nil];
-}
-
-- (void)hideControlPopover {
-    [UIView animateWithDuration:0.3 animations:^{
-        self.popoverView.alpha = 0;
-        self.popoverView.transform = CGAffineTransformMakeScale(0.4, 0.4);
-    } completion:^(BOOL finished) {
-        [self.popoverView removeFromSuperview];
-        self.popoverView = nil;
-    }];
-}
-
-- (void)handlePopoverAction:(UIButton *)sender {
-    [self hideControlPopover];
-    switch (sender.tag) {
-        case 0: // Full Screen (Animation version)
-            {
-                UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-                [gen impactOccurred];
-                
-                [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:0 animations:^{
-                    self.frame = [UIScreen mainScreen].bounds;
-                    self.layer.cornerRadius = 0;
-                    self.clippingContainer.layer.cornerRadius = 0;
-                    self.glassBackdrop.layer.cornerRadius = 0;
-                    if (self.hostView) self.hostView.layer.cornerRadius = 0;
-                } completion:^(BOOL finished) {
-                    // 动画完成后，再执行真实的 Scene 切换逻辑，确保无缝过渡
-                    NSString *bid = [self.bundleID copy];
-                    [self closeWindow];
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        [[UIApplication sharedApplication] launchApplicationWithIdentifier:bid suspended:NO];
-                    });
-                }];
-            }
-            break;
-        case 1: // Close
-            [self closeWindow];
-            break;
-    }
-}
-
 - (void)handleHideAction {
     UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [gen impactOccurred];
@@ -1192,6 +1007,7 @@ static NSMutableArray *floatingWindows = nil;
         [self.hostView removeFromSuperview];
     }];
 }
+
 - (void)updateAdaptiveColor {
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         UIImage *icon = [UIImage _applicationIconImageForBundleIdentifier:self.bundleID format:10 scale:[UIScreen mainScreen].scale];
@@ -1207,13 +1023,10 @@ static NSMutableArray *floatingWindows = nil;
             }
 
             [UIView animateWithDuration:0.8 animations:^{
-                self.topCapsule.backgroundColor = [self.adaptiveAppColor colorWithAlphaComponent:0.6];
                 self.innerGlowLayer.borderColor = [self.adaptiveAppColor colorWithAlphaComponent:0.6].CGColor;
                 self.innerGlowLayer.borderWidth = 0.8;
                 self.stashGrabber.layer.borderColor = [self.adaptiveAppColor colorWithAlphaComponent:0.5].CGColor;
             }];
-            
-            [self startCapsuleBreathing];
         });
     });
 }
@@ -1358,14 +1171,8 @@ static NSMutableArray *floatingWindows = nil;
     CGFloat currentScale = w / baseWidth;
     
     CGFloat scaledDragH = 30 * currentScale;
-    CGFloat scaledCapW = kChevronLayoutConstants.windowHandleW * currentScale;
-    CGFloat scaledCapH = kChevronLayoutConstants.windowHandleH * currentScale;
     
     self.dragHandle.frame = CGRectMake(0, 0, w, scaledDragH);
-    self.topCapsule.bounds = CGRectMake(0, 0, scaledCapW, scaledCapH);
-    // 核心修复：位置上移，距离顶部仅留 6pt 呼吸间距，模仿 iPadOS 的贴顶精致感
-    self.topCapsule.center = CGPointMake(w / 2.0, 6 + scaledCapH / 2.0);
-    self.topCapsule.layer.cornerRadius = scaledCapH / 2.0;
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
@@ -1373,28 +1180,6 @@ static NSMutableArray *floatingWindows = nil;
     self.innerGlowLayer.frame = self.clippingContainer.bounds;
     self.cyanLayer.frame = self.clippingContainer.bounds;
     self.magentaLayer.frame = self.clippingContainer.bounds;
-
-    if (self.capsuleGlowLayer) {
-        self.capsuleGlowLayer.frame = self.topCapsule.bounds;
-        self.capsuleGlowLayer.cornerRadius = self.topCapsule.layer.cornerRadius;
-    }
-    
-    // 同步更新胶囊模糊背景
-    for (UIView *sub in self.topCapsule.subviews) {
-        if ([sub isKindOfClass:[UIVisualEffectView class]]) {
-            sub.frame = self.topCapsule.bounds;
-            sub.layer.cornerRadius = self.topCapsule.layer.cornerRadius;
-        }
-    }
-
-    // 重新排列胶囊内部的装饰圆点
-    CGFloat dotSpacing = scaledCapW / 4.0;
-    for (int i = 0; i < self.capsuleDots.count; i++) {
-        UIView *dot = self.capsuleDots[i];
-        dot.bounds = CGRectMake(0, 0, 1.5 * currentScale, 1.5 * currentScale);
-        dot.center = CGPointMake(dotSpacing * (i + 1), scaledCapH / 2.0);
-        dot.layer.cornerRadius = (1.5 * currentScale) / 2.0;
-    }
 
     // 强制执行 1.15x 几何缩放 (Liquid Glass Engine 规范)
     for (UIView *subview in self.glassBackdrop.subviews) {
@@ -1689,10 +1474,9 @@ static NSMutableArray *floatingWindows = nil;
         stretchTransform = CGAffineTransformRotate(stretchTransform, -angle);
         
         // 核心修复：
-        // A. 玻璃背景、装饰胶囊应用 stretchTransform，营造液态流动感。
+        // A. 玻璃背景应用 stretchTransform，营造液态流动感。
         // B. 子图层 (InnerGlow, Cyan, Magenta) 已移出 Backdrop 并解除嵌套，因此保持刚性，防止“脱离画面”
         self.glassBackdrop.transform = stretchTransform;
-        self.topCapsule.transform = stretchTransform; 
         
         // C. 画面内容保持基准缩放，绝不参与惯性形变，确保文字清晰且不产生“残影”
         CGRect screen = [UIScreen mainScreen].bounds;
@@ -1723,7 +1507,6 @@ static NSMutableArray *floatingWindows = nil;
     if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
         [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:UIViewAnimationOptionCurveEaseInOut animations:^{
             self.transform = CGAffineTransformIdentity;
-            self.topCapsule.transform = CGAffineTransformIdentity;
             self.glassBackdrop.transform = CGAffineTransformIdentity; // 核心修复：重置玻璃形变
             
             // 重置所有图层形变
