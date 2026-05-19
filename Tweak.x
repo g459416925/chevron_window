@@ -565,11 +565,17 @@ static NSMutableArray *floatingWindows = nil;
         self.layer.shadowOpacity = 0.4;
         self.layer.shadowRadius = 20.0;
         self.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+        if (@available(iOS 13.0, *)) {
+            self.layer.cornerCurve = kCACornerCurveContinuous;
+        }
         
         // 核心修复：引入非缩放裁剪层 (Clipping Container)
         // 该层的大小始终等于窗口大小，负责强制执行圆角裁剪，不受内部缩放影响
         self.clippingContainer = [[UIView alloc] initWithFrame:self.bounds];
         self.clippingContainer.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+        if (@available(iOS 13.0, *)) {
+            self.clippingContainer.layer.cornerCurve = kCACornerCurveContinuous;
+        }
         self.clippingContainer.layer.masksToBounds = YES;
         self.clippingContainer.backgroundColor = [UIColor clearColor];
         [self addSubview:self.clippingContainer];
@@ -578,6 +584,9 @@ static NSMutableArray *floatingWindows = nil;
         self.glassBackdrop = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial]];
         self.glassBackdrop.frame = self.clippingContainer.bounds;
         self.glassBackdrop.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+        if (@available(iOS 13.0, *)) {
+            self.glassBackdrop.layer.cornerCurve = kCACornerCurveContinuous;
+        }
         self.glassBackdrop.layer.masksToBounds = YES;
         self.glassBackdrop.backgroundColor = [UIColor clearColor];
         [self.clippingContainer insertSubview:self.glassBackdrop atIndex:0];
@@ -593,6 +602,9 @@ static NSMutableArray *floatingWindows = nil;
         self.innerGlowLayer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.45].CGColor;
         self.innerGlowLayer.borderWidth = 0.3;
         self.innerGlowLayer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+        if (@available(iOS 13.0, *)) {
+            self.innerGlowLayer.cornerCurve = kCACornerCurveContinuous;
+        }
         [self.clippingContainer.layer addSublayer:self.innerGlowLayer];
 
         self.cyanLayer = [CALayer layer];
@@ -600,6 +612,9 @@ static NSMutableArray *floatingWindows = nil;
         self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.15].CGColor;
         self.cyanLayer.borderWidth = 0.4;
         self.cyanLayer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+        if (@available(iOS 13.0, *)) {
+            self.cyanLayer.cornerCurve = kCACornerCurveContinuous;
+        }
         [self.clippingContainer.layer addSublayer:self.cyanLayer];
 
         self.magentaLayer = [CALayer layer];
@@ -607,6 +622,9 @@ static NSMutableArray *floatingWindows = nil;
         self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:0.15].CGColor;
         self.magentaLayer.borderWidth = 0.4;
         self.magentaLayer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+        if (@available(iOS 13.0, *)) {
+            self.magentaLayer.cornerCurve = kCACornerCurveContinuous;
+        }
         [self.clippingContainer.layer addSublayer:self.magentaLayer];
         
         // 顶部拖拽区域
@@ -1460,6 +1478,38 @@ static NSMutableArray *floatingWindows = nil;
         self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
         [gesture setTranslation:CGPointZero inView:nil];
         
+        // --- 建议 5：Dynamic Island Synergy (灵动岛引力场) ---
+        // 探测是否靠近 iPhone 14 Pro Max 灵动岛区域 (顶部中心 54pt 处)
+        CGPoint islandCenter = CGPointMake(screen.size.width / 2.0, 54.0);
+        CGFloat islandDist = sqrt(pow(self.center.x - islandCenter.x, 2) + pow(self.center.y - islandCenter.y, 2));
+        
+        if (islandDist < 120.0) {
+            // 产生引力拉伸：窗口装饰向灵动岛方向平滑偏移
+            CGFloat pull = (120.0 - islandDist) / 120.0;
+            CGAffineTransform islandPull = CGAffineTransformMakeTranslation((islandCenter.x - self.center.x) * pull * 0.4, (islandCenter.y - self.center.y) * pull * 0.4);
+            
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            self.innerGlowLayer.affineTransform = islandPull;
+            [CATransaction commit];
+            
+            // 进入“引力核心”时触发一次轻微刻度感
+            if (islandDist < 65.0) {
+                static NSTimeInterval lastIslandHaptic = 0;
+                if (CACurrentMediaTime() - lastIslandHaptic > 0.6) {
+                    UISelectionFeedbackGenerator *gen = [[UISelectionFeedbackGenerator alloc] init];
+                    [gen selectionChanged];
+                    lastIslandHaptic = CACurrentMediaTime();
+                }
+            }
+        } else {
+            // 归位
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            self.innerGlowLayer.affineTransform = CGAffineTransformIdentity;
+            [CATransaction commit];
+        }
+
         // 2. 惯性畸变计算 (非线性阻尼)
         CGFloat velMag = sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
         
@@ -1520,6 +1570,30 @@ static NSMutableArray *floatingWindows = nil;
     }
     
     if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        // --- 建议 6：Inertial Dismissal (惯性抛掷逻辑) ---
+        CGFloat velMag = sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
+        if (velMag > 2500.0) {
+            // 判定方向：如果向屏幕边缘快速划动且已位于边缘 120pt 范围内，则执行抛掷关闭
+            BOOL towardLeft = (velocity.x < -1800 && self.center.x < 150);
+            BOOL towardRight = (velocity.x > 1800 && self.center.x > screen.size.width - 150);
+            BOOL towardTop = (velocity.y < -1800 && self.center.y < 150);
+            
+            if (towardLeft || towardRight || towardTop) {
+                UIImpactFeedbackGenerator *flick = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+                [flick impactOccurred];
+                
+                [UIView animateWithDuration:0.45 delay:0 options:UIViewAnimationOptionCurveEaseIn animations:^{
+                    // 沿初速度方向飞出，同时伴随极速坍缩
+                    self.center = CGPointMake(self.center.x + velocity.x * 0.15, self.center.y + velocity.y * 0.15);
+                    self.transform = CGAffineTransformScale(self.transform, 0.01, 0.01);
+                    self.alpha = 0;
+                } completion:^(BOOL finished) {
+                    [self closeWindow];
+                }];
+                return;
+            }
+        }
+
         [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:UIViewAnimationOptionCurveEaseInOut animations:^{
             self.transform = CGAffineTransformIdentity;
             self.glassBackdrop.transform = CGAffineTransformIdentity; // 核心修复：重置玻璃形变
@@ -2211,7 +2285,9 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
         self.launchDebounce = NO;
     });
 
-    [self.feedback impactOccurred];
+    UIImpactFeedbackGenerator *launcherImpact = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [launcherImpact impactOccurred];
+
     if (info.bundleId) {
         NSString *bid = [info.bundleId copy];
         
@@ -2722,6 +2798,9 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
     self.appPanel = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];    self.appPanel.frame = self.panelContainer.bounds;
     self.appPanel.backgroundColor = [[UIColor clearColor] colorWithAlphaComponent:0.0]; // 移除黄色测试色
     self.appPanel.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+    if (@available(iOS 13.0, *)) {
+        self.appPanel.layer.cornerCurve = kCACornerCurveContinuous;
+    }
     self.appPanel.layer.masksToBounds = YES;
     self.appPanel.layer.borderWidth = 0.4;
     self.appPanel.layer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.2].CGColor;
@@ -2745,6 +2824,9 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
     self.innerGlowLayer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.45].CGColor;
     self.innerGlowLayer.borderWidth = 0.3;
     self.innerGlowLayer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+    if (@available(iOS 13.0, *)) {
+        self.innerGlowLayer.cornerCurve = kCACornerCurveContinuous;
+    }
     [self.appPanel.layer addSublayer:self.innerGlowLayer];
 
     self.specularHighlight = [CAGradientLayer layer];
@@ -2754,6 +2836,9 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
 
     self.dispersionContainer = [[UIView alloc] initWithFrame:self.appPanel.bounds];
     self.dispersionContainer.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+    if (@available(iOS 13.0, *)) {
+        self.dispersionContainer.layer.cornerCurve = kCACornerCurveContinuous;
+    }
     self.dispersionContainer.layer.masksToBounds = YES;
     self.dispersionContainer.userInteractionEnabled = NO;
     [self.appPanel.contentView addSubview:self.dispersionContainer];
@@ -3216,7 +3301,7 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
 }
 
 - (void)handleCategoryTap:(UIButton *)sender {
-    [self.feedback impactOccurred];
+    [self.selectionFeedback selectionChanged]; // 模拟物理拨轮的刻度感
     
     // 从标题中解析出原始分类名，如从 "社交 (12)" 解析出 "社交"
     NSString *fullTitle = sender.titleLabel.text;
@@ -4149,21 +4234,42 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         self.magentaLayer.frame = CGRectInset(self.appPanel.bounds, 0.3, 0.3);
         [self.collectionView.collectionViewLayout invalidateLayout];
 
-        self.panelContainer.transform = CGAffineTransformScale(startTransform, 0.01, 0.01);
+        self.panelContainer.transform = CGAffineTransformScale(startTransform, 0.4, 0.4);
         self.panelContainer.alpha = 0;
+
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        // 建议 4：初始状态强制背景层放大，模拟凝聚感
+        for (UIView *subview in self.appPanel.subviews) {
+            if ([NSStringFromClass([subview class]) containsString:@"Backdrop"]) {
+                subview.transform = CGAffineTransformMakeScale(1.5, 1.5);
+            }
+        }
+        [CATransaction commit];
 
         // 建议3：使用预热缓存的中心点 (Layout Pre-warming)
         CGPoint targetCenter = (self.cachedTargetCenter.x > 0) ? self.cachedTargetCenter : [self calculateTargetCenter];
 
-        [UIView animateWithDuration:0.6 delay:0 usingSpringWithDamping:0.45 initialSpringVelocity:1.5 options:0 animations:^{
+        [UIView animateWithDuration:0.75 delay:0 usingSpringWithDamping:0.65 initialSpringVelocity:1.2 options:0 animations:^{
             self.dimmingView.alpha = 1.0;
             self.panelContainer.center = targetCenter;
             self.panelContainer.transform = initialRotation;
             self.panelContainer.alpha = 1;
+            
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            // 模糊层回缩，创造液态归位视觉
+            for (UIView *subview in self.appPanel.subviews) {
+                if ([NSStringFromClass([subview class]) containsString:@"Backdrop"]) {
+                    subview.transform = CGAffineTransformMakeScale(1.15, 1.15);
+                }
+            }
+            [CATransaction commit];
+            
+            // 实时汲取当前活跃 App 的色调注入遮罩
+            CV3UpdateAdaptiveTint([self currentActiveBundleID]);
         } completion:^(BOOL f){ 
             self.isAnimating = NO; 
-            self.currentDecoDX = 0; // 重置惯性状态
-            self.currentDecoDY = 0;
             [self startLiquidMotion]; 
         }];
     } else {
@@ -4179,11 +4285,21 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         // 获取当前的旋转状态
         CGAffineTransform currentRotation = self.panelContainer.transform;
         
-        [UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseIn animations:^{ 
+        [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0.5 options:0 animations:^{ 
             self.dimmingView.alpha = 0;
             self.panelContainer.alpha = 0; 
             self.panelContainer.center = self.lastTriggerPoint; // 回退到存储的触发点
-            self.panelContainer.transform = CGAffineTransformScale(currentRotation, 0.05, 0.05);
+            self.panelContainer.transform = CGAffineTransformScale(currentRotation, 0.5, 0.5);
+            
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            // 消失时再次放大模糊层，模拟消散
+            for (UIView *subview in self.appPanel.subviews) {
+                if ([NSStringFromClass([subview class]) containsString:@"Backdrop"]) {
+                    subview.transform = CGAffineTransformMakeScale(1.5, 1.5);
+                }
+            }
+            [CATransaction commit];
         } completion:^(BOOL f){ 
             self.isAnimating = NO; 
             self.panelContainer.hidden = YES; 
@@ -4245,18 +4361,25 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         self.cyanLayer.transform = CATransform3DMakeTranslation(-dx, -dy, 0);
         self.magentaLayer.transform = CATransform3DMakeTranslation(dx, dy, 0);
 
-        // 建议2：视差解耦 (Parallax Decoupling) - 使用定义的系数
+        // 建议2：视差解耦 (Parallax Decoupling) 2.0 - 多平面深度体系
+        // 核心原理：层级越高（越靠近用户），位移系数越大
         CGFloat panelDX = deltaRoll * kChevronPhysicsConstants.parallaxPanelFactor;
         CGFloat panelDY = deltaPitch * kChevronPhysicsConstants.parallaxPanelFactor;
         self.appPanel.transform = CGAffineTransformMakeTranslation(panelDX, panelDY);
 
+        // 建议 3：Glow & Content Depth (发光与内容深度差)
+        // 内发光层位移略大于面板，创造玻璃边缘的折射感
+        CGFloat glowDX = panelDX * 1.15;
+        CGFloat glowDY = panelDY * 1.15;
+        self.innerGlowLayer.affineTransform = CGAffineTransformMakeTranslation(glowDX, glowDY);
+
         // 建议 2：Gravity-Aware Icons (重力图标视差)
-        // 遍历可见 cell，应用反向视差
+        // 遍历可见 cell，应用反向视差，系数设为最高以凸显浮空感
         NSArray *visibleCells = [self.collectionView visibleCells];
         for (UICollectionViewCell *cell in visibleCells) {
             if ([cell isKindOfClass:[CV3AppCell class]]) {
-                // 图标向相反方向移动，产生深度感 (2.5x 系数实现更明显的视差)
-                ((CV3AppCell *)cell).iconOffset = CGPointMake(-deltaRoll * 2.5, -deltaPitch * 2.5);
+                // 图标位移系数 3.5x，创造明显的层次差
+                ((CV3AppCell *)cell).iconOffset = CGPointMake(-deltaRoll * 3.5, -deltaPitch * 3.5);
             }
         }
 
