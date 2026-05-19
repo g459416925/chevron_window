@@ -69,3 +69,7 @@
     - 增强了 `enforceSceneForegroundState` 的重连健壮性，增加了对 Scene 连接状态的检测逻辑。
     - 在自动重连过程中添加了更详尽的异步日志记录（`CV3LogToFile`），提升了生产环境下的故障诊断能力。
     - 优化了 App 启动与重连流程的稳定性，确保分屏窗口在 App 意外崩溃或系统回收场景下具备更佳的恢复能力。
+- **v1.0.3 前台主权 (Foreground Sovereignty)**:
+    - **进程优先级硬化**: 必须通过 `RBSAssertion` (RunningBoard) 为托管 App 注入 `UserInteractive` 级别的断言，防止系统在主 App 活跃时挂起分屏应用。
+    - **硬件权限豁免**: 在 `FBScene` settings 中强制注入 `occluded = NO` 和 `visibility = 2`，确保分屏 App 拥有原生前台 App 的摄像头、麦克风和传感器访问权限。
+    - **休眠抑制**: 强制设置 `idleTimerDisabled = YES` 覆盖分屏 App 设置，防止其在分屏状态下触发自动锁屏。

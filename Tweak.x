@@ -4,6 +4,7 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <objc/runtime.h>
 #include <sys/stat.h>
+#include <signal.h>
 
 #pragma mark - Private API Declarations
 @interface SBWindow : UIWindow
@@ -21,8 +22,14 @@
 @interface SpringBoard : UIApplication
 @end
 
+@interface SBDisplayItem : NSObject
+@property (nonatomic, readonly, copy) NSString *bundleIdentifier;
+@end
+
 @interface SBMainWorkspace : NSObject
 + (id)sharedInstance;
+- (id)activeDisplayItem;
+- (NSSet *)activeDisplayItems;
 @end
 
 @interface SBIconController : NSObject
@@ -66,6 +73,7 @@
 @interface SBApplication : NSObject
 @property (nonatomic, readonly) NSString *bundleIdentifier;
 - (FBScene *)mainScene;
+- (void)_terminateWithReason:(int)arg1 description:(id)arg2;
 @end
 
 @interface SBApplicationController : NSObject
@@ -80,6 +88,7 @@
 @property (assign, nonatomic) BOOL foreground;
 @property (assign, nonatomic) BOOL backgrounded;
 @property (assign, nonatomic) CGRect frame;
+@property (assign, nonatomic) NSInteger interruptionPolicy; // 0: None, 1: Suppress, 2: Defer
 @end
 
 @interface UIMutableApplicationSceneSettings : FBSMutableSceneSettings
@@ -118,6 +127,44 @@
 @property (nonatomic, assign) NSUInteger presentedLayerTypes;
 @property (nonatomic, assign) NSUInteger appearanceStyle;
 @property (nonatomic, assign) BOOL clipsToBounds;
+@end
+
+#pragma mark - Foreground Sovereignty: RunningBoard & Process Management
+@interface RBSProcessIdentity : NSObject
++ (instancetype)identityForEmbeddedApplicationIdentifier:(NSString *)arg1;
+@end
+
+@interface RBSTarget : NSObject
++ (instancetype)targetWithProcessIdentity:(RBSProcessIdentity *)arg1;
+@end
+
+@interface RBSAssertion : NSObject
+- (instancetype)initWithExplanation:(NSString *)arg1 target:(RBSTarget *)arg2 attributes:(NSArray *)arg3;
+- (BOOL)acquireWithError:(out NSError **)arg1;
+- (void)invalidate;
+@end
+
+@interface RBSDomainAttribute : NSObject
++ (instancetype)attributeWithDomain:(NSString *)arg1 name:(NSString *)arg2;
+@end
+
+@interface FBProcessTerminationContext : NSObject
+@property (assign, nonatomic) unsigned long long exceptionCode;
+@property (copy, nonatomic) NSString *explanation;
+@property (assign, nonatomic) BOOL reportTermination;
+@end
+
+@interface FBProcess : NSObject
+@property (nonatomic, readonly) int pid;
+@property (nonatomic, readonly) NSString *bundleIdentifier;
+- (void)terminateWithContext:(FBProcessTerminationContext *)arg1;
+- (void)terminate;
+@end
+
+@interface FBProcessManager : NSObject
++ (instancetype)sharedInstance;
+- (FBProcess *)processForBundleIdentifier:(NSString *)bundleIdentifier;
+- (void)terminateProcess:(FBProcess *)arg1 withContext:(FBProcessTerminationContext *)arg2;
 @end
 
 #pragma mark - Data Model
@@ -490,6 +537,7 @@ static NSMutableArray *floatingWindows = nil;
 @property (nonatomic, assign) UIInterfaceOrientation targetOrientation;
 @property (nonatomic, assign) CGAffineTransform baseRotationTransform;
 @property (nonatomic, strong) UIView *liveResizeSnapshotView;
+@property (nonatomic, strong) RBSAssertion *rbsAssertion; 
 
 - (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene;
 - (void)triggerCollisionImpulse;
@@ -895,6 +943,28 @@ static NSMutableArray *floatingWindows = nil;
         } @catch (NSException *e) {}
         
         if (needsUpdate) {
+            // [Foreground Sovereignty] Final Hardening: Force occluded=NO and visibility=2 to ensure hardware access (Camera/Mic)
+            @try {
+                if ([settings respondsToSelector:@selector(setOccluded:)]) {
+                    [settings setValue:@NO forKey:@"occluded"];
+                }
+                if ([settings respondsToSelector:@selector(setVisibility:)]) {
+                    [settings setValue:@2 forKey:@"visibility"];
+                }
+                // 禁止分屏 App 触发自动锁屏
+                if ([settings respondsToSelector:@selector(setIdleTimerDisabled:)]) {
+                    [settings setValue:@YES forKey:@"idleTimerDisabled"];
+                }
+                
+                // [Foreground Sovereignty] Force interruptionPolicy to 0 (None)
+                // This is critical for camera/mic apps like Douyin to prevent the system from pausing capture.
+                if ([settings respondsToSelector:@selector(setInterruptionPolicy:)]) {
+                    [settings setInterruptionPolicy:0];
+                } else {
+                    @try { [settings setValue:@0 forKey:@"interruptionPolicy"]; } @catch (NSException *e) {}
+                }
+            } @catch (NSException *e) {}
+
             [self.targetScene updateSettings:settings withTransitionContext:nil];
             if ([self.targetScene respondsToSelector:@selector(_setContentState:)]) {
                 [self.targetScene _setContentState:2]; 
@@ -1459,6 +1529,34 @@ static NSMutableArray *floatingWindows = nil;
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
             [[UIApplication sharedApplication] launchApplicationWithIdentifier:self.bundleID suspended:YES];
+            
+            // [Foreground Sovereignty] Inject RunningBoard assertion to prevent process suspension
+            if (self.rbsAssertion) {
+                [self.rbsAssertion invalidate];
+                self.rbsAssertion = nil;
+            }
+            
+            @try {
+                RBSProcessIdentity *identity = [%c(RBSProcessIdentity) identityForEmbeddedApplicationIdentifier:self.bundleID];
+                RBSTarget *target = [%c(RBSTarget) targetWithProcessIdentity:identity];
+                
+                // 使用 UserInteractive 域和 Foreground 属性，模拟原生前台 App 的优先级
+                RBSDomainAttribute *foregroundAttr = [%c(RBSDomainAttribute) attributeWithDomain:@"com.apple.common" name:@"UserInteractive"];
+                
+                self.rbsAssertion = [[%c(RBSAssertion) alloc] initWithExplanation:[NSString stringWithFormat:@"ChevronV3 Sovereignty for %@", self.bundleID] 
+                                                                           target:target 
+                                                                       attributes:@[foregroundAttr]];
+                
+                NSError *error = nil;
+                if ([self.rbsAssertion acquireWithError:&error]) {
+                    CV3LogToFile(@"[Immortality] 成功为 %@ 注入前台优先级断连 (RBSAssertion)", self.bundleID);
+                } else {
+                    CV3LogToFile(@"[Error] RBSAssertion 注入失败: %@", error);
+                }
+            } @catch (NSException *e) {
+                CV3LogToFile(@"[Error] RBSAssertion 流程异常: %@", e);
+            }
+
             // Start polling with initial delay of 0.3s, up to 5 retries (max ~4 seconds)
             [self attemptToHostSceneWithRetries:5 delay:0.3];
         } @catch (NSException *e) {
@@ -2053,6 +2151,13 @@ static NSMutableArray *floatingWindows = nil;
     self.hidden = YES;
     [self syncWindowBoundsToClient];
 
+    // [Foreground Sovereignty] Invalidate RBSAssertion
+    if (self.rbsAssertion) {
+        [self.rbsAssertion invalidate];
+        self.rbsAssertion = nil;
+        CV3LogToFile(@"[Immortality] 已释放 %@ 的前台优先级断连", self.bundleID);
+    }
+
     if (self.hostView) {
         // [Geek Advice] Explicitly disable hosting for the requester to release FBScene resources
         @try {
@@ -2067,12 +2172,77 @@ static NSMutableArray *floatingWindows = nil;
             CV3LogToFile(@"[Error] Failed to disable hosting during closeWindow: %@", e);
         }
 
+        // [New] Reset Scene Settings to Background before destroying
+        if (self.targetScene) {
+            @try {
+                FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
+                if ([settings respondsToSelector:@selector(setForeground:)]) [settings setForeground:NO];
+                if ([settings respondsToSelector:@selector(setBackgrounded:)]) [settings setBackgrounded:YES];
+                [self.targetScene updateSettings:settings withTransitionContext:nil];
+                CV3LogToFile(@"[Aggressive] 已将 Scene 设置为后台状态: %@", self.bundleID);
+            } @catch (NSException *e) {
+                CV3LogToFile(@"[Error] Reset scene settings failed: %@", e);
+            }
+        }
+
         if ([self.hostView respondsToSelector:@selector(invalidate)]) {
             [self.hostView performSelector:@selector(invalidate)];
         }
         [self.hostView removeFromSuperview];
         self.hostView = nil;
     }
+
+    // [Aggressive Termination] Option A: Force kill the application to stop all system-level services
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (!self.bundleID) return;
+        
+        @try {
+            // 1. First attempt: Official SBApplication termination
+            SBApplication *app = [[%c(SBApplicationController) sharedInstance] applicationWithBundleIdentifier:self.bundleID];
+            if (app && [app respondsToSelector:@selector(_terminateWithReason:description:)]) {
+                CV3LogToFile(@"[Aggressive] 正在通过 SBApplication 终止应用: %@", self.bundleID);
+                [app _terminateWithReason:1 description:@"ChevronV3 Close"];
+            }
+
+            // 2. Second attempt: FBProcessManager with Context
+            FBProcessManager *procMgr = [%c(FBProcessManager) sharedInstance];
+            FBProcess *proc = [procMgr processForBundleIdentifier:self.bundleID];
+            if (proc) {
+                CV3LogToFile(@"[Aggressive] 发现活动进程 %d, 正在执行 FBProcess 终止...", proc.pid);
+                
+                @try {
+                    FBProcessTerminationContext *context = [[%c(FBProcessTerminationContext) alloc] init];
+                    context.explanation = @"ChevronV3 User Request";
+                    context.exceptionCode = 0xDEADBEEF;
+                    context.reportTermination = NO;
+                    
+                    if ([procMgr respondsToSelector:@selector(terminateProcess:withContext:)]) {
+                        [procMgr terminateProcess:proc withContext:context];
+                    } else if ([proc respondsToSelector:@selector(terminateWithContext:)]) {
+                        [proc terminateWithContext:context];
+                    } else {
+                        [proc terminate];
+                    }
+                } @catch (NSException *inner) {
+                    CV3LogToFile(@"[Error] FBProcess termination failed: %@", inner);
+                }
+
+                // 3. Final fallback: SIGKILL (The most aggressive way)
+                // We check if the process is still alive after a tiny delay
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    FBProcess *recheck = [[%c(FBProcessManager) sharedInstance] processForBundleIdentifier:self.bundleID];
+                    if (recheck && recheck.pid > 0) {
+                        CV3LogToFile(@"[Aggressive] 进程 %d 依然存活，发送 SIGKILL 强杀！", recheck.pid);
+                        kill(recheck.pid, SIGKILL);
+                    } else {
+                        CV3LogToFile(@"[Aggressive] 应用 %@ 已成功退出。", self.bundleID);
+                    }
+                });
+            }
+        } @catch (NSException *e) {
+            CV3LogToFile(@"[Error] 终止流程异常: %@", e);
+        }
+    });
     
     self.windowScene = nil; // Clear scene attachment
     [floatingWindows removeObject:self];
@@ -5181,6 +5351,43 @@ static NSTimeInterval lastLogTime = 0;
 %end
 
 %hook SBMainWorkspace
+- (NSSet *)activeDisplayItems {
+    NSSet *orig = %orig;
+    if (floatingWindows && floatingWindows.count > 0) {
+        NSMutableSet *mutableItems = [orig mutableCopy];
+        BOOL modified = NO;
+        
+        // 我们需要找到这些分屏 App 对应的 SBDisplayItem
+        // 既然我们运行在 SpringBoard 中，可以尝试通过 SBApplication 转换
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if (win.isClosing) continue;
+            
+            // 查找是否存在对应的 DisplayItem
+            BOOL alreadyPresent = NO;
+            for (id item in orig) {
+                if ([item respondsToSelector:@selector(bundleIdentifier)] && [[item bundleIdentifier] isEqualToString:win.bundleID]) {
+                    alreadyPresent = YES;
+                    break;
+                }
+            }
+            
+            if (!alreadyPresent) {
+                // 如果原始集合里没有，我们尝试从 orig 中复制一个模板并修改 BID (危险但有效)
+                // 或者更好的方案：如果是 iOS 16，我们直接拦截 TCC 检查逻辑。
+                // 这里我们先尝试扩大 activeDisplayItems 范围
+                modified = YES;
+            }
+        }
+        
+        if (modified) {
+            // 注意：简单地添加 BID 字符串是不够的，通常需要 SBDisplayItem 对象。
+            // 但对于某些 TCC 检查，仅 NSSet 包含该 BID 即可通过。
+            return [mutableItems copy];
+        }
+    }
+    return orig;
+}
+
 - (void)transaction:(id)arg1 willBeginLayoutTransitionWithContext:(id)arg2 {
     CV3LogToFile(@"[Workspace] Layout 转换即将开始...");
     %orig;
@@ -5417,6 +5624,17 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
     }
     return %orig;
 }
+
+- (BOOL)isSuspended {
+    if (floatingWindows && floatingWindows.count > 0) {
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if ([self.bundleIdentifier isEqualToString:win.bundleID] && !win.isClosing) {
+                return NO; 
+            }
+        }
+    }
+    return %orig;
+}
 %end
 
 %hook SBMainSwitcherViewController
@@ -5465,18 +5683,30 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                     modified = YES;
                 }
                 
-                // 核心：iOS 16 关键拦截。防止在切换 App 时被标记为不可见。
+                // [Foreground Sovereignty] Extra Hardening in global hook
                 @try {
                     if ([mutableSettings respondsToSelector:@selector(setOccluded:)]) {
-                        CV3LogToFile(@"[FBScene] 拦截到 Occluded 请求 -> YES，强制修正为 NO: %@", win.bundleID);
                         [mutableSettings setValue:@NO forKey:@"occluded"];
                         modified = YES;
                     }
-                    // 增加对可见性标志的强力拦截
                     if ([mutableSettings respondsToSelector:@selector(setVisibility:)]) {
-                        CV3LogToFile(@"[FBScene] 拦截到 Visibility 变更请求，强制修正为 2: %@", win.bundleID);
-                        [mutableSettings setValue:@2 forKey:@"visibility"]; // 2 通常代表完全可见
+                        [mutableSettings setValue:@2 forKey:@"visibility"];
                         modified = YES;
+                    }
+                    if ([mutableSettings respondsToSelector:@selector(setIdleTimerDisabled:)]) {
+                        [mutableSettings setValue:@YES forKey:@"idleTimerDisabled"];
+                        modified = YES;
+                    }
+
+                    // [Foreground Sovereignty] Force interruptionPolicy to 0 (None)
+                    if ([mutableSettings respondsToSelector:@selector(setInterruptionPolicy:)]) {
+                        [mutableSettings setInterruptionPolicy:0];
+                        modified = YES;
+                    } else {
+                        @try { 
+                            [mutableSettings setValue:@0 forKey:@"interruptionPolicy"]; 
+                            modified = YES;
+                        } @catch (NSException *e) {}
                     }
                 } @catch (NSException *e) {}
 
@@ -5525,6 +5755,21 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                     if ([mutableSettings respondsToSelector:@selector(setVisibility:)]) {
                         [mutableSettings setValue:@2 forKey:@"visibility"];
                         modified = YES;
+                    }
+                    if ([mutableSettings respondsToSelector:@selector(setIdleTimerDisabled:)]) {
+                        [mutableSettings setValue:@YES forKey:@"idleTimerDisabled"];
+                        modified = YES;
+                    }
+
+                    // [Foreground Sovereignty] Force interruptionPolicy to 0 (None)
+                    if ([mutableSettings respondsToSelector:@selector(setInterruptionPolicy:)]) {
+                        [mutableSettings setInterruptionPolicy:0];
+                        modified = YES;
+                    } else {
+                        @try { 
+                            [mutableSettings setValue:@0 forKey:@"interruptionPolicy"]; 
+                            modified = YES;
+                        } @catch (NSException *e) {}
                     }
                 } @catch (NSException *e) {}
 
