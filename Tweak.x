@@ -505,6 +505,19 @@ static NSMutableArray *floatingWindows = nil;
 }
 @end
 
+// --- Custom Resize Handle with Expanded Hit Area ---
+@interface CV3ResizeHandleView : UIView
+@end
+@implementation CV3ResizeHandleView
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    // 深度优化敏感度：将热区扩充至 80x80，确保盲操作也能精准捕捉
+    CGFloat widthDelta = MAX(0, 80.0 - self.bounds.size.width);
+    CGFloat heightDelta = MAX(0, 80.0 - self.bounds.size.height);
+    CGRect hitFrame = CGRectInset(self.bounds, -widthDelta/2.0, -heightDelta/2.0);
+    return CGRectContainsPoint(hitFrame, point);
+}
+@end
+
 %hook UIWindow
 - (NSString *)_role {
     if ([self isKindOfClass:[CV3FloatingAppWindow class]]) {
@@ -522,6 +535,21 @@ static NSMutableArray *floatingWindows = nil;
         }
     }
     %orig(alpha);
+}
+
+// 核心增强：允许触控溢出窗口边界 (针对缩放把手)
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    if (![self isKindOfClass:[CV3FloatingAppWindow class]]) return %orig;
+    
+    if (CGRectContainsPoint(self.bounds, point)) return YES;
+    
+    // 专门为右下角缩放把手留出 30pt 的外部“吸附热区”
+    // 即使手指稍微划出分屏窗口外，依然能继续驱动缩放，解决“断触”感
+    CGRect bounds = self.bounds;
+    CGRect resizeExtraHitBox = CGRectMake(bounds.size.width - 20, bounds.size.height - 20, 50, 50);
+    if (CGRectContainsPoint(resizeExtraHitBox, point)) return YES;
+    
+    return NO;
 }
 %end
 
@@ -649,8 +677,8 @@ static NSMutableArray *floatingWindows = nil;
         [self.dragHandle addGestureRecognizer:pan];
         
         // 右下角缩放把手 (同心圆/Stage Manager 风格)
-        self.resizeHandle = [[UIView alloc] initWithFrame:CGRectMake(260, 460, 40, 40)];
-        self.resizeHandle.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.01]; // 必须有微弱的背景色才能接收触控，否则透传给底层的 App
+        self.resizeHandle = [[CV3ResizeHandleView alloc] initWithFrame:CGRectMake(260, 460, 40, 40)];
+        self.resizeHandle.backgroundColor = [UIColor clearColor]; // 已通过 CV3ResizeHandleView 优化热区，无需背景色即可接收触控
         [self addSubview:self.resizeHandle];
         
         self.resizeHandleLayer = [CAShapeLayer layer];
@@ -1380,7 +1408,15 @@ static NSMutableArray *floatingWindows = nil;
     
     // 核心修复：使用与主面板一致的 convenience 构造器，确保把手仅包含圆弧线条
     // bezierPathWithArcCenter 不会包含圆心点，从根本上杜绝了“扇形填充”或“双色块”现象
-    self.resizeHandleLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(5, 5) radius:20 startAngle:0 endAngle:M_PI_2 clockwise:YES].CGPath;
+    // 核心：精简把手弧度 (Apple-style Refinement)
+    // 将原来的 90 度大圆弧缩短为更精致的 35 度片段，锁定在 45 度对角线中心
+    CGFloat centerAngle = M_PI_4;
+    CGFloat halfSweep = M_PI / 10.0; // 约 18 度，总计约 36 度
+    self.resizeHandleLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(5, 5) 
+                                                               radius:20 
+                                                           startAngle:centerAngle - halfSweep 
+                                                             endAngle:centerAngle + halfSweep 
+                                                            clockwise:YES].CGPath;
     self.resizeHandleLayer.fillColor = [UIColor clearColor].CGColor;
     self.resizeHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
     self.resizeHandleLayer.lineWidth = 2.0;
@@ -1919,10 +1955,18 @@ static NSMutableArray *floatingWindows = nil;
     if (gesture.state == UIGestureRecognizerStateBegan) {
         self.initialResizeFrame = self.frame;
         
+        UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+        [gen impactOccurred];
+
         [CATransaction begin];
         [CATransaction setAnimationDuration:0.2];
         self.resizeHandleLayer.strokeColor = [[UIColor cyanColor] colorWithAlphaComponent:0.8].CGColor;
         self.resizeHandleLayer.lineWidth = 3.5;
+        // 增加外发光效果 (Glow)
+        self.resizeHandleLayer.shadowColor = [UIColor cyanColor].CGColor;
+        self.resizeHandleLayer.shadowOffset = CGSizeZero;
+        self.resizeHandleLayer.shadowOpacity = 0.8;
+        self.resizeHandleLayer.shadowRadius = 5.0;
         [CATransaction commit];
     }
     
@@ -1945,8 +1989,11 @@ static NSMutableArray *floatingWindows = nil;
         CGFloat initialDist = sqrt(pow(initialHandlePos.x - initialCenter.x, 2) + pow(initialHandlePos.y - initialCenter.y, 2));
         CGFloat currentDist = sqrt(pow(currentHandlePos.x - initialCenter.x, 2) + pow(currentHandlePos.y - initialCenter.y, 2));
         
-        // 避免除零
-        CGFloat scaleFactor = initialDist > 0 ? (currentDist / initialDist) : 1.0;
+        // 避免除零，并应用 1.25x 的敏感度增益 (Sensitivity Gain)
+        // 增益能让缩放响应更快，抵消掉矢量计算带来的“沉重感”
+        CGFloat rawScaleFactor = initialDist > 0 ? (currentDist / initialDist) : 1.0;
+        CGFloat scaleFactor = 1.0 + (rawScaleFactor - 1.0) * 1.25; 
+        
         CGFloat targetWidth = self.initialResizeFrame.size.width * scaleFactor;
         CGFloat finalWidth = targetWidth;
         
@@ -1993,23 +2040,57 @@ static NSMutableArray *floatingWindows = nil;
             
         self.frame = newFrame;
         
-        // 3. 视觉挤压特效 (Visual Squeeze Effect)
+        // 核心修复：抖动消除 (Jitter Fix)
+        // 1. 禁用隐式动画，防止图层在手势更新时产生微小的插值位移
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
+        
+        // 2. 严禁在有 Transform 的情况下设置 frame。改用 Bounds + Center。
+        // 这能从根本上消除因 Transform 与 Frame 逻辑冲突导致的“剧烈抖动”
+        self.bounds = CGRectMake(0, 0, finalWidth, finalHeight);
+        self.center = CGPointMake(CGRectGetMidX(newFrame), CGRectGetMidY(newFrame));
+        
+        // 3. 强制同步内部布局，确保渲染内容（HostView）与窗口边界实时对齐
+        [self layoutIfNeeded];
+        
+        // 4. 视觉挤压特效 (Visual Squeeze Effect)
         if (targetWidth < minAllowedWidth) {
-            // 当尺寸小于最小值时，产生 0.85x - 1.0x 的非线性挤压感
             CGFloat squeeze = 1.0 - (minAllowedWidth - targetWidth) / minAllowedWidth * 0.15;
             self.glassBackdrop.transform = CGAffineTransformMakeScale(squeeze, squeeze);
         } else {
             self.glassBackdrop.transform = CGAffineTransformIdentity;
         }
+        
+        // 5. iOS 16 性能优化：通知系统当前处于“实时缩放”状态
+        if (self.targetScene) {
+            @try {
+                FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
+                if ([settings respondsToSelector:@selector(setInLiveResize:)]) {
+                    [settings performSelector:@selector(setInLiveResize:) withObject:@YES];
+                    [self.targetScene updateSettings:settings withTransitionContext:nil];
+                }
+            } @catch (NSException *e) {}
+        }
+        
         [CATransaction commit];
         
         if (gesture.state == UIGestureRecognizerStateEnded) {
+            // 结束实时缩放状态
+            if (self.targetScene) {
+                @try {
+                    FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
+                    if ([settings respondsToSelector:@selector(setInLiveResize:)]) {
+                        [settings performSelector:@selector(setInLiveResize:) withObject:@NO];
+                        [self.targetScene updateSettings:settings withTransitionContext:nil];
+                    }
+                } @catch (NSException *e) {}
+            }
+
             [CATransaction begin];
             [CATransaction setAnimationDuration:0.3];
             self.resizeHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
             self.resizeHandleLayer.lineWidth = 2.0;
+            self.resizeHandleLayer.shadowOpacity = 0; // 移除发光
             [CATransaction commit];
 
             // 弹簧回弹至合法范围 (并重置挤压特效)
@@ -2017,22 +2098,25 @@ static NSMutableArray *floatingWindows = nil;
                 self.glassBackdrop.transform = CGAffineTransformIdentity;
                 
                 if (finalWidth < minAllowedWidth || finalWidth > maxAllowedWidth) {
-                    CGRect bounceFrame = self.frame;
-                    bounceFrame.size.width = fmin(maxAllowedWidth, fmax(minAllowedWidth, finalWidth));
-                    bounceFrame.size.height = bounceFrame.size.width * aspect;
+                    CGFloat bounceWidth = fmin(maxAllowedWidth, fmax(minAllowedWidth, finalWidth));
+                    CGFloat bounceHeight = bounceWidth * aspect;
+                    
+                    self.bounds = CGRectMake(0, 0, bounceWidth, bounceHeight);
                     
                     // 同样应用边界保护
-                    bounceFrame.origin.x = initialCenter.x - bounceFrame.size.width / 2.0;
-                    bounceFrame.origin.y = initialCenter.y - bounceFrame.size.height / 2.0;
+                    CGRect bounceFrame;
+                    bounceFrame.size = CGSizeMake(bounceWidth, bounceHeight);
+                    bounceFrame.origin.x = initialCenter.x - bounceWidth / 2.0;
+                    bounceFrame.origin.y = initialCenter.y - bounceHeight / 2.0;
                     
                     if (bounceFrame.origin.x < safeArea.left) bounceFrame.origin.x = safeArea.left;
                     if (bounceFrame.origin.y < safeArea.top) bounceFrame.origin.y = safeArea.top;
                     if (CGRectGetMaxX(bounceFrame) > screenBounds.size.width - safeArea.right) 
-                        bounceFrame.origin.x = screenBounds.size.width - safeArea.right - bounceFrame.size.width;
+                        bounceFrame.origin.x = screenBounds.size.width - safeArea.right - bounceWidth;
                     if (CGRectGetMaxY(bounceFrame) > screenBounds.size.height - safeArea.bottom) 
-                        bounceFrame.origin.y = screenBounds.size.height - safeArea.bottom - bounceFrame.size.height;
+                        bounceFrame.origin.y = screenBounds.size.height - safeArea.bottom - bounceHeight;
                         
-                    self.frame = bounceFrame;
+                    self.center = CGPointMake(CGRectGetMidX(bounceFrame), CGRectGetMidY(bounceFrame));
                 }
             } completion:nil];
             
