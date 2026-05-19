@@ -372,6 +372,8 @@ struct {
     CGFloat trafficDotSize;
     CGFloat windowHandleW;
     CGFloat windowHandleH;
+    CGFloat resizeHandleHitArea;
+    CGFloat resizeHandleWindowExpansion;
 } static const kChevronLayoutConstants = {
     .panelW = 370.0,
     .panelH = 520.0,
@@ -385,7 +387,9 @@ struct {
     .trafficCapsuleH = 24.0,
     .trafficDotSize = 8.0,
     .windowHandleW = 44.0,
-    .windowHandleH = 6.0
+    .windowHandleH = 6.0,
+    .resizeHandleHitArea = 140.0,
+    .resizeHandleWindowExpansion = 80.0
 };
 
 struct {
@@ -441,7 +445,7 @@ static UIColor *CV3AverageColorFromImage(UIImage *image) {
 #pragma mark - Floating App Window (MilkyWay2-style)
 static NSMutableArray *floatingWindows = nil;
 
-@interface CV3FloatingAppWindow : UIWindow
+@interface CV3FloatingAppWindow : UIWindow <UIGestureRecognizerDelegate>
 @property (nonatomic, copy) NSString *bundleID;
 @property (nonatomic, strong) UIVisualEffectView *glassBackdrop; // New: Fluid background
 @property (nonatomic, strong) UIView *clippingContainer; 
@@ -489,9 +493,10 @@ static NSMutableArray *floatingWindows = nil;
 @end
 @implementation CV3ResizeHandleView
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
-    // 深度优化敏感度：将热区扩充至 80x80，确保盲操作也能精准捕捉
-    CGFloat widthDelta = MAX(0, 80.0 - self.bounds.size.width);
-    CGFloat heightDelta = MAX(0, 80.0 - self.bounds.size.height);
+    // 深度优化敏感度：使用全局常量扩充热区，确保盲操作也能精准捕捉
+    CGFloat hitArea = kChevronLayoutConstants.resizeHandleHitArea;
+    CGFloat widthDelta = MAX(0, hitArea - self.bounds.size.width);
+    CGFloat heightDelta = MAX(0, hitArea - self.bounds.size.height);
     CGRect hitFrame = CGRectInset(self.bounds, -widthDelta/2.0, -heightDelta/2.0);
     return CGRectContainsPoint(hitFrame, point);
 }
@@ -522,10 +527,12 @@ static NSMutableArray *floatingWindows = nil;
     
     if (CGRectContainsPoint(self.bounds, point)) return YES;
     
-    // 专门为右下角缩放把手留出 30pt 的外部“吸附热区”
-    // 即使手指稍微划出分屏窗口外，依然能继续驱动缩放，解决“断触”感
+    // 专门为右下角缩放把手留出外部“吸附热区”
+    // 使用 kChevronLayoutConstants.resizeHandleWindowExpansion 确保与把手热区同步
+    // 我们将捕捉范围扩大到以右下角为顶点的正方形区域，确保手指即便在窗口外很远也能“吸住”
     CGRect bounds = self.bounds;
-    CGRect resizeExtraHitBox = CGRectMake(bounds.size.width - 20, bounds.size.height - 20, 50, 50);
+    CGFloat expansion = kChevronLayoutConstants.resizeHandleWindowExpansion;
+    CGRect resizeExtraHitBox = CGRectMake(bounds.size.width - expansion, bounds.size.height - expansion, expansion * 2, expansion * 2);
     if (CGRectContainsPoint(resizeExtraHitBox, point)) return YES;
     
     return NO;
@@ -622,10 +629,15 @@ static NSMutableArray *floatingWindows = nil;
         [self.resizeHandle.layer addSublayer:self.resizeHandleLayer];
         
         UIPanGestureRecognizer *resizePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleResizePan:)];
+        resizePan.delegate = self;
         [self.resizeHandle addGestureRecognizer:resizePan];
 
         UITapGestureRecognizer *resizeTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleHideAction)];
+        resizeTap.delegate = self;
         [self.resizeHandle addGestureRecognizer:resizeTap];
+        
+        // 核心优化：移除互斥等待逻辑，实现零延迟响应。
+        // 现在 Pan 手势会立即启动，如果只是轻点，Tap 手势依然会生效。
         
         self.resizeHandle.userInteractionEnabled = YES;
         
@@ -1191,14 +1203,13 @@ static NSMutableArray *floatingWindows = nil;
 
     self.resizeHandle.frame = CGRectMake(w - 30, h - 30, 30, 30);
     
-    // 核心修复：使用与主面板一致的 convenience 构造器，确保把手仅包含圆弧线条
-    // bezierPathWithArcCenter 不会包含圆心点，从根本上杜绝了“扇形填充”或“双色块”现象
-    // 核心：精简把手弧度 (Apple-style Refinement)
-    // 将原来的 90 度大圆弧缩短为更精致的 35 度片段，锁定在 45 度对角线中心
+    // 核心修复：将把手弧度中心与窗口 28pt 圆角中心对齐 (2,2)
+    // 半径调整为 24pt，使其与窗口圆角形成 4pt 的完美平行间距，实现“视觉同心”
+    CGFloat arcRadius = 24.0;
     CGFloat centerAngle = M_PI_4;
-    CGFloat halfSweep = M_PI / 10.0; // 约 18 度，总计约 36 度
-    self.resizeHandleLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(5, 5) 
-                                                               radius:20 
+    CGFloat halfSweep = M_PI / 8.0; // 扩大弧度至 45 度，增强操作指引感
+    self.resizeHandleLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(2, 2) 
+                                                               radius:arcRadius 
                                                            startAngle:centerAngle - halfSweep 
                                                              endAngle:centerAngle + halfSweep 
                                                             clockwise:YES].CGPath;
@@ -1734,6 +1745,10 @@ static NSMutableArray *floatingWindows = nil;
     }
 }
 
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
+    return YES;
+}
+
 - (void)handleResizePan:(UIPanGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
         self.initialResizeFrame = self.frame;
@@ -1761,7 +1776,7 @@ static NSMutableArray *floatingWindows = nil;
         
         // 核心：最小缩放保护 (Minimum Scaling Guard)
         CGFloat minAllowedWidth = screenBounds.size.width * 0.45;
-        CGFloat maxAllowedWidth = screenBounds.size.width * 0.95;
+        CGFloat maxAllowedWidth = screenBounds.size.width * 0.9;
         
         // 1. 矢量化缩放驱动 (Vector-based Scaling)
         // 计算把手相对于中心点的初始矢量长度与当前矢量长度
@@ -2836,14 +2851,21 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
     self.categoryBar.backgroundColor = [UIColor clearColor];
     [self.appPanel.contentView addSubview:self.categoryBar];
 
-    self.resizingHandle = [[UIView alloc] initWithFrame:CGRectMake(kChevronLayoutConstants.panelW - 40, kChevronLayoutConstants.panelH - 40, 40, 40)];
+    self.resizingHandle = [[CV3ResizeHandleView alloc] initWithFrame:CGRectMake(kChevronLayoutConstants.panelW - 40, kChevronLayoutConstants.panelH - 40, 40, 40)];
     self.resizingHandle.backgroundColor = [UIColor clearColor];
     [self.panelContainer addSubview:self.resizingHandle];
     
     self.resizingHandleLayer = [CAShapeLayer layer];
-    // 视觉优化：将把手圆弧移动到更靠近圆角的位置
-    // 中心点从 (0,0) 移至 (12, 12)，半径 20，使其更紧贴 28pt 的圆角
-    self.resizingHandleLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(12, 12) radius:20 startAngle:0 endAngle:M_PI_2 clockwise:YES].CGPath;
+    // 视觉优化：将把手弧度中心与面板 28pt 圆角中心对齐 (12, 12)
+    // 半径统一调整为 24pt，与分屏窗口保持一致的 4pt 平行间距
+    CGFloat panelArcRadius = 24.0;
+    CGFloat panelCenterAngle = M_PI_4;
+    CGFloat panelHalfSweep = M_PI / 8.0; 
+    self.resizingHandleLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(12, 12) 
+                                                                  radius:panelArcRadius 
+                                                              startAngle:panelCenterAngle - panelHalfSweep 
+                                                                endAngle:panelCenterAngle + panelHalfSweep 
+                                                               clockwise:YES].CGPath;
     self.resizingHandleLayer.fillColor = [UIColor clearColor].CGColor;
     self.resizingHandleLayer.strokeColor = [[UIColor labelColor] colorWithAlphaComponent:0.3].CGColor;
     self.resizingHandleLayer.lineWidth = 2.0;
