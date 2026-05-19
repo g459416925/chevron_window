@@ -295,13 +295,23 @@
 @interface CV3RootViewController : UIViewController
 @end
 static void CV3LogToFile(NSString *format, ...) {
-#pragma mark - Helper for File Logging (Asynchronous & Safe)
     va_list args;
     va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
 
-    // 移除之前的特定关键词过滤，允许记录所有关键事件
+    // [Geek Advice] Log Leveling: Only log critical messages in Release mode
+#ifndef DEBUG
+    BOOL isCritical = [message containsString:@"[Lifecycle]"] || 
+                     [message containsString:@"[Recovery]"] || 
+                     [message containsString:@"[Orientation]"] || 
+                     [message containsString:@"[Workspace]"] ||
+                     [message containsString:@"[Scene]"] ||
+                     [message containsString:@"[Error]"] ||
+                     [message containsString:@"[Warning]"];
+    if (!isCritical) return;
+#endif
+
     // 立即输出到系统日志，作为第一层保障
     NSLog(@"[ChevronV3] %@", message);
 
@@ -2044,6 +2054,19 @@ static NSMutableArray *floatingWindows = nil;
     [self syncWindowBoundsToClient];
 
     if (self.hostView) {
+        // [Geek Advice] Explicitly disable hosting for the requester to release FBScene resources
+        @try {
+            if (self.targetScene && [self.targetScene respondsToSelector:@selector(hostManager)]) {
+                id hm = [self.targetScene performSelector:@selector(hostManager)];
+                if ([hm respondsToSelector:@selector(enableHostingForRequester:priority:)]) {
+                    // 禁用托管，释放资源
+                    [hm performSelector:@selector(enableHostingForRequester:priority:) withObject:nil withObject:(id)0];
+                }
+            }
+        } @catch (NSException *e) {
+            CV3LogToFile(@"[Error] Failed to disable hosting during closeWindow: %@", e);
+        }
+
         if ([self.hostView respondsToSelector:@selector(invalidate)]) {
             [self.hostView performSelector:@selector(invalidate)];
         }
@@ -2063,6 +2086,7 @@ static NSMutableArray *floatingWindows = nil;
 @property (nonatomic, strong) UIView *edgeTriggerView; 
 @property (nonatomic, strong) CAGradientLayer *specularHighlight;
 @property (nonatomic, strong) CMMotionManager *motionManager;
+@property (nonatomic, strong) CADisplayLink *liquidDisplayLink;
 @property (nonatomic, strong) UIView *bezierContainer;
 @property (nonatomic, strong) CAShapeLayer *bezierLayer;
 @property (nonatomic, strong) UIVisualEffectView *bezierBlur;
@@ -4328,108 +4352,127 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
 - (void)startLiquidMotion {
     if (!self.motionManager.isDeviceMotionAvailable) return;
-    [self.motionManager startDeviceMotionUpdatesToQueue:[NSOperationQueue mainQueue] withHandler:^(CMDeviceMotion *m, NSError *e) {
-        if (!m) return;
-        
-        if (!self.hasCapturedBaseline) {
-            self.baseRoll = m.attitude.roll;
-            self.basePitch = m.attitude.pitch;
-            self.hasCapturedBaseline = YES;
-            // 面板显示时激活光效
-            [CATransaction begin]; [CATransaction setDisableActions:YES];
-            self.redGlow.hidden = NO; self.yellowGlow.hidden = NO; self.greenGlow.hidden = NO;
-            [CATransaction commit];
-        }
-        
-        CGFloat deltaRoll = m.attitude.roll - self.baseRoll;
-        CGFloat deltaPitch = m.attitude.pitch - self.basePitch;
 
-        [CATransaction begin]; [CATransaction setDisableActions:YES];
+    // [Geek Advice] Align with 120Hz display refresh rate using CADisplayLink
+    [self.motionManager startDeviceMotionUpdates];
 
-        // 建议 1：Fiber-Optic Light Leak (光纤导光实时姿态)
-        // 光束顺着倾斜方向在面板内部流动，具有更高的位移敏感度
-        CGFloat glowShift = 45.0;
-        self.redGlow.position = CGPointMake(40 + deltaRoll * glowShift, 25 + deltaPitch * glowShift);
-        self.yellowGlow.position = CGPointMake(65 + deltaRoll * glowShift, 25 + deltaPitch * glowShift);
-        self.greenGlow.position = CGPointMake(90 + deltaRoll * glowShift, 25 + deltaPitch * glowShift);
+    if (self.liquidDisplayLink) {
+        [self.liquidDisplayLink invalidate];
+    }
 
-        self.specularHighlight.startPoint = CGPointMake(0.5 - deltaRoll*1.5, 0.5 - deltaPitch*1.5);
-        self.specularHighlight.endPoint = CGPointMake(1.5 - deltaRoll*1.5, 1.5 - deltaPitch*1.5);
-
-        CGFloat dx = deltaRoll * 1.2;
-        CGFloat dy = deltaPitch * 1.2;
-        self.cyanLayer.transform = CATransform3DMakeTranslation(-dx, -dy, 0);
-        self.magentaLayer.transform = CATransform3DMakeTranslation(dx, dy, 0);
-
-        // 建议2：视差解耦 (Parallax Decoupling) 2.0 - 多平面深度体系
-        // 核心原理：层级越高（越靠近用户），位移系数越大
-        CGFloat panelDX = deltaRoll * kChevronPhysicsConstants.parallaxPanelFactor;
-        CGFloat panelDY = deltaPitch * kChevronPhysicsConstants.parallaxPanelFactor;
-        self.appPanel.transform = CGAffineTransformMakeTranslation(panelDX, panelDY);
-
-        // 建议 3：Glow & Content Depth (发光与内容深度差)
-        // 内发光层位移略大于面板，创造玻璃边缘的折射感
-        CGFloat glowDX = panelDX * 1.15;
-        CGFloat glowDY = panelDY * 1.15;
-        self.innerGlowLayer.affineTransform = CGAffineTransformMakeTranslation(glowDX, glowDY);
-
-        // 建议 2：Gravity-Aware Icons (重力图标视差)
-        // 遍历可见 cell，应用反向视差，系数设为最高以凸显浮空感
-        NSArray *visibleCells = [self.collectionView visibleCells];
-        for (UICollectionViewCell *cell in visibleCells) {
-            if ([cell isKindOfClass:[CV3AppCell class]]) {
-                // 图标位移系数 3.5x，创造明显的层次差
-                ((CV3AppCell *)cell).iconOffset = CGPointMake(-deltaRoll * 3.5, -deltaPitch * 3.5);
-            }
-        }
-
-        // 装饰件深度视差 (Layered Decoration Parallax) + 惯性衰减 (Inertial Damping)
-        CGFloat targetDecoDX = deltaRoll * kChevronPhysicsConstants.parallaxDecoFactor;
-        CGFloat targetDecoDY = deltaPitch * kChevronPhysicsConstants.parallaxDecoFactor;
-
-        // 惯性平滑逻辑：使用插值 (Lerp) 实现物理质量感
-        CGFloat oldDecoDX = self.currentDecoDX;
-        CGFloat oldDecoDY = self.currentDecoDY;
-        self.currentDecoDX += (targetDecoDX - self.currentDecoDX) * kChevronPhysicsConstants.lerpFactor;
-        self.currentDecoDY += (targetDecoDY - self.currentDecoDY) * kChevronPhysicsConstants.lerpFactor;
-
-        // 建议：触觉阻尼 (Haptic Damping Feedback)
-        CGFloat frameDisplacement = hypot(self.currentDecoDX - oldDecoDX, self.currentDecoDY - oldDecoDY);
-        if (frameDisplacement > kChevronPhysicsConstants.hapticThreshold) { 
-            static NSTimeInterval lastHapticTime = 0;
-            NSTimeInterval now = CACurrentMediaTime();
-            if (now - lastHapticTime > 0.1) { 
-                [self.selectionFeedback selectionChanged];
-                lastHapticTime = now;
-            }
-        }
-
-        CGAffineTransform decoParallax = CGAffineTransformMakeTranslation(self.currentDecoDX, self.currentDecoDY);
-        self.trafficCapsule.transform = decoParallax;
-        self.resizingHandle.transform = decoParallax;
-
-        // 建议：边缘折射干扰 (Edge Refraction Flicker)
-        CGFloat tilt = sqrt(m.attitude.roll * m.attitude.roll + m.attitude.pitch * m.attitude.pitch);
-        if (tilt > 1.1) { 
-            CGFloat flicker = 0.15 * sin(CACurrentMediaTime() * 18.0); 
-            CGFloat boost = (tilt - 1.1) * 0.6 + flicker;
-
-            self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:MIN(0.6, 0.12 + MAX(0, boost))].CGColor;
-            self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:MIN(0.6, 0.12 + MAX(0, boost))].CGColor;
-            self.innerGlowLayer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:MIN(1.0, 0.45 + MAX(0, boost))].CGColor;
-            self.innerGlowLayer.borderWidth = 0.3 + MAX(0, boost) * 1.5;
-        } else {
-            self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.12].CGColor;
-            self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:0.12].CGColor;
-            self.innerGlowLayer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.45].CGColor;
-            self.innerGlowLayer.borderWidth = 0.3;
-        }
-
-        [CATransaction commit];
-    }];
+    self.liquidDisplayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(updateLiquidMotion:)];
+    [self.liquidDisplayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
 }
-- (void)stopLiquidMotion { 
-    [self.motionManager stopDeviceMotionUpdates]; 
+
+- (void)updateLiquidMotion:(CADisplayLink *)sender {
+    CMDeviceMotion *m = self.motionManager.deviceMotion;
+    if (!m) return;
+
+    if (!self.hasCapturedBaseline) {
+        self.baseRoll = m.attitude.roll;
+        self.basePitch = m.attitude.pitch;
+        self.hasCapturedBaseline = YES;
+        // 面板显示时激活光效
+        [CATransaction begin]; [CATransaction setDisableActions:YES];
+        self.redGlow.hidden = NO; self.yellowGlow.hidden = NO; self.greenGlow.hidden = NO;
+        [CATransaction commit];
+    }
+
+    CGFloat deltaRoll = m.attitude.roll - self.baseRoll;
+    CGFloat deltaPitch = m.attitude.pitch - self.basePitch;
+
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+
+    // 建议 1：Fiber-Optic Light Leak (光纤导光实时姿态)
+    // 光束顺着倾斜方向在面板内部流动，具有更高的位移敏感度
+    CGFloat glowShift = 45.0;
+    self.redGlow.position = CGPointMake(40 + deltaRoll * glowShift, 25 + deltaPitch * glowShift);
+    self.yellowGlow.position = CGPointMake(65 + deltaRoll * glowShift, 25 + deltaPitch * glowShift);
+    self.greenGlow.position = CGPointMake(90 + deltaRoll * glowShift, 25 + deltaPitch * glowShift);
+
+    self.specularHighlight.startPoint = CGPointMake(0.5 - deltaRoll*1.5, 0.5 - deltaPitch*1.5);
+    self.specularHighlight.endPoint = CGPointMake(1.5 - deltaRoll*1.5, 1.5 - deltaPitch*1.5);
+
+    CGFloat dx = deltaRoll * 1.2;
+    CGFloat dy = deltaPitch * 1.2;
+    self.cyanLayer.transform = CATransform3DMakeTranslation(-dx, -dy, 0);
+    self.magentaLayer.transform = CATransform3DMakeTranslation(dx, dy, 0);
+
+    // 建议2：视差解耦 (Parallax Decoupling) 2.0 - 多平面深度体系
+    // 核心原理：层级越高（越靠近用户），位移系数越大
+    CGFloat panelDX = deltaRoll * kChevronPhysicsConstants.parallaxPanelFactor;
+    CGFloat panelDY = deltaPitch * kChevronPhysicsConstants.parallaxPanelFactor;
+    self.appPanel.transform = CGAffineTransformMakeTranslation(panelDX, panelDY);
+
+    // 建议 3：Glow & Content Depth (发光与内容深度差)
+    // 内发光层位移略大于面板，创造玻璃边缘的折射感
+    CGFloat glowDX = panelDX * 1.15;
+    CGFloat glowDY = panelDY * 1.15;
+    self.innerGlowLayer.affineTransform = CGAffineTransformMakeTranslation(glowDX, glowDY);
+
+    // 建议 2：Gravity-Aware Icons (重力图标视差)
+    // 遍历可见 cell，应用反向视差，系数设为最高以凸显浮空感
+    NSArray *visibleCells = [self.collectionView visibleCells];
+    for (UICollectionViewCell *cell in visibleCells) {
+        if ([cell isKindOfClass:[CV3AppCell class]]) {
+            // 图标位移系数 3.5x，创造明显的层次差
+            ((CV3AppCell *)cell).iconOffset = CGPointMake(-deltaRoll * 3.5, -deltaPitch * 3.5);
+        }
+    }
+
+    // 装饰件深度视差 (Layered Decoration Parallax) + 惯性衰减 (Inertial Damping)
+    CGFloat targetDecoDX = deltaRoll * kChevronPhysicsConstants.parallaxDecoFactor;
+    CGFloat targetDecoDY = deltaPitch * kChevronPhysicsConstants.parallaxDecoFactor;
+
+    // 惯性平滑逻辑：使用插值 (Lerp) 实现物理质量感
+    CGFloat oldDecoDX = self.currentDecoDX;
+    CGFloat oldDecoDY = self.currentDecoDY;
+    self.currentDecoDX += (targetDecoDX - self.currentDecoDX) * kChevronPhysicsConstants.lerpFactor;
+    self.currentDecoDY += (targetDecoDY - self.currentDecoDY) * kChevronPhysicsConstants.lerpFactor;
+
+    // 建议：触觉阻尼 (Haptic Damping Feedback)
+    CGFloat frameDisplacement = hypot(self.currentDecoDX - oldDecoDX, self.currentDecoDY - oldDecoDY);
+    if (frameDisplacement > kChevronPhysicsConstants.hapticThreshold) { 
+        static NSTimeInterval lastHapticTime = 0;
+        NSTimeInterval now = CACurrentMediaTime();
+        if (now - lastHapticTime > 0.1) { 
+            [self.selectionFeedback selectionChanged];
+            lastHapticTime = now;
+        }
+    }
+
+    CGAffineTransform decoParallax = CGAffineTransformMakeTranslation(self.currentDecoDX, self.currentDecoDY);
+    self.trafficCapsule.transform = decoParallax;
+    self.resizingHandle.transform = decoParallax;
+
+    // 建议：边缘折射干扰 (Edge Refraction Flicker)
+    CGFloat tilt = sqrt(m.attitude.roll * m.attitude.roll + m.attitude.pitch * m.attitude.pitch);
+    if (tilt > 1.1) { 
+        CGFloat flicker = 0.15 * sin(CACurrentMediaTime() * 18.0); 
+        CGFloat boost = (tilt - 1.1) * 0.6 + flicker;
+
+        self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:MIN(0.6, 0.12 + MAX(0, boost))].CGColor;
+        self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:MIN(0.6, 0.12 + MAX(0, boost))].CGColor;
+        self.innerGlowLayer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:MIN(1.0, 0.45 + MAX(0, boost))].CGColor;
+        self.innerGlowLayer.borderWidth = 0.3 + MAX(0, boost) * 1.5;
+    } else {
+        self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.12].CGColor;
+        self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:0.12].CGColor;
+        self.innerGlowLayer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.45].CGColor;
+        self.innerGlowLayer.borderWidth = 0.3;
+    }
+
+    [CATransaction commit];
+}
+
+- (void)stopLiquidMotion {
+    [self.motionManager stopDeviceMotionUpdates];
+
+    if (self.liquidDisplayLink) {
+        [self.liquidDisplayLink invalidate];
+        self.liquidDisplayLink = nil;
+    }
+
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     self.redGlow.hidden = YES; self.yellowGlow.hidden = YES; self.greenGlow.hidden = YES;
     [CATransaction commit];
