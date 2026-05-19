@@ -479,6 +479,7 @@ static NSMutableArray *floatingWindows = nil;
 @property (nonatomic, strong) UIImageView *largeSplashIcon;
 @property (nonatomic, assign) UIInterfaceOrientation targetOrientation;
 @property (nonatomic, assign) CGAffineTransform baseRotationTransform;
+@property (nonatomic, strong) UIView *liveResizeSnapshotView;
 
 - (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene;
 - (void)triggerCollisionImpulse;
@@ -1759,11 +1760,20 @@ static NSMutableArray *floatingWindows = nil;
         UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
         [gen impactOccurred];
 
+        // --- Suggestion 4: Pixel-Perfect Live Mapping (Snapshot) ---
+        // 在缩放开始瞬间捕获当前画面，作为“占位层”防止实时重绘导致的闪烁或黑边
+        if (self.hostView) {
+            self.liveResizeSnapshotView = [self.hostView snapshotViewAfterScreenUpdates:NO];
+            self.liveResizeSnapshotView.frame = self.hostContainerProxy.bounds;
+            self.liveResizeSnapshotView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            [self.hostContainerProxy addSubview:self.liveResizeSnapshotView];
+            self.hostView.alpha = 0; // 隐藏真实内容，直到缩放结束
+        }
+
         [CATransaction begin];
         [CATransaction setAnimationDuration:0.2];
         self.resizeHandleLayer.strokeColor = [[UIColor cyanColor] colorWithAlphaComponent:0.8].CGColor;
         self.resizeHandleLayer.lineWidth = 3.5;
-        // 增加外发光效果 (Glow)
         self.resizeHandleLayer.shadowColor = [UIColor cyanColor].CGColor;
         self.resizeHandleLayer.shadowOffset = CGSizeZero;
         self.resizeHandleLayer.shadowOpacity = 0.8;
@@ -1772,17 +1782,15 @@ static NSMutableArray *floatingWindows = nil;
     }
     
     CGPoint translation = [gesture translationInView:nil];
+    CGPoint velocity = [gesture velocityInView:nil];
     
     if (gesture.state == UIGestureRecognizerStateChanged || gesture.state == UIGestureRecognizerStateEnded) {
         CGRect screenBounds = [UIScreen mainScreen].bounds;
         CGFloat aspect = screenBounds.size.height / screenBounds.size.width;
         
-        // 核心：最小缩放保护 (Minimum Scaling Guard)
         CGFloat minAllowedWidth = screenBounds.size.width * 0.45;
         CGFloat maxAllowedWidth = screenBounds.size.width * 0.9;
         
-        // 1. 矢量化缩放驱动 (Vector-based Scaling)
-        // 计算把手相对于中心点的初始矢量长度与当前矢量长度
         CGPoint initialCenter = CGPointMake(CGRectGetMidX(self.initialResizeFrame), CGRectGetMidY(self.initialResizeFrame));
         CGPoint initialHandlePos = CGPointMake(CGRectGetMaxX(self.initialResizeFrame), CGRectGetMaxY(self.initialResizeFrame));
         CGPoint currentHandlePos = CGPointMake(initialHandlePos.x + translation.x, initialHandlePos.y + translation.y);
@@ -1790,38 +1798,46 @@ static NSMutableArray *floatingWindows = nil;
         CGFloat initialDist = sqrt(pow(initialHandlePos.x - initialCenter.x, 2) + pow(initialHandlePos.y - initialCenter.y, 2));
         CGFloat currentDist = sqrt(pow(currentHandlePos.x - initialCenter.x, 2) + pow(currentHandlePos.y - initialCenter.y, 2));
         
-        // 避免除零，并应用 1.25x 的敏感度增益 (Sensitivity Gain)
-        // 增益能让缩放响应更快，抵消掉矢量计算带来的“沉重感”
         CGFloat rawScaleFactor = initialDist > 0 ? (currentDist / initialDist) : 1.0;
         CGFloat scaleFactor = 1.0 + (rawScaleFactor - 1.0) * 1.25; 
         
         CGFloat targetWidth = self.initialResizeFrame.size.width * scaleFactor;
+        
+        // --- Suggestion 5: Multi-Window Gravity (Repulsion) ---
+        // 检查与其他窗口的间距，如果过近则产生排斥力
+        for (CV3FloatingAppWindow *other in floatingWindows) {
+            if (other == self || other.isStashed || ![other isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+            
+            CGFloat distance = sqrt(pow(self.center.x - other.center.x, 2) + pow(self.center.y - other.center.y, 2));
+            CGFloat minGap = (self.bounds.size.width + other.bounds.size.width) / 2.0 + 20.0;
+            
+            if (distance < minGap) {
+                // 产生排斥阻尼：缩放速度被窗口间的“压力”抵消
+                targetWidth *= (0.8 + 0.2 * (distance / minGap));
+                
+                // 视觉融合：相互渗透 Glow 颜色
+                [UIView animateWithDuration:0.2 animations:^{
+                    self.innerGlowLayer.borderColor = [other.adaptiveAppColor colorWithAlphaComponent:0.8].CGColor;
+                    other.innerGlowLayer.borderColor = [self.adaptiveAppColor colorWithAlphaComponent:0.8].CGColor;
+                }];
+            }
+        }
+
         CGFloat finalWidth = targetWidth;
         
-        // 阻尼回弹计算 (Rubber-banding)
         if (targetWidth < minAllowedWidth) {
             finalWidth = minAllowedWidth - (minAllowedWidth - targetWidth) * 0.3;
-            if (gesture.state == UIGestureRecognizerStateChanged) {
-                static BOOL hitMinLimit = NO;
-                if (!hitMinLimit) {
-                    UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-                    [gen impactOccurred];
-                    hitMinLimit = YES;
-                }
-            }
         } else if (targetWidth > maxAllowedWidth) {
             finalWidth = maxAllowedWidth + (targetWidth - maxAllowedWidth) * 0.3;
         }
         
         CGFloat finalHeight = finalWidth * aspect;
         
-        // 2. 自适应锚点驱动 (Adaptive Anchor Point)
         CGRect newFrame;
         newFrame.size = CGSizeMake(finalWidth, finalHeight);
         newFrame.origin.x = initialCenter.x - finalWidth / 2.0;
         newFrame.origin.y = initialCenter.y - finalHeight / 2.0;
         
-        // 边界斥力逻辑：如果中心缩放导致越界，则自动将窗口推回安全区域，产生“锚点平移”效果
         UIWindow *keyWin = nil;
         if (@available(iOS 15.0, *)) { keyWin = self.windowScene.keyWindow; }
         if (!keyWin) {
@@ -1839,28 +1855,39 @@ static NSMutableArray *floatingWindows = nil;
         if (CGRectGetMaxY(newFrame) > screenBounds.size.height - safeArea.bottom) 
             newFrame.origin.y = screenBounds.size.height - safeArea.bottom - finalHeight;
             
-        // 核心修复：抖动消除 (Jitter Fix)
-        // 1. 禁用隐式动画，防止图层在手势更新时产生微小的插值位移
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         
-        // 2. 严禁在有 Transform 的情况下设置 frame。改用 Bounds + Center。
-        // 这能从根本上消除因 Transform 与 Frame 逻辑冲突导致的“剧烈抖动”
         self.bounds = CGRectMake(0, 0, finalWidth, finalHeight);
         self.center = CGPointMake(CGRectGetMidX(newFrame), CGRectGetMidY(newFrame));
         
-        // 3. 强制同步内部布局，确保渲染内容（HostView）与窗口边界实时对齐
         [self layoutIfNeeded];
         
-        // 4. 视觉挤压特效 (Visual Squeeze Effect)
-        if (targetWidth < minAllowedWidth) {
-            CGFloat squeeze = 1.0 - (minAllowedWidth - targetWidth) / minAllowedWidth * 0.15;
-            self.glassBackdrop.transform = CGAffineTransformMakeScale(squeeze, squeeze);
+        // --- Suggestion 3: Resize Stress Distortion ---
+        // 根据缩放速度计算“应力畸变” (Chromatic Aberration)
+        CGFloat velMag = sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
+        CGFloat stress = MIN(15.0, velMag / 200.0); // 最大 15pt 的偏移
+        
+        CGAffineTransform cyanTransform = CGAffineTransformMakeTranslation(-stress * 0.5, -stress * 0.5);
+        CGAffineTransform magentaTransform = CGAffineTransformMakeTranslation(stress * 0.5, stress * 0.5);
+        
+        self.cyanLayer.affineTransform = cyanTransform;
+        self.magentaLayer.affineTransform = magentaTransform;
+        
+        // 增加动态模糊感 (通过拉伸背景实现模拟)
+        if (velMag > 500) {
+            CGFloat blurStretch = 1.0 + (velMag / 5000.0);
+            self.glassBackdrop.transform = CGAffineTransformMakeScale(blurStretch, blurStretch);
         } else {
-            self.glassBackdrop.transform = CGAffineTransformIdentity;
+            // 原有的挤压特效逻辑
+            if (targetWidth < minAllowedWidth) {
+                CGFloat squeeze = 1.0 - (minAllowedWidth - targetWidth) / minAllowedWidth * 0.15;
+                self.glassBackdrop.transform = CGAffineTransformMakeScale(squeeze, squeeze);
+            } else {
+                self.glassBackdrop.transform = CGAffineTransformIdentity;
+            }
         }
         
-        // 5. iOS 16 性能优化：通知系统当前处于“实时缩放”状态
         if (self.targetScene) {
             @try {
                 FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
@@ -1874,7 +1901,23 @@ static NSMutableArray *floatingWindows = nil;
         [CATransaction commit];
         
         if (gesture.state == UIGestureRecognizerStateEnded) {
-            // 结束实时缩放状态
+            // --- Clean up Suggestion 4 (Snapshot) ---
+            [UIView animateWithDuration:0.3 animations:^{
+                self.hostView.alpha = 1.0;
+                if (self.liveResizeSnapshotView) self.liveResizeSnapshotView.alpha = 0;
+            } completion:^(BOOL finished) {
+                [self.liveResizeSnapshotView removeFromSuperview];
+                self.liveResizeSnapshotView = nil;
+            }];
+
+            // --- Clean up Suggestion 3 (Distortion) ---
+            [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
+                self.cyanLayer.affineTransform = CGAffineTransformIdentity;
+                self.magentaLayer.affineTransform = CGAffineTransformIdentity;
+                self.glassBackdrop.transform = CGAffineTransformIdentity;
+                self.innerGlowLayer.borderColor = [self.adaptiveAppColor colorWithAlphaComponent:0.6].CGColor;
+            } completion:nil];
+
             if (self.targetScene) {
                 @try {
                     FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
@@ -1889,20 +1932,16 @@ static NSMutableArray *floatingWindows = nil;
             [CATransaction setAnimationDuration:0.3];
             self.resizeHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
             self.resizeHandleLayer.lineWidth = 2.0;
-            self.resizeHandleLayer.shadowOpacity = 0; // 移除发光
+            self.resizeHandleLayer.shadowOpacity = 0; 
             [CATransaction commit];
 
-            // 弹簧回弹至合法范围 (并重置挤压特效)
             [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
-                self.glassBackdrop.transform = CGAffineTransformIdentity;
-                
                 if (finalWidth < minAllowedWidth || finalWidth > maxAllowedWidth) {
                     CGFloat bounceWidth = fmin(maxAllowedWidth, fmax(minAllowedWidth, finalWidth));
                     CGFloat bounceHeight = bounceWidth * aspect;
                     
                     self.bounds = CGRectMake(0, 0, bounceWidth, bounceHeight);
                     
-                    // 同样应用边界保护
                     CGRect bounceFrame;
                     bounceFrame.size = CGSizeMake(bounceWidth, bounceHeight);
                     bounceFrame.origin.x = initialCenter.x - bounceWidth / 2.0;
