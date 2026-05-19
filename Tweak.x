@@ -1285,7 +1285,10 @@ static NSMutableArray *floatingWindows = nil;
     if (frame.origin.y < safeArea.top) frame.origin.y = safeArea.top;
     if (CGRectGetMaxX(frame) > screenBounds.size.width - safeArea.right) frame.origin.x = screenBounds.size.width - safeArea.right - frame.size.width;
     if (CGRectGetMaxY(frame) > screenBounds.size.height - safeArea.bottom) frame.origin.y = screenBounds.size.height - safeArea.bottom - frame.size.height;
-    self.frame = frame;
+    
+    // 核心修复：严禁在有 Transform (如缩放/旋转) 的情况下直接设置 frame。
+    // 使用 center 进行平移钳位，确保不会触发无限抖动。
+    self.center = CGPointMake(CGRectGetMidX(frame), CGRectGetMidY(frame));
 }
 
 - (FBScene *)getSceneForBundleID:(NSString *)bundleID {
@@ -1836,8 +1839,6 @@ static NSMutableArray *floatingWindows = nil;
         if (CGRectGetMaxY(newFrame) > screenBounds.size.height - safeArea.bottom) 
             newFrame.origin.y = screenBounds.size.height - safeArea.bottom - finalHeight;
             
-        self.frame = newFrame;
-        
         // 核心修复：抖动消除 (Jitter Fix)
         // 1. 禁用隐式动画，防止图层在手势更新时产生微小的插值位移
         [CATransaction begin];
