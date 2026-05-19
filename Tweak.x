@@ -1933,11 +1933,21 @@ static NSMutableArray *floatingWindows = nil;
         CGFloat aspect = screenBounds.size.height / screenBounds.size.width;
         
         // 核心：最小缩放保护 (Minimum Scaling Guard)
-        // 设定最小宽度为屏幕宽度的 45% (确保内容可读)
         CGFloat minAllowedWidth = screenBounds.size.width * 0.45;
         CGFloat maxAllowedWidth = screenBounds.size.width * 0.95;
         
-        CGFloat targetWidth = self.initialResizeFrame.size.width + translation.x;
+        // 1. 矢量化缩放驱动 (Vector-based Scaling)
+        // 计算把手相对于中心点的初始矢量长度与当前矢量长度
+        CGPoint initialCenter = CGPointMake(CGRectGetMidX(self.initialResizeFrame), CGRectGetMidY(self.initialResizeFrame));
+        CGPoint initialHandlePos = CGPointMake(CGRectGetMaxX(self.initialResizeFrame), CGRectGetMaxY(self.initialResizeFrame));
+        CGPoint currentHandlePos = CGPointMake(initialHandlePos.x + translation.x, initialHandlePos.y + translation.y);
+        
+        CGFloat initialDist = sqrt(pow(initialHandlePos.x - initialCenter.x, 2) + pow(initialHandlePos.y - initialCenter.y, 2));
+        CGFloat currentDist = sqrt(pow(currentHandlePos.x - initialCenter.x, 2) + pow(currentHandlePos.y - initialCenter.y, 2));
+        
+        // 避免除零
+        CGFloat scaleFactor = initialDist > 0 ? (currentDist / initialDist) : 1.0;
+        CGFloat targetWidth = self.initialResizeFrame.size.width * scaleFactor;
         CGFloat finalWidth = targetWidth;
         
         // 阻尼回弹计算 (Rubber-banding)
@@ -1953,17 +1963,47 @@ static NSMutableArray *floatingWindows = nil;
             }
         } else if (targetWidth > maxAllowedWidth) {
             finalWidth = maxAllowedWidth + (targetWidth - maxAllowedWidth) * 0.3;
-        } else {
-            // 重置限制标志
-            // (这里使用 static 变量，实际建议移至类属性，但为保持局部修改清晰暂用 static)
         }
         
         CGFloat finalHeight = finalWidth * aspect;
         
-        CGRect newFrame = self.frame;
-        newFrame.size.width = finalWidth;
-        newFrame.size.height = finalHeight;
+        // 2. 自适应锚点驱动 (Adaptive Anchor Point)
+        CGRect newFrame;
+        newFrame.size = CGSizeMake(finalWidth, finalHeight);
+        newFrame.origin.x = initialCenter.x - finalWidth / 2.0;
+        newFrame.origin.y = initialCenter.y - finalHeight / 2.0;
+        
+        // 边界斥力逻辑：如果中心缩放导致越界，则自动将窗口推回安全区域，产生“锚点平移”效果
+        UIWindow *keyWin = nil;
+        if (@available(iOS 15.0, *)) { keyWin = self.windowScene.keyWindow; }
+        if (!keyWin) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            keyWin = [UIApplication sharedApplication].keyWindow;
+#pragma clang diagnostic pop
+        }
+        UIEdgeInsets safeArea = keyWin ? keyWin.safeAreaInsets : UIEdgeInsetsMake(47, 0, 34, 0);
+        
+        if (newFrame.origin.x < safeArea.left) newFrame.origin.x = safeArea.left;
+        if (newFrame.origin.y < safeArea.top) newFrame.origin.y = safeArea.top;
+        if (CGRectGetMaxX(newFrame) > screenBounds.size.width - safeArea.right) 
+            newFrame.origin.x = screenBounds.size.width - safeArea.right - finalWidth;
+        if (CGRectGetMaxY(newFrame) > screenBounds.size.height - safeArea.bottom) 
+            newFrame.origin.y = screenBounds.size.height - safeArea.bottom - finalHeight;
+            
         self.frame = newFrame;
+        
+        // 3. 视觉挤压特效 (Visual Squeeze Effect)
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        if (targetWidth < minAllowedWidth) {
+            // 当尺寸小于最小值时，产生 0.85x - 1.0x 的非线性挤压感
+            CGFloat squeeze = 1.0 - (minAllowedWidth - targetWidth) / minAllowedWidth * 0.15;
+            self.glassBackdrop.transform = CGAffineTransformMakeScale(squeeze, squeeze);
+        } else {
+            self.glassBackdrop.transform = CGAffineTransformIdentity;
+        }
+        [CATransaction commit];
         
         if (gesture.state == UIGestureRecognizerStateEnded) {
             [CATransaction begin];
@@ -1972,15 +2012,29 @@ static NSMutableArray *floatingWindows = nil;
             self.resizeHandleLayer.lineWidth = 2.0;
             [CATransaction commit];
 
-            // 弹簧回弹至合法范围
-            if (finalWidth < minAllowedWidth || finalWidth > maxAllowedWidth) {
-                [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
+            // 弹簧回弹至合法范围 (并重置挤压特效)
+            [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
+                self.glassBackdrop.transform = CGAffineTransformIdentity;
+                
+                if (finalWidth < minAllowedWidth || finalWidth > maxAllowedWidth) {
                     CGRect bounceFrame = self.frame;
                     bounceFrame.size.width = fmin(maxAllowedWidth, fmax(minAllowedWidth, finalWidth));
                     bounceFrame.size.height = bounceFrame.size.width * aspect;
+                    
+                    // 同样应用边界保护
+                    bounceFrame.origin.x = initialCenter.x - bounceFrame.size.width / 2.0;
+                    bounceFrame.origin.y = initialCenter.y - bounceFrame.size.height / 2.0;
+                    
+                    if (bounceFrame.origin.x < safeArea.left) bounceFrame.origin.x = safeArea.left;
+                    if (bounceFrame.origin.y < safeArea.top) bounceFrame.origin.y = safeArea.top;
+                    if (CGRectGetMaxX(bounceFrame) > screenBounds.size.width - safeArea.right) 
+                        bounceFrame.origin.x = screenBounds.size.width - safeArea.right - bounceFrame.size.width;
+                    if (CGRectGetMaxY(bounceFrame) > screenBounds.size.height - safeArea.bottom) 
+                        bounceFrame.origin.y = screenBounds.size.height - safeArea.bottom - bounceFrame.size.height;
+                        
                     self.frame = bounceFrame;
-                } completion:nil];
-            }
+                }
+            } completion:nil];
             
             self.initialResizeFrame = self.frame;
             [self syncWindowBoundsToClient];
