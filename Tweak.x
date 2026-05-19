@@ -762,10 +762,11 @@ static NSMutableArray *floatingWindows = nil;
         [self updateAdaptiveColor];
 
         // --- Setup Splash View (App Startup Experience) ---
-        self.splashView = [[UIView alloc] initWithFrame:self.clippingContainer.bounds];
+        CGRect screenBounds = [UIScreen mainScreen].bounds;
+        self.splashView = [[UIView alloc] initWithFrame:screenBounds];
         self.splashView.backgroundColor = [UIColor clearColor];
         self.splashView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [self.clippingContainer addSubview:self.splashView];
+        [self.hostContainerProxy addSubview:self.splashView];
 
         UIVisualEffectView *splashBlur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial]];
         splashBlur.frame = self.splashView.bounds;
@@ -773,7 +774,7 @@ static NSMutableArray *floatingWindows = nil;
         [self.splashView addSubview:splashBlur];
 
         self.largeSplashIcon = [[UIImageView alloc] initWithFrame:CGRectMake(0, 0, 80, 80)];
-        self.largeSplashIcon.center = CGPointMake(self.splashView.bounds.size.width/2.0, self.splashView.bounds.size.height/2.0);
+        self.largeSplashIcon.center = CGPointMake(screenBounds.size.width/2.0, screenBounds.size.height/2.0);
         self.largeSplashIcon.layer.cornerRadius = 18;
         self.largeSplashIcon.clipsToBounds = YES;
         self.largeSplashIcon.alpha = 0; // 初始透明，由 updateAdaptiveColor 激活
@@ -1435,7 +1436,12 @@ static NSMutableArray *floatingWindows = nil;
         SBApplication *app = [[%c(SBApplicationController) sharedInstance] applicationWithBundleIdentifier:bundleID];
         if ([app respondsToSelector:@selector(mainScene)]) {
             FBScene *scene = [app mainScene];
-            if (scene) return scene;
+            // 核心修复：严禁返回已失效或正在销毁的场景，强制触发重试逻辑等待新场景创建
+            if (scene && [scene respondsToSelector:@selector(isValid)] && ![(id)scene isValid]) {
+                CV3LogToFile(@"[Debug] 忽略无效的旧场景: %@", bundleID);
+            } else if (scene) {
+                return scene;
+            }
         }
         
         FBSceneManager *manager = [%c(FBSceneManager) sharedInstance];
@@ -1446,6 +1452,7 @@ static NSMutableArray *floatingWindows = nil;
             if ([scenesSet isKindOfClass:[NSSet class]]) {
                 for (FBScene *scene in scenesSet) {
                     if ([scene.identifier containsString:bundleID]) {
+                        if ([scene respondsToSelector:@selector(isValid)] && ![(id)scene isValid]) continue;
                         return scene;
                     }
                 }
@@ -1471,7 +1478,9 @@ static NSMutableArray *floatingWindows = nil;
         
         for (NSString *key in scenes.allKeys) {
             if ([key containsString:bundleID]) {
-                return scenes[key];
+                FBScene *scene = scenes[key];
+                if ([scene respondsToSelector:@selector(isValid)] && ![(id)scene isValid]) continue;
+                return scene;
             }
         }
     } @catch (NSException *e) {
@@ -1493,6 +1502,16 @@ static NSMutableArray *floatingWindows = nil;
                 FBSMutableSceneSettings *settings = [[targetScene settings] mutableCopy];
                 [settings setBackgrounded:NO];
                 [settings setForeground:YES];
+                
+                // [Foreground Sovereignty] Force occluded=NO and visibility=2 to ensure hardware access and rendering
+                @try {
+                    if ([settings respondsToSelector:@selector(setOccluded:)]) {
+                        [settings setValue:@NO forKey:@"occluded"];
+                    }
+                    if ([settings respondsToSelector:@selector(setVisibility:)]) {
+                        [settings setValue:@2 forKey:@"visibility"];
+                    }
+                } @catch (NSException *e) {}
                 
                 if ([settings respondsToSelector:@selector(setFrame:)]) {
                     [settings setFrame:[UIScreen mainScreen].bounds];
@@ -1528,7 +1547,14 @@ static NSMutableArray *floatingWindows = nil;
                         
                         self.hostView = hostedView;
                         self.hostView.accessibilityIdentifier = @"ChevronV3Host";
-                        [self.hostContainerProxy addSubview:hostedView]; // Fix: Add to proxy
+                        
+                        // 核心：将真实画面插入 Splash 之下，确保过渡动画淡出时能自然显露内容
+                        if (self.splashView) {
+                            [self.hostContainerProxy insertSubview:hostedView belowSubview:self.splashView];
+                        } else {
+                            [self.hostContainerProxy addSubview:hostedView];
+                        }
+                        
                         [self bringSubviewToFront:self.dragHandle];
                         [self bringSubviewToFront:self.resizeHandle];
                         CV3LogToFile(@"[Debug] 成功通过 _UISceneLayerHostContainerView 创建渲染视图");
@@ -1554,9 +1580,14 @@ static NSMutableArray *floatingWindows = nil;
             } else {
                 CV3LogToFile(@"[Debug] 未找到场景: %@", self.bundleID);
                 if (retries > 0) {
-                    [self attemptToHostSceneWithRetries:retries - 1 delay:delay * 1.5];
+                    [self attemptToHostSceneWithRetries:retries - 1 delay:delay * 1.2];
                 } else {
                     CV3LogToFile(@"[Error] targetScene not found after launch for %@", self.bundleID);
+                    // 核心修复：重试失败后，也要尝试清理 Splash 状态，允许用户看到可能的错误状态或尝试手动恢复
+                    if (self.splashView) {
+                        [self.splashView removeFromSuperview];
+                        self.splashView = nil;
+                    }
                 }
             }
         } @catch (NSException *e) {
@@ -1597,8 +1628,23 @@ static NSMutableArray *floatingWindows = nil;
                 CV3LogToFile(@"[Error] RBSAssertion 流程异常: %@", e);
             }
 
-            // Start polling with initial delay of 0.3s, up to 5 retries (max ~4 seconds)
-            [self attemptToHostSceneWithRetries:5 delay:0.3];
+            // Start polling with initial delay of 0.3s, up to 10 retries (more resilient for cold starts)
+            [self attemptToHostSceneWithRetries:10 delay:0.3];
+            
+            // [Safety] 增加全局超时保护：如果 12 秒后还没进入内容，强制移除 Splash，防止界面永久卡死
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (self.splashView) {
+                    CV3LogToFile(@"[Safety] 触发启动超时强制恢复: %@", self.bundleID);
+                    [UIView animateWithDuration:0.5 animations:^{
+                        self.splashView.alpha = 0;
+                    } completion:^(BOOL finished) {
+                        if (self.splashView) {
+                            [self.splashView removeFromSuperview];
+                            self.splashView = nil;
+                        }
+                    }];
+                }
+            });
         } @catch (NSException *e) {
             CV3LogToFile(@"[Error] Floating window launch failed: %@", e);
         }
