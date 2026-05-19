@@ -351,7 +351,7 @@ struct {
     CGFloat keyboard;
 } static const kChevronWindowLevels = {
     .maxBound = 2100.0,
-    .floatingApp = 2099.5,
+    .floatingApp = 2098.5,
     .panel = 2099.0,
     .background = -1.0,
     .keyboard = 10000.0
