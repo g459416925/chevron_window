@@ -508,7 +508,6 @@ static NSMutableArray *floatingWindows = nil;
 @property (nonatomic, strong) UIView *clippingContainer; 
 @property (nonatomic, strong) UIView *hostContainerProxy;
 @property (nonatomic, strong) UIView *hostView;
-@property (nonatomic, strong) UIView *dragHandle;
 @property (nonatomic, strong) UIView *resizeHandle;
 @property (nonatomic, strong) CAShapeLayer *resizeHandleLayer;
 @property (nonatomic, strong) FBScene *targetScene;
@@ -690,16 +689,8 @@ static NSMutableArray *floatingWindows = nil;
         }
         [self.clippingContainer.layer addSublayer:self.magentaLayer];
         
-        // 顶部拖拽区域
-        self.dragHandle = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 300, 30)];
-        self.dragHandle.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.01]; // 确保整个 30pt 高度的区域都能接收拖拽手势
-        [self addSubview:self.dragHandle];
-        
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
-        [self.dragHandle addGestureRecognizer:pan];
-        
-        // 右下角缩放把手 (同心圆/Stage Manager 风格)
-        self.resizeHandle = [[CV3ResizeHandleView alloc] initWithFrame:CGRectMake(260, 460, 40, 40)];
+        // 右下角缩放与移动把手 (同心圆/Stage Manager 风格)
+        self.resizeHandle = [[CV3ResizeHandleView alloc] initWithFrame:CGRectMake(260, 460, 60, 60)];
         self.resizeHandle.backgroundColor = [UIColor clearColor]; // 已通过 CV3ResizeHandleView 优化热区，无需背景色即可接收触控
         [self addSubview:self.resizeHandle];
         
@@ -710,16 +701,25 @@ static NSMutableArray *floatingWindows = nil;
         self.resizeHandleLayer.lineCap = kCALineCapRound;
         [self.resizeHandle.layer addSublayer:self.resizeHandleLayer];
         
+        // 1. 缩放手势 (Pan)
         UIPanGestureRecognizer *resizePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleResizePan:)];
         resizePan.delegate = self;
         [self.resizeHandle addGestureRecognizer:resizePan];
 
+        // 2. 移动手势 (Long Press)
+        // 核心移植：将原本顶部的拖拽功能集成到把手上，通过长按触发移动
+        UILongPressGestureRecognizer *moveLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleMoveLongPress:)];
+        moveLongPress.minimumPressDuration = 0.45; // 稍微长于普通点击，短于 Stash 关闭
+        moveLongPress.delegate = self;
+        [self.resizeHandle addGestureRecognizer:moveLongPress];
+
+        // 3. 隐藏手势 (Tap)
         UITapGestureRecognizer *resizeTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleHideAction)];
         resizeTap.delegate = self;
         [self.resizeHandle addGestureRecognizer:resizeTap];
         
-        // 核心优化：移除互斥等待逻辑，实现零延迟响应。
-        // 现在 Pan 手势会立即启动，如果只是轻点，Tap 手势依然会生效。
+        // 确保 Pan 手势在长按触发移动时失败，防止缩放与位移冲突
+        [resizePan requireGestureRecognizerToFail:moveLongPress];
         
         self.resizeHandle.userInteractionEnabled = YES;
         
@@ -1152,7 +1152,6 @@ static NSMutableArray *floatingWindows = nil;
         self.appIconMiniView.frame = CGRectInset(self.bounds, 4, 4);
         
         // 隐藏不需要的装饰
-        self.dragHandle.alpha = 0;
         self.resizeHandle.alpha = 0;
     } completion:^(BOOL finished) {
         // 真正从层级中移除画面渲染，释放资源
@@ -1317,15 +1316,6 @@ static NSMutableArray *floatingWindows = nil;
     self.glassBackdrop.bounds = CGRectMake(0, 0, w * 1.1, h * 1.1);
     self.glassBackdrop.center = CGPointMake(w/2.0, h/2.0);
 
-    // 核心修复：胶囊与拖拽条跟随窗口比例缩放，并保持良好的点击感
-    CGRect screenBounds = [UIScreen mainScreen].bounds;
-    CGFloat baseWidth = screenBounds.size.width * 0.45; // 初始创建时的基准宽度
-    CGFloat currentScale = w / baseWidth;
-    
-    CGFloat scaledDragH = 30 * currentScale;
-    
-    self.dragHandle.frame = CGRectMake(0, 0, w, scaledDragH);
-
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     // 同步更新装饰图层，确保与裁剪容器完美贴合（解耦背景形变，防止脱离）
@@ -1357,7 +1347,7 @@ static NSMutableArray *floatingWindows = nil;
     self.resizeHandleLayer.fillColor = [UIColor clearColor].CGColor;
     self.resizeHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
     self.resizeHandleLayer.lineWidth = 2.0;
-    
+
     // 核心：基于固定全屏分辨率进行等比物理缩放 (MilkyWay Style Scaling)
     if (self.hostContainerProxy) {
         CGRect screenBounds = [UIScreen mainScreen].bounds;
@@ -1556,7 +1546,6 @@ static NSMutableArray *floatingWindows = nil;
                             [self.hostContainerProxy addSubview:hostedView];
                         }
                         
-                        [self bringSubviewToFront:self.dragHandle];
                         [self bringSubviewToFront:self.resizeHandle];
                         CV3LogToFile(@"[Debug] 成功通过 _UISceneLayerHostContainerView 创建渲染视图");
                         
@@ -1652,134 +1641,109 @@ static NSMutableArray *floatingWindows = nil;
     });
 }
 
-- (void)handlePan:(UIPanGestureRecognizer *)gesture {
-    CGPoint translation = [gesture translationInView:nil];
-    CGPoint velocity = [gesture velocityInView:nil];
+- (void)handleMoveLongPress:(UILongPressGestureRecognizer *)gesture {
+    static CGPoint initialTouchOffset;
+    static CGPoint lastVelocity;
+    static NSTimeInterval lastTime;
+    
+    CGPoint currentPoint = [gesture locationInView:nil];
     CGRect screen = [UIScreen mainScreen].bounds;
     
     if (gesture.state == UIGestureRecognizerStateBegan) {
         [self setWindowFocused:YES];
+        CGPoint centerInWindow = self.center;
+        initialTouchOffset = CGPointMake(currentPoint.x - centerInWindow.x, currentPoint.y - centerInWindow.y);
+        
         [UIView animateWithDuration:0.3 animations:^{
-            // 移除了 1.05x 的放大，仅增加阴影深度，确保视觉上“浮起”但不“变大”
             self.layer.shadowOpacity = 0.8;
             self.layer.shadowRadius = 35.0;
+            [self applyCurrentTransformWithScale:1.05]; // 拖拽时轻微放大提升手感
         }];
         
         self.lastTargetSnapFrame = CGRectZero;
+        lastTime = CACurrentMediaTime();
+        lastVelocity = CGPointZero;
+        
+        UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+        [gen impactOccurred];
     }
     
     if (gesture.state == UIGestureRecognizerStateChanged) {
-        // 1. 优先更新窗口物理位置 (不延迟，不进入 Transaction，确保手感扎实)
-        self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
-        [gesture setTranslation:CGPointZero inView:nil];
+        NSTimeInterval now = CACurrentMediaTime();
+        CGFloat dt = now - lastTime;
+        if (dt > 0) {
+            lastVelocity = CGPointMake((currentPoint.x - (self.center.x + initialTouchOffset.x)) / dt, (currentPoint.y - (self.center.y + initialTouchOffset.y)) / dt);
+        }
+        lastTime = now;
+
+        // 1. 更新位置
+        self.center = CGPointMake(currentPoint.x - initialTouchOffset.x, currentPoint.y - initialTouchOffset.y);
         
-        // --- 建议 5：Dynamic Island Synergy (灵动岛引力场) ---
-        // 探测是否靠近 iPhone 14 Pro Max 灵动岛区域 (顶部中心 54pt 处)
+        // --- 灵动岛引力场 ---
         CGPoint islandCenter = CGPointMake(screen.size.width / 2.0, 54.0);
         CGFloat islandDist = sqrt(pow(self.center.x - islandCenter.x, 2) + pow(self.center.y - islandCenter.y, 2));
         
         if (islandDist < 120.0) {
-            // 产生引力拉伸：窗口装饰向灵动岛方向平滑偏移
             CGFloat pull = (120.0 - islandDist) / 120.0;
             CGAffineTransform islandPull = CGAffineTransformMakeTranslation((islandCenter.x - self.center.x) * pull * 0.4, (islandCenter.y - self.center.y) * pull * 0.4);
-            
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
             self.innerGlowLayer.affineTransform = islandPull;
             [CATransaction commit];
-            
-            // 进入“引力核心”时触发一次轻微刻度感
             if (islandDist < 65.0) {
                 static NSTimeInterval lastIslandHaptic = 0;
-                if (CACurrentMediaTime() - lastIslandHaptic > 0.6) {
+                if (now - lastIslandHaptic > 0.6) {
                     UISelectionFeedbackGenerator *gen = [[UISelectionFeedbackGenerator alloc] init];
                     [gen selectionChanged];
-                    lastIslandHaptic = CACurrentMediaTime();
+                    lastIslandHaptic = now;
                 }
             }
         } else {
-            // 归位
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
             self.innerGlowLayer.affineTransform = CGAffineTransformIdentity;
             [CATransaction commit];
         }
 
-        // 2. 惯性畸变计算 (非线性阻尼)
-        CGFloat velMag = sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
-        
-        // 建议：非线性拉伸映射，速度越快拉伸增量越小，模拟液体表面张力
+        // 2. 惯性畸变 (Liquid Glass)
+        CGFloat velMag = sqrt(lastVelocity.x * lastVelocity.x + lastVelocity.y * lastVelocity.y);
         CGFloat rawStretch = velMag / kChevronPhysicsConstants.stretchDamping;
         CGFloat stretch = kChevronPhysicsConstants.maxStretch * (1.0 - exp(-rawStretch)); 
-        CGFloat angle = atan2(velocity.y, velocity.x);
+        CGFloat angle = atan2(lastVelocity.y, lastVelocity.x);
         
-        // 建议：高速拖动下的触觉脉冲 (Rigid Haptics)
-        if (velMag > 2500.0) {
-            static NSTimeInterval lastHaptic = 0;
-            NSTimeInterval now = CACurrentMediaTime();
-            if (now - lastHaptic > 0.15) {
-                UIImpactFeedbackGenerator *rigid = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid];
-                [rigid impactOccurredWithIntensity:MIN(1.0, (velMag - 2500.0) / 2000.0)];
-                lastHaptic = now;
-            }
-        }
-
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
-        
-        // 3. 计算装饰件专用变换
         CGAffineTransform stretchTransform = CGAffineTransformIdentity;
         stretchTransform = CGAffineTransformRotate(stretchTransform, angle);
         stretchTransform = CGAffineTransformScale(stretchTransform, 1.0 + stretch, 1.0 - (stretch * 0.3));
         stretchTransform = CGAffineTransformRotate(stretchTransform, -angle);
-        
-        // 核心修复：
-        // A. 玻璃背景应用 stretchTransform，营造液态流动感。
-        // B. 子图层 (InnerGlow, Cyan, Magenta) 已移出 Backdrop 并解除嵌套，因此保持刚性，防止“脱离画面”
         self.glassBackdrop.transform = stretchTransform;
-        
-        // C. 画面内容保持基准缩放，绝不参与惯性形变，确保文字清晰且不产生“残影”
-        CGRect screen = [UIScreen mainScreen].bounds;
-        CGFloat scaleX = self.bounds.size.width / screen.size.width;
-        CGFloat scaleY = self.bounds.size.height / screen.size.height;
-        self.hostContainerProxy.transform = CGAffineTransformMakeScale(scaleX, scaleY);
-
         [CATransaction commit];
         
-        // --- Magnetic Window Alignment (仅位移对齐) ---
+        // --- Magnetic Window Alignment ---
         CGFloat magnetThreshold = 30.0;
         for (CV3FloatingAppWindow *other in floatingWindows) {
             if (other == self || other.isStashed || ![other isKindOfClass:[CV3FloatingAppWindow class]]) continue;
-            
             CGRect otherFrame = other.frame;
             if (fabs(CGRectGetMaxX(self.frame) - otherFrame.origin.x) < magnetThreshold) {
-                CGPoint c = self.center;
-                c.x = otherFrame.origin.x - self.frame.size.width / 2.0 - 5.0;
-                self.center = c;
+                self.center = CGPointMake(otherFrame.origin.x - self.frame.size.width / 2.0 - 5.0, self.center.y);
             } else if (fabs(self.frame.origin.x - CGRectGetMaxX(otherFrame)) < magnetThreshold) {
-                CGPoint c = self.center;
-                c.x = CGRectGetMaxX(otherFrame) + self.frame.size.width / 2.0 + 5.0;
-                self.center = c;
+                self.center = CGPointMake(CGRectGetMaxX(otherFrame) + self.frame.size.width / 2.0 + 5.0, self.center.y);
             }
         }
     }
     
     if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
-        // --- 建议 6：Inertial Dismissal (惯性抛掷逻辑) ---
-        CGFloat velMag = sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
+        CGFloat velMag = sqrt(lastVelocity.x * lastVelocity.x + lastVelocity.y * lastVelocity.y);
         if (velMag > 2500.0) {
-            // 判定方向：如果向屏幕边缘快速划动且已位于边缘 120pt 范围内，则执行抛掷关闭
-            BOOL towardLeft = (velocity.x < -1800 && self.center.x < 150);
-            BOOL towardRight = (velocity.x > 1800 && self.center.x > screen.size.width - 150);
-            BOOL towardTop = (velocity.y < -1800 && self.center.y < 150);
+            BOOL towardLeft = (lastVelocity.x < -1800 && self.center.x < 150);
+            BOOL towardRight = (lastVelocity.x > 1800 && self.center.x > screen.size.width - 150);
+            BOOL towardTop = (lastVelocity.y < -1800 && self.center.y < 150);
             
             if (towardLeft || towardRight || towardTop) {
-                UIImpactFeedbackGenerator *flick = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-                [flick impactOccurred];
-                
+                [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
                 [UIView animateWithDuration:0.45 delay:0 options:UIViewAnimationOptionCurveEaseIn animations:^{
-                    // 沿初速度方向飞出，同时伴随极速坍缩
-                    self.center = CGPointMake(self.center.x + velocity.x * 0.15, self.center.y + velocity.y * 0.15);
+                    self.center = CGPointMake(self.center.x + lastVelocity.x * 0.15, self.center.y + lastVelocity.y * 0.15);
                     self.transform = CGAffineTransformScale(self.transform, 0.01, 0.01);
                     self.alpha = 0;
                 } completion:^(BOOL finished) {
@@ -1790,27 +1754,19 @@ static NSMutableArray *floatingWindows = nil;
         }
 
         [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:UIViewAnimationOptionCurveEaseInOut animations:^{
-            self.transform = CGAffineTransformIdentity;
-            self.glassBackdrop.transform = CGAffineTransformIdentity; // 核心修复：重置玻璃形变
-            
-            // 重置所有图层形变
-            self.innerGlowLayer.transform = CATransform3DIdentity;
-            self.cyanLayer.transform = CATransform3DIdentity;
-            self.magentaLayer.transform = CATransform3DIdentity;
-            
+            [self applyCurrentTransformWithScale:1.0];
+            self.glassBackdrop.transform = CGAffineTransformIdentity;
+            self.innerGlowLayer.affineTransform = CGAffineTransformIdentity;
             self.layer.shadowOpacity = 0.4;
             self.layer.shadowRadius = 20.0;
-            self.snapPreviewView.alpha = 0;
             
             CGRect targetFrame = self.frame;
-            
-            // 仅保留 Stash (隐藏) 逻辑，移除 Snap (放大) 逻辑
             if (self.frame.origin.x < -self.frame.size.width / 2.0) {
                 self.isStashed = YES;
                 self.stashedSide = 1;
                 [self updateSovereigntyAssertion];
                 self.preStashFrame = self.frame;
-                targetFrame.origin.x = -self.frame.size.width + 44; // 核心修复：留出 44pt 让图标完全可见
+                targetFrame.origin.x = -self.frame.size.width + 44; 
                 self.stashGrabber.alpha = 1.0;
                 self.stashGrabber.frame = CGRectMake(self.frame.size.width - 44, self.frame.size.height/2 - 22, 44, 44);
                 self.clippingContainer.alpha = 0;
@@ -1820,19 +1776,13 @@ static NSMutableArray *floatingWindows = nil;
                 self.stashedSide = 2;
                 [self updateSovereigntyAssertion];
                 self.preStashFrame = self.frame;
-                targetFrame.origin.x = screen.size.width - 44; // 核心修复：留出 44pt 让图标完全可见
+                targetFrame.origin.x = screen.size.width - 44;
                 self.stashGrabber.alpha = 1.0;
                 self.stashGrabber.frame = CGRectMake(0, self.frame.size.height/2 - 22, 44, 44);
                 self.clippingContainer.alpha = 0;
                 self.glassBackdrop.alpha = 0.5;
             } else {
-                BOOL wasStashed = self.isStashed;
-                self.isStashed = NO;
-                self.stashedSide = 0;
-                if (wasStashed) [self updateSovereigntyAssertion];
-                self.stashGrabber.alpha = 0;
-                self.clippingContainer.alpha = 1.0;
-                self.glassBackdrop.alpha = 1.0;
+                [self clampToScreenBounds];
             }
             
             if (!CGRectEqualToRect(targetFrame, self.frame)) {
@@ -1844,8 +1794,6 @@ static NSMutableArray *floatingWindows = nil;
                     }
                 }
             }
-            
-            [self clampToScreenBounds];
         } completion:nil];
     }
 }
@@ -1912,7 +1860,6 @@ static NSMutableArray *floatingWindows = nil;
             self.glassBackdrop.alpha = 1.0;
             self.glassBackdrop.transform = CGAffineTransformIdentity;
             
-            self.dragHandle.alpha = 1.0;
             self.resizeHandle.alpha = 1.0;
             
             [self clampToScreenBounds];
@@ -2030,16 +1977,10 @@ static NSMutableArray *floatingWindows = nil;
     // 1. 深度优化：由于 App 渲染视图往往具备极高的触控优先级（尤其是带滚动的视图），
     // 我们必须在 hitTest 阶段显式干预，优先判定装饰性交互组件。
     
-    // 检查右下角缩放热区
+    // 检查右下角缩放/移动热区 (最高优先级)
     CGPoint pInResize = [self convertPoint:point toView:self.resizeHandle];
     if ([self.resizeHandle pointInside:pInResize withEvent:event]) {
         return self.resizeHandle;
-    }
-    
-    // 检查顶部拖拽热区
-    CGPoint pInDrag = [self convertPoint:point toView:self.dragHandle];
-    if ([self.dragHandle pointInside:pInDrag withEvent:event]) {
-        return self.dragHandle;
     }
 
     // 2. 检查侧边 Stash 区域 (仅在 Stashed 时，但此处主要处理 Active 状态)
@@ -2059,8 +2000,8 @@ static NSMutableArray *floatingWindows = nil;
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     // 强制要求其他手势（即来自宿主 App 内部的手势）在我们自己的控制手势面前失败
-    // 这可以防止拖拽或缩放窗口时，底下的 App 还在疯狂滚动
-    if (gestureRecognizer.view == self.dragHandle || gestureRecognizer.view == self.resizeHandle) {
+    // 这可以防止拖拽或缩放/位移窗口时，底下的 App 还在疯狂滚动
+    if (gestureRecognizer.view == self.resizeHandle) {
         return YES;
     }
     return NO;
