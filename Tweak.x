@@ -864,16 +864,15 @@ static NSMutableArray *floatingWindows = nil;
 
 - (void)refreshHostViewPresentation {
     if (!self.targetScene || !self.hostView) {
-        CV3LogToFile(@"[Render] 跳过热刷新，Scene 或 HostView 为空: %@", self.bundleID);
         return;
     }
     
     @try {
-        CV3LogToFile(@"[Render] 执行渲染上下文热刷新: %@", self.bundleID);
-        // 1. 强制重置渲染上下文，这是防止白屏/模糊层的核心
+        // 核心修复：使用更全面的层级位掩码 (31 = 1|2|4|8|16)
+        // Bit 0 (1) 是主画面层，之前使用的 26 缺少了主画面位，可能导致某些转场后画面无法刷新
         UIScenePresentationContext *context = [[%c(UIScenePresentationContext) alloc] _initWithDefaultValues];
         if ([context respondsToSelector:@selector(setPresentedLayerTypes:)]) {
-            [context setPresentedLayerTypes:26]; 
+            [context setPresentedLayerTypes:31]; 
         }
         if ([context respondsToSelector:@selector(setAppearanceStyle:)]) {
             [context setAppearanceStyle:2];
@@ -886,7 +885,6 @@ static NSMutableArray *floatingWindows = nil;
             [self.hostView performSelector:@selector(_setPresentationContext:) withObject:context];
         }
         
-        // 2. 确保容器层级可见，防止被系统动画剥离
         self.hostView.alpha = 1.0;
         self.hostView.hidden = NO;
         
@@ -979,12 +977,11 @@ static NSMutableArray *floatingWindows = nil;
         // 重新激活 Context，防止系统掉线
         if (self.hostView && [self.hostView respondsToSelector:@selector(_setPresentationContext:)]) {
             UIScenePresentationContext *context = [[%c(UIScenePresentationContext) alloc] _initWithDefaultValues];
-            if ([context respondsToSelector:@selector(setPresentedLayerTypes:)]) [context setPresentedLayerTypes:26]; 
+            if ([context respondsToSelector:@selector(setPresentedLayerTypes:)]) [context setPresentedLayerTypes:31];
             if ([context respondsToSelector:@selector(setAppearanceStyle:)]) [context setAppearanceStyle:2];
             if ([context respondsToSelector:@selector(setClipsToBounds:)]) [context setClipsToBounds:YES];
             [self.hostView performSelector:@selector(_setPresentationContext:) withObject:context];
         }
-
     } @catch (NSException *e) {
         CV3LogToFile(@"[Error] enforceSceneForegroundState 异常: %@", e);
     }
@@ -1512,7 +1509,7 @@ static NSMutableArray *floatingWindows = nil;
                     _UISceneLayerHostContainerView *hostedView = [[%c(_UISceneLayerHostContainerView) alloc] initWithScene:targetScene debugDescription:@"ChevronV3Host"];
                     UIScenePresentationContext *context = [[%c(UIScenePresentationContext) alloc] _initWithDefaultValues];
                     if ([context respondsToSelector:@selector(setPresentedLayerTypes:)]) {
-                        [context setPresentedLayerTypes:26]; // 尝试强制渲染所有类型
+                        [context setPresentedLayerTypes:31]; // 尝试强制渲染所有类型
                     }
                     if ([context respondsToSelector:@selector(setAppearanceStyle:)]) {
                         [context setAppearanceStyle:2];
@@ -5837,6 +5834,24 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                             modified = YES;
                         } @catch (NSException *e) {}
                     }
+
+                    // [Layout Sovereignty] 注入安全区域约束与方向硬化
+                    // 抖音搜索冻屏通常是因为在转场瞬间 SceneSettings 丢失了关键布局元数据，导致渲染引擎 Fence 等待超时
+                    if ([mutableSettings isKindOfClass:[%c(UIMutableApplicationSceneSettings) class]]) {
+                        UIMutableApplicationSceneSettings *uim = (UIMutableApplicationSceneSettings *)mutableSettings;
+                        UIEdgeInsets safeArea = UIEdgeInsetsZero; // 分屏模式下通常不使用系统级 Safe Area，由宿主控制
+                        
+                        if ([uim respondsToSelector:@selector(setSafeAreaInsetsPortrait:)]) uim.safeAreaInsetsPortrait = safeArea;
+                        if ([uim respondsToSelector:@selector(setSafeAreaInsetsLandscapeLeft:)]) uim.safeAreaInsetsLandscapeLeft = safeArea;
+                        if ([uim respondsToSelector:@selector(setSafeAreaInsetsLandscapeRight:)]) uim.safeAreaInsetsLandscapeRight = safeArea;
+                        if ([uim respondsToSelector:@selector(setSafeAreaInsetsPortraitUpsideDown:)]) uim.safeAreaInsetsPortraitUpsideDown = safeArea;
+                        
+                        // 强制同步方向，防止在搜索弹出键盘时触发不必要的旋转计算导致的死锁
+                        if ([uim respondsToSelector:@selector(setInterfaceOrientation:)]) {
+                            [uim performSelector:@selector(setInterfaceOrientation:) withObject:@(win.targetOrientation)];
+                        }
+                        modified = YES;
+                    }
                 } @catch (NSException *e) {}
 
                 if (modified) {
@@ -5904,6 +5919,21 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                             [mutableSettings setValue:@0 forKey:@"interruptionPolicy"]; 
                             modified = YES;
                         } @catch (NSException *e) {}
+                    }
+
+                    // [Layout Sovereignty] 注入安全区域约束与方向硬化
+                    if ([mutableSettings isKindOfClass:[%c(UIMutableApplicationSceneSettings) class]]) {
+                        UIMutableApplicationSceneSettings *uim = (UIMutableApplicationSceneSettings *)mutableSettings;
+                        UIEdgeInsets safeArea = UIEdgeInsetsZero;
+                        if ([uim respondsToSelector:@selector(setSafeAreaInsetsPortrait:)]) uim.safeAreaInsetsPortrait = safeArea;
+                        if ([uim respondsToSelector:@selector(setSafeAreaInsetsLandscapeLeft:)]) uim.safeAreaInsetsLandscapeLeft = safeArea;
+                        if ([uim respondsToSelector:@selector(setSafeAreaInsetsLandscapeRight:)]) uim.safeAreaInsetsLandscapeRight = safeArea;
+                        if ([uim respondsToSelector:@selector(setSafeAreaInsetsPortraitUpsideDown:)]) uim.safeAreaInsetsPortraitUpsideDown = safeArea;
+                        
+                        if ([uim respondsToSelector:@selector(setInterfaceOrientation:)]) {
+                            [uim performSelector:@selector(setInterfaceOrientation:) withObject:@(win.targetOrientation)];
+                        }
+                        modified = YES;
                     }
                 } @catch (NSException *e) {}
 
