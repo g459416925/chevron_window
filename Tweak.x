@@ -652,6 +652,11 @@ static NSMutableArray *floatingWindows = nil;
         // 代理容器：用来隔离系统的布局覆盖，承载真实的缩放和裁剪
         self.hostContainerProxy = [[UIView alloc] initWithFrame:self.bounds];
         self.hostContainerProxy.backgroundColor = [UIColor clearColor];
+        // 核心修复：应用三线性过滤 (Trilinear Filtering)
+        // 在非整数缩放比下，三线性过滤能显著减少文本和细线的锯齿，提升渲染清晰度
+        self.hostContainerProxy.layer.magnificationFilter = kCAFilterTrilinear;
+        self.hostContainerProxy.layer.minificationFilter = kCAFilterTrilinear;
+        
         [self.clippingContainer addSubview:self.hostContainerProxy];
 
         // --- Liquid Glass Visuals (Moved to clippingContainer to maintain structural integrity during fluid drags) ---
@@ -1936,8 +1941,15 @@ static NSMutableArray *floatingWindows = nil;
 }
 
 - (void)handleResizePan:(UIPanGestureRecognizer *)gesture {
+    static BOOL hasTriggeredTopHaptic = NO;
+    static BOOL hasTriggeredBottomHaptic = NO;
+    static BOOL hasTriggeredSideHaptic = NO;
+
     if (gesture.state == UIGestureRecognizerStateBegan) {
         self.initialResizeFrame = self.frame;
+        hasTriggeredTopHaptic = NO;
+        hasTriggeredBottomHaptic = NO;
+        hasTriggeredSideHaptic = NO;
         
         UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
         [gen impactOccurred];
@@ -1970,7 +1982,9 @@ static NSMutableArray *floatingWindows = nil;
         CGRect screenBounds = [UIScreen mainScreen].bounds;
         CGFloat aspect = screenBounds.size.height / screenBounds.size.width;
         
-        CGFloat minAllowedWidth = screenBounds.size.width * 0.45;
+        // 核心优化：基于物理像素比例 (Normalized Physical Pixel Ratio)
+        // 将屏幕物理宽度定义为 1.0，设定缩放阈值
+        CGFloat minAllowedWidth = screenBounds.size.width * 0.4;
         CGFloat maxAllowedWidth = screenBounds.size.width * 0.9;
         
         CGPoint initialCenter = CGPointMake(CGRectGetMidX(self.initialResizeFrame), CGRectGetMidY(self.initialResizeFrame));
@@ -2031,11 +2045,64 @@ static NSMutableArray *floatingWindows = nil;
         UIEdgeInsets safeArea = keyWin ? keyWin.safeAreaInsets : UIEdgeInsetsMake(47, 0, 34, 0);
         
         // 核心修复：缩放过程中暂时禁用安全区域的强制钳位，防止窗口边缘与安全区域边界（如灵动岛）发生高频物理冲突导致抖动
-        // 仅在手指松开 (Ended) 后再执行最终的边界修正
         if (gesture.state == UIGestureRecognizerStateChanged) {
-            // 允许窗口在缩放时暂时超出顶部安全区域，避免“弹簧效应”
             newFrame.origin.y = initialCenter.y - finalHeight / 2.0;
+            
+            // --- 建议实现：边界触觉反馈 ---
+            if (newFrame.origin.y < safeArea.top && !hasTriggeredTopHaptic) {
+                UISelectionFeedbackGenerator *gen = [[UISelectionFeedbackGenerator alloc] init];
+                [gen selectionChanged];
+                hasTriggeredTopHaptic = YES;
+            } else if (newFrame.origin.y >= safeArea.top) {
+                hasTriggeredTopHaptic = NO;
+            }
+
+            if (CGRectGetMaxY(newFrame) > screenBounds.size.height - safeArea.bottom && !hasTriggeredBottomHaptic) {
+                UISelectionFeedbackGenerator *gen = [[UISelectionFeedbackGenerator alloc] init];
+                [gen selectionChanged];
+                hasTriggeredBottomHaptic = YES;
+            } else if (CGRectGetMaxY(newFrame) <= screenBounds.size.height - safeArea.bottom) {
+                hasTriggeredBottomHaptic = NO;
+            }
+
+            // --- 建议实现：两侧边界触觉反馈 ---
+            BOOL hitSide = (newFrame.origin.x < safeArea.left || CGRectGetMaxX(newFrame) > screenBounds.size.width - safeArea.right);
+            if (hitSide && !hasTriggeredSideHaptic) {
+                UISelectionFeedbackGenerator *gen = [[UISelectionFeedbackGenerator alloc] init];
+                [gen selectionChanged];
+                hasTriggeredSideHaptic = YES;
+            } else if (!hitSide) {
+                hasTriggeredSideHaptic = NO;
+            }
         } else {
+            // --- 建议实现：Island Snapping (灵动岛吸附) ---
+            CGFloat snapThreshold = 25.0;
+            if (fabs(newFrame.origin.y - safeArea.top) < snapThreshold) {
+                newFrame.origin.y = safeArea.top;
+                UISelectionFeedbackGenerator *gen = [[UISelectionFeedbackGenerator alloc] init];
+                [gen selectionChanged];
+            }
+
+            // --- 建议实现：物理比例吸附 (Ratio Snap Points) ---
+            // 在 0.5 (小窗口模式) 和 0.8 (大窗口模式) 增加吸附感
+            CGFloat currentRatio = finalWidth / screenBounds.size.width;
+            CGFloat targetSnapRatio = -1.0;
+            
+            if (fabs(currentRatio - 0.5) < 0.03) targetSnapRatio = 0.5;
+            else if (fabs(currentRatio - 0.8) < 0.03) targetSnapRatio = 0.8;
+            
+            if (targetSnapRatio > 0) {
+                finalWidth = screenBounds.size.width * targetSnapRatio;
+                finalHeight = finalWidth * aspect;
+                newFrame.size = CGSizeMake(finalWidth, finalHeight);
+                newFrame.origin.x = initialCenter.x - finalWidth / 2.0;
+                newFrame.origin.y = initialCenter.y - finalHeight / 2.0;
+                
+                UIImpactFeedbackGenerator *snapHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+                [snapHaptic impactOccurred];
+                CV3LogToFile(@"[Physical] 触发物理比例吸附: %.1f", targetSnapRatio);
+            }
+
             if (newFrame.origin.x < safeArea.left) newFrame.origin.x = safeArea.left;
             if (newFrame.origin.y < safeArea.top) newFrame.origin.y = safeArea.top;
             if (CGRectGetMaxX(newFrame) > screenBounds.size.width - safeArea.right) 
