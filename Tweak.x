@@ -853,6 +853,17 @@ static NSMutableArray *floatingWindows = nil;
             return;
         }
 
+        // 预防性重置：如果检测到 HostView 存在但可能已“冻结”，强制触发层级重新同步
+        if (self.hostView && self.hostView.superview) {
+            // 通过检查渲染层级是否还具备 Presentation Context 来判断冻结
+            if ([self.hostView respondsToSelector:@selector(presentationContext)] && ![self.hostView performSelector:@selector(presentationContext)]) {
+                CV3LogToFile(@"[Recovery] 检测到 HostView 渲染层断连，强制修复: %@", self.bundleID);
+                [self.hostView removeFromSuperview];
+                [self attemptToHostSceneWithRetries:1 delay:0]; // 快速尝试重建
+                return;
+            }
+        }
+
         FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
         BOOL needsUpdate = NO;
         
