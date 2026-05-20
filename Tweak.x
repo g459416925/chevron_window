@@ -96,6 +96,7 @@
 @property (assign, nonatomic) UIEdgeInsets safeAreaInsetsLandscapeLeft;
 @property (assign, nonatomic) UIEdgeInsets safeAreaInsetsLandscapeRight;
 @property (assign, nonatomic) UIEdgeInsets safeAreaInsetsPortraitUpsideDown;
+@property (assign, nonatomic) NSUInteger deactivationReasons;
 - (void)setInLiveResize:(BOOL)inLiveResize;
 @end
 
@@ -973,15 +974,17 @@ static NSMutableArray *floatingWindows = nil;
             if ([self.targetScene respondsToSelector:@selector(_setContentState:)]) {
                 [self.targetScene _setContentState:2]; 
             }
-        }
-
-        // 重新激活 Context，防止系统掉线
-        if (self.hostView && [self.hostView respondsToSelector:@selector(_setPresentationContext:)]) {
-            UIScenePresentationContext *context = [[%c(UIScenePresentationContext) alloc] _initWithDefaultValues];
-            if ([context respondsToSelector:@selector(setPresentedLayerTypes:)]) [context setPresentedLayerTypes:31];
-            if ([context respondsToSelector:@selector(setAppearanceStyle:)]) [context setAppearanceStyle:2];
-            if ([context respondsToSelector:@selector(setClipsToBounds:)]) [context setClipsToBounds:YES];
-            [self.hostView performSelector:@selector(_setPresentationContext:) withObject:context];
+            
+            // [Optimization] 只有在设置真正发生变更时，才重置 Presentation Context。
+            // 避免在每个 Scene 背景化通知中都触发 Context 重置，减少画面暂停的可能性。
+            if (self.hostView && [self.hostView respondsToSelector:@selector(_setPresentationContext:)]) {
+                UIScenePresentationContext *context = [[%c(UIScenePresentationContext) alloc] _initWithDefaultValues];
+                if ([context respondsToSelector:@selector(setPresentedLayerTypes:)]) [context setPresentedLayerTypes:31];
+                if ([context respondsToSelector:@selector(setAppearanceStyle:)]) [context setAppearanceStyle:2];
+                if ([context respondsToSelector:@selector(setClipsToBounds:)]) [context setClipsToBounds:YES];
+                [self.hostView performSelector:@selector(_setPresentationContext:) withObject:context];
+                CV3LogToFile(@"[Lifecycle] 已同步更新 %@ 渲染上下文", self.bundleID);
+            }
         }
     } @catch (NSException *e) {
         CV3LogToFile(@"[Error] enforceSceneForegroundState 异常: %@", e);
@@ -5475,6 +5478,149 @@ static NSTimeInterval lastLogTime = 0;
     }
     return %orig;
 }
+
+- (double)dimmingAlphaForIndex:(unsigned long long)index {
+    if (floatingWindows && floatingWindows.count > 0) {
+        if ([self respondsToSelector:@selector(appLayouts)]) {
+            NSArray *layouts = [self appLayouts];
+            if (index < layouts.count) {
+                SBAppLayout *layout = layouts[index];
+                if ([layout respondsToSelector:@selector(containsItemWithBundleIdentifier:)]) {
+                    for (CV3FloatingAppWindow *win in floatingWindows) {
+                        if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
+                            return 0.0; // 禁止变暗
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return %orig;
+}
+
+- (double)cornerRadiusForIndex:(unsigned long long)index {
+    if (floatingWindows && floatingWindows.count > 0) {
+        if ([self respondsToSelector:@selector(appLayouts)]) {
+            NSArray *layouts = [self appLayouts];
+            if (index < layouts.count) {
+                SBAppLayout *layout = layouts[index];
+                if ([layout respondsToSelector:@selector(containsItemWithBundleIdentifier:)]) {
+                    for (CV3FloatingAppWindow *win in floatingWindows) {
+                        if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
+                            // 保持窗口原生圆角，防止系统在 Home 手势时强加巨大的圆角
+                            return kChevronLayoutConstants.cornerRadius;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return %orig;
+}
+
+- (double)shadowOpacityForIndex:(unsigned long long)index {
+    if (floatingWindows && floatingWindows.count > 0) {
+        if ([self respondsToSelector:@selector(appLayouts)]) {
+            NSArray *layouts = [self appLayouts];
+            if (index < layouts.count) {
+                SBAppLayout *layout = layouts[index];
+                if ([layout respondsToSelector:@selector(containsItemWithBundleIdentifier:)]) {
+                    for (CV3FloatingAppWindow *win in floatingWindows) {
+                        if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
+                            return 0.4; // 维持我们自己的阴影透明度
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return %orig;
+}
+
+- (BOOL)isItemResizingAllowedForIndex:(unsigned long long)index {
+    if (floatingWindows && floatingWindows.count > 0) {
+        if ([self respondsToSelector:@selector(appLayouts)]) {
+            NSArray *layouts = [self appLayouts];
+            if (index < layouts.count) {
+                SBAppLayout *layout = layouts[index];
+                for (CV3FloatingAppWindow *win in floatingWindows) {
+                    if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
+                        return NO; // 禁止系统在手势期间调整分屏 App 的尺寸
+                    }
+                }
+            }
+        }
+    }
+    return %orig;
+}
+
+- (double)blurViewIconScaleForIndex:(unsigned long long)index {
+    if (floatingWindows && floatingWindows.count > 0) {
+        if ([self respondsToSelector:@selector(appLayouts)]) {
+            NSArray *layouts = [self appLayouts];
+            if (index < layouts.count) {
+                SBAppLayout *layout = layouts[index];
+                for (CV3FloatingAppWindow *win in floatingWindows) {
+                    if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
+                        return 0.0; // 彻底禁止系统图标模糊层
+                    }
+                }
+            }
+        }
+    }
+    return %orig;
+}
+
+- (BOOL)isWallpaperRequiredForIndex:(unsigned long long)index {
+    if (floatingWindows && floatingWindows.count > 0) {
+        if ([self respondsToSelector:@selector(appLayouts)]) {
+            NSArray *layouts = [self appLayouts];
+            if (index < layouts.count) {
+                SBAppLayout *layout = layouts[index];
+                for (CV3FloatingAppWindow *win in floatingWindows) {
+                    if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
+                        return NO; // 分屏应用不需要系统壁纸背景
+                    }
+                }
+            }
+        }
+    }
+    return %orig;
+}
+
+- (double)titleOpacityForIndex:(unsigned long long)index {
+    if (floatingWindows && floatingWindows.count > 0) {
+        if ([self respondsToSelector:@selector(appLayouts)]) {
+            NSArray *layouts = [self appLayouts];
+            if (index < layouts.count) {
+                SBAppLayout *layout = layouts[index];
+                for (CV3FloatingAppWindow *win in floatingWindows) {
+                    if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
+                        return 0.0; // 隐藏系统在转场时强加的标题
+                    }
+                }
+            }
+        }
+    }
+    return %orig;
+}
+
+- (BOOL)shouldUseWallpaperGradientTreatmentForIndex:(unsigned long long)index {
+    if (floatingWindows && floatingWindows.count > 0) {
+        if ([self respondsToSelector:@selector(appLayouts)]) {
+            NSArray *layouts = [self appLayouts];
+            if (index < layouts.count) {
+                SBAppLayout *layout = layouts[index];
+                for (CV3FloatingAppWindow *win in floatingWindows) {
+                    if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
+                        return NO; // 禁止系统渐变压制
+                    }
+                }
+            }
+        }
+    }
+    return %orig;
+}
 %end
 
 %hook FBSceneManager
@@ -5499,12 +5645,9 @@ static NSTimeInterval lastLogTime = 0;
         NSMutableSet *mutableItems = [orig mutableCopy];
         BOOL modified = NO;
         
-        // 我们需要找到这些分屏 App 对应的 SBDisplayItem
-        // 既然我们运行在 SpringBoard 中，可以尝试通过 SBApplication 转换
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if (win.isClosing) continue;
             
-            // 查找是否存在对应的 DisplayItem
             BOOL alreadyPresent = NO;
             for (id item in orig) {
                 if ([item respondsToSelector:@selector(bundleIdentifier)] && [[item bundleIdentifier] isEqualToString:win.bundleID]) {
@@ -5514,18 +5657,24 @@ static NSTimeInterval lastLogTime = 0;
             }
             
             if (!alreadyPresent) {
-                // 如果原始集合里没有，我们尝试从 orig 中复制一个模板并修改 BID (危险但有效)
-                // 或者更好的方案：如果是 iOS 16，我们直接拦截 TCC 检查逻辑。
-                // 这里我们先尝试扩大 activeDisplayItems 范围
-                modified = YES;
+                // [Fix] 动态构造 SBDisplayItem 并注入，确保系统在 TCC 和渲染管道中承认其活跃地位
+                @try {
+                    id item = nil;
+                    if ([NSClassFromString(@"SBDisplayItem") respondsToSelector:@selector(displayItemWithType:bundleIdentifier:)]) {
+                        item = [NSClassFromString(@"SBDisplayItem") performSelector:@selector(displayItemWithType:bundleIdentifier:) withObject:@"main" withObject:win.bundleID];
+                    }
+                    if (item) {
+                        [mutableItems addObject:item];
+                        modified = YES;
+                        CV3LogToFile(@"[Workspace] 已成功向 ActiveItems 注入: %@", win.bundleID);
+                    }
+                } @catch (NSException *e) {
+                    CV3LogToFile(@"[Error] 构造 SBDisplayItem 失败: %@", e);
+                }
             }
         }
         
-        if (modified) {
-            // 注意：简单地添加 BID 字符串是不够的，通常需要 SBDisplayItem 对象。
-            // 但对于某些 TCC 检查，仅 NSSet 包含该 BID 即可通过。
-            return [mutableItems copy];
-        }
+        if (modified) return [mutableItems copy];
     }
     return orig;
 }
@@ -5537,8 +5686,8 @@ static NSTimeInterval lastLogTime = 0;
     if (floatingWindows) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if ([win isKindOfClass:[CV3FloatingAppWindow class]] && !win.isClosing) {
+                // [Optimization] 仅执行挂载，不执行 refreshHostViewPresentation，避免转场瞬间的 Context 重置导致闪烁
                 [win attachToCurrentActiveScene];
-                [win refreshHostViewPresentation];
                 CV3LogToFile(@"[Workspace] 转换启动瞬间锁定渲染: %@", win.bundleID);
             }
         }
@@ -5547,16 +5696,9 @@ static NSTimeInterval lastLogTime = 0;
 
 - (void)executeTransitionRequest:(id)arg1 {
     CV3LogToFile(@"[Workspace] 收到执行转换请求: %@", arg1);
-    if (floatingWindows && floatingWindows.count > 0) {
-        @try {
-            for (CV3FloatingAppWindow *win in floatingWindows) {
-                if (win.isClosing) continue;
-                // 转换期间强制重置渲染上下文，防止系统卸载
-                [win refreshHostViewPresentation];
-                CV3LogToFile(@"[Workspace] 过渡发起，强制预热渲染管道: %@", win.bundleID);
-            }
-        } @catch (NSException *e) {}
-    }
+    // [Optimization] 移除此处的 refreshHostViewPresentation。
+    // 在 iOS 16 中，execute 阶段非常敏感，此时修改渲染上下文极易触发画面暂停。
+    // 我们依赖 FBScene 的全局 Hook 来维持状态。
     %orig(arg1);
 }
 
@@ -5566,7 +5708,8 @@ static NSTimeInterval lastLogTime = 0;
     if (floatingWindows) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if ([win isKindOfClass:[CV3FloatingAppWindow class]] && !win.isClosing) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                // 转换后稍微延迟执行，确保系统状态稳定
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     [win attachToCurrentActiveScene];
                     [win refreshHostViewPresentation];
                     CV3LogToFile(@"[Workspace] 转换后延迟对齐完成: %@", win.bundleID);
@@ -5876,6 +6019,13 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                         if ([uim respondsToSelector:@selector(setInterfaceOrientation:)]) {
                             [uim performSelector:@selector(setInterfaceOrientation:) withObject:@(win.targetOrientation)];
                         }
+                        
+                        // [Deactivation Immunity] 核心防御：清除系统手势导致的失活原因 (Deactivation Reasons)
+                        // 当用户触发 Home 手势时，系统会为活跃场景附加 deactivationReasons 导致 App 进入 Inactive 状态，从而触发视频暂停。
+                        if ([uim respondsToSelector:@selector(setDeactivationReasons:)]) {
+                            uim.deactivationReasons = 0;
+                        }
+                        
                         modified = YES;
                     }
                 } @catch (NSException *e) {}
@@ -5886,13 +6036,9 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                     %orig(arg1, arg2);
                 }
                 
-                if ([NSThread isMainThread]) {
-                    [win refreshHostViewPresentation];
-                } else {
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        [win refreshHostViewPresentation];
-                    });
-                }
+                // [Optimization] 移除此处的 refreshHostViewPresentation。
+                // 全局设置更新极其频繁，此处重置 Context 会导致画面掉帧或短暂暂停。
+                // 我们已经在 enforceSceneForegroundState 中按需处理。
                 return;
             }
         }
@@ -5959,6 +6105,11 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                         if ([uim respondsToSelector:@selector(setInterfaceOrientation:)]) {
                             [uim performSelector:@selector(setInterfaceOrientation:) withObject:@(win.targetOrientation)];
                         }
+                        
+                        if ([uim respondsToSelector:@selector(setDeactivationReasons:)]) {
+                            uim.deactivationReasons = 0;
+                        }
+                        
                         modified = YES;
                     }
                 } @catch (NSException *e) {}
@@ -5969,13 +6120,7 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                     %orig(arg1, arg2, arg3);
                 }
                 
-                if ([NSThread isMainThread]) {
-                    [win refreshHostViewPresentation];
-                } else {
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        [win refreshHostViewPresentation];
-                    });
-                }
+                // [Optimization] 移除此处的 refreshHostViewPresentation，理由同上。
                 return;
             }
         }
