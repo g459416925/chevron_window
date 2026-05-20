@@ -569,6 +569,20 @@ static NSMutableArray *floatingWindows = nil;
     return %orig;
 }
 
+- (BOOL)_isHomeGestureSupported {
+    if ([self isKindOfClass:[CV3FloatingAppWindow class]]) {
+        return NO; // 核心：告知系统此窗口不支持 Home 手势，防止其拦截底部上滑并触发中断
+    }
+    return %orig;
+}
+
+- (BOOL)_shouldControlSceneDestruction {
+    if ([self isKindOfClass:[CV3FloatingAppWindow class]]) {
+        return NO; // 禁止系统自动销毁此窗口关联的场景
+    }
+    return %orig;
+}
+
 - (void)setAlpha:(CGFloat)alpha {
     if ([self isKindOfClass:[CV3FloatingAppWindow class]]) {
         CV3FloatingAppWindow *win = (CV3FloatingAppWindow *)self;
@@ -961,12 +975,17 @@ static NSMutableArray *floatingWindows = nil;
                     [settings setValue:@YES forKey:@"idleTimerDisabled"];
                 }
                 
-                // [Foreground Sovereignty] Force interruptionPolicy to 0 (None)
-                // This is critical for camera/mic apps like Douyin to prevent the system from pausing capture.
+                // [Foreground Sovereignty] Force interruptionPolicy to 1 (Suppress)
+                // This is critical for camera/mic apps and video playback to prevent the system from pausing capture/playback.
                 if ([settings respondsToSelector:@selector(setInterruptionPolicy:)]) {
-                    [settings setInterruptionPolicy:0];
+                    [settings setInterruptionPolicy:1];
                 } else {
-                    @try { [settings setValue:@0 forKey:@"interruptionPolicy"]; } @catch (NSException *e) {}
+                    @try { [settings setValue:@1 forKey:@"interruptionPolicy"]; } @catch (NSException *e) {}
+                }
+
+                // [Deactivation Immunity] Clear deactivationReasons in foreground enforcement
+                if ([settings respondsToSelector:@selector(setDeactivationReasons:)]) {
+                    @try { [settings setValue:@0 forKey:@"deactivationReasons"]; } @catch (NSException *e) {}
                 }
             } @catch (NSException *e) {}
 
@@ -5387,17 +5406,33 @@ static NSTimeInterval lastLogTime = 0;
 
 @interface SBMainWorkspaceTransitionRequest : SBWorkspaceTransitionRequest
 @property (nonatomic, copy) NSSet *deactivatedEntities;
+@property (nonatomic, assign) NSInteger source;
+- (BOOL)isAppearingBackgrounded;
+- (BOOL)isAppearingInBackground;
 @end
 
 %hook SBMainWorkspaceTransitionRequest
+- (BOOL)isAppearingBackgrounded {
+    if (floatingWindows && floatingWindows.count > 0) {
+        return NO; // 核心：防止系统认为转换请求会导致应用进入后台
+    }
+    return %orig;
+}
+
+- (BOOL)isAppearingInBackground {
+    if (floatingWindows && floatingWindows.count > 0) {
+        return NO; 
+    }
+    return %orig;
+}
+
 - (NSSet *)deactivatedEntities {
     NSSet *orig = %orig;
     if (floatingWindows && floatingWindows.count > 0 && orig.count > 0) {
         NSMutableSet *mutableDeactivated = [orig mutableCopy];
         BOOL modified = NO;
-        
+
         for (id entity in orig) {
-            // 检查实体是否代表我们要保护的应用
             @try {
                 NSString *bid = nil;
                 if ([entity respondsToSelector:@selector(applicationSceneEntity)]) {
@@ -5406,7 +5441,7 @@ static NSTimeInterval lastLogTime = 0;
                         bid = [appEntity performSelector:@selector(bundleIdentifier)];
                     }
                 }
-                
+
                 if (bid) {
                     for (CV3FloatingAppWindow *win in floatingWindows) {
                         if ([bid isEqualToString:win.bundleID] && !win.isClosing) {
@@ -5418,16 +5453,61 @@ static NSTimeInterval lastLogTime = 0;
                 }
             } @catch (NSException *e) {}
         }
-        
+
         if (modified) return [mutableDeactivated copy];
     }
     return orig;
 }
-%end
 
+- (NSSet *)resigningEntities {
+    NSSet *orig = %orig;
+    if (floatingWindows && floatingWindows.count > 0 && orig.count > 0) {
+        NSMutableSet *mutableResigning = [orig mutableCopy];
+        BOOL modified = NO;
+
+        for (id entity in orig) {
+            @try {
+                NSString *bid = nil;
+                if ([entity respondsToSelector:@selector(applicationSceneEntity)]) {
+                    id appEntity = [entity performSelector:@selector(applicationSceneEntity)];
+                    if ([appEntity respondsToSelector:@selector(bundleIdentifier)]) {
+                        bid = [appEntity performSelector:@selector(bundleIdentifier)];
+                    }
+                }
+
+                if (bid) {
+                    for (CV3FloatingAppWindow *win in floatingWindows) {
+                        if ([bid isEqualToString:win.bundleID] && !win.isClosing) {
+                            [mutableResigning removeObject:entity];
+                            modified = YES;
+                            CV3LogToFile(@"[Immortality] 成功从辞职(Resign)列表中剔除分屏应用: %@", bid);
+                        }
+                    }
+                }
+            } @catch (NSException *e) {}
+        }
+
+        if (modified) return [mutableResigning copy];
+    }
+    return orig;
+}
+%end
 @interface SBAppLayout : NSObject
 - (BOOL)containsItemWithBundleIdentifier:(NSString *)bundleIdentifier;
 @end
+
+%hook SBAppLayout
+- (BOOL)containsItemWithBundleIdentifier:(NSString *)bid {
+    if (floatingWindows && floatingWindows.count > 0) {
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if ([bid isEqualToString:win.bundleID] && !win.isClosing) {
+                return YES; // 核心：欺骗系统，让其认为分屏应用始终是当前 Layout 的一部分，从而避免任何形式的自动停用
+            }
+        }
+    }
+    return %orig;
+}
+%end
 
 @interface SBSwitcherModifier : NSObject
 - (NSArray *)appLayouts;
@@ -5695,10 +5775,9 @@ static NSTimeInterval lastLogTime = 0;
 }
 
 - (void)executeTransitionRequest:(id)arg1 {
-    CV3LogToFile(@"[Workspace] 收到执行转换请求: %@", arg1);
-    // [Optimization] 移除此处的 refreshHostViewPresentation。
-    // 在 iOS 16 中，execute 阶段非常敏感，此时修改渲染上下文极易触发画面暂停。
-    // 我们依赖 FBScene 的全局 Hook 来维持状态。
+    if ([arg1 respondsToSelector:@selector(source)]) {
+        CV3LogToFile(@"[Workspace] 执行转换请求, Source: %ld", (long)[(SBMainWorkspaceTransitionRequest *)arg1 source]);
+    }
     %orig(arg1);
 }
 
@@ -5993,13 +6072,13 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                         modified = YES;
                     }
 
-                    // [Foreground Sovereignty] Force interruptionPolicy to 0 (None)
+                    // [Foreground Sovereignty] Force interruptionPolicy to 1 (Suppress)
                     if ([mutableSettings respondsToSelector:@selector(setInterruptionPolicy:)]) {
-                        [mutableSettings setInterruptionPolicy:0];
+                        [mutableSettings setInterruptionPolicy:1];
                         modified = YES;
                     } else {
                         @try { 
-                            [mutableSettings setValue:@0 forKey:@"interruptionPolicy"]; 
+                            [mutableSettings setValue:@1 forKey:@"interruptionPolicy"]; 
                             modified = YES;
                         } @catch (NSException *e) {}
                     }
@@ -6082,13 +6161,13 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                         modified = YES;
                     }
 
-                    // [Foreground Sovereignty] Force interruptionPolicy to 0 (None)
+                    // [Foreground Sovereignty] Force interruptionPolicy to 1 (Suppress)
                     if ([mutableSettings respondsToSelector:@selector(setInterruptionPolicy:)]) {
-                        [mutableSettings setInterruptionPolicy:0];
+                        [mutableSettings setInterruptionPolicy:1];
                         modified = YES;
                     } else {
                         @try { 
-                            [mutableSettings setValue:@0 forKey:@"interruptionPolicy"]; 
+                            [mutableSettings setValue:@1 forKey:@"interruptionPolicy"]; 
                             modified = YES;
                         } @catch (NSException *e) {}
                     }
@@ -6146,6 +6225,18 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
         }
     }
     %orig(arg1);
+}
+
+- (BOOL)isInterrupted {
+    if (floatingWindows) {
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if ([self.identifier containsString:win.bundleID] && !win.isClosing) {
+                if (win.isStashed) return %orig;
+                return NO; // 核心：强制报告未中断，防止视频播放因手势判定而暂停
+            }
+        }
+    }
+    return %orig;
 }
 %end
 
