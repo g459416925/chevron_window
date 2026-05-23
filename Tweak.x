@@ -536,6 +536,7 @@ static NSMutableArray *floatingWindows = nil;
 @property (nonatomic, strong) UIView *splashView;
 @property (nonatomic, strong) UIImageView *largeSplashIcon;
 @property (nonatomic, assign) UIInterfaceOrientation targetOrientation;
+@property (nonatomic, assign) UIInterfaceOrientation lastLayoutOrientation;
 @property (nonatomic, assign) CGAffineTransform baseRotationTransform;
 @property (nonatomic, strong) UIView *liveResizeSnapshotView;
 @property (nonatomic, strong) RBSAssertion *rbsAssertion; 
@@ -623,9 +624,25 @@ static NSMutableArray *floatingWindows = nil;
     
     if (self) {
         CGRect screen = [UIScreen mainScreen].bounds;
-        CGFloat minW = screen.size.width * 0.45;
-        CGFloat minH = minW * (screen.size.height / screen.size.width);
-        self.frame = CGRectMake(0, 0, minW, minH);
+        // 始终获取竖屏比例作为基准计算，确保弹出的窗口比例正确
+        CGFloat portraitW = MIN(screen.size.width, screen.size.height);
+        CGFloat portraitH = MAX(screen.size.width, screen.size.height);
+        
+        // 默认逻辑尺寸：宽占屏幕 45%，高按屏幕比例缩放
+        CGFloat logicalW = portraitW * 0.45;
+        CGFloat logicalH = logicalW * (portraitH / portraitW);
+        
+        UIInterfaceOrientation currentOrientation = windowScene ? windowScene.interfaceOrientation : UIInterfaceOrientationPortrait;
+        BOOL isLandscape = UIInterfaceOrientationIsLandscape(currentOrientation);
+        
+        // 物理尺寸
+        CGFloat physicalW = isLandscape ? logicalH : logicalW;
+        CGFloat physicalH = isLandscape ? logicalW : logicalH;
+        
+        self.frame = CGRectMake(0, 0, physicalW, physicalH);
+        self.lastLayoutOrientation = currentOrientation;
+        self.targetOrientation = currentOrientation;
+        
         self.bundleID = bundleID;
         self.center = center;
         self.windowLevel = kChevronWindowLevels.floatingApp; // 覆盖在面板之上，但不超过控制中心 (kChevronWindowLevels.maxBound)
@@ -1302,16 +1319,6 @@ static NSMutableArray *floatingWindows = nil;
 - (void)layoutSubviews {
     if (self.isStashed) return; // 核心：隐藏状态下跳过布局更新，防止干扰图标状态
 
-    // 核心防御性规范：即使外部监听失效，窗口也要自我校验界面方向
-    if (self.windowScene) {
-        UIInterfaceOrientation currentOrientation = self.windowScene.interfaceOrientation;
-        if (currentOrientation != UIInterfaceOrientationUnknown && currentOrientation != self.targetOrientation) {
-            CV3LogToFile(@"[Orientation] CV3Window 探测到自我修正需求: %ld -> %ld", (long)self.targetOrientation, (long)currentOrientation);
-            self.targetOrientation = currentOrientation;
-            [self attachToCurrentActiveScene];
-        }
-    }
-
     UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
     CGAffineTransform targetRotation = CGAffineTransformIdentity;
     BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
@@ -1325,11 +1332,15 @@ static NSMutableArray *floatingWindows = nil;
 
     self.baseRotationTransform = targetRotation;
 
-    BOOL currentBoundsIsLandscape = self.bounds.size.width > self.bounds.size.height;
-    if (isLandscape && !currentBoundsIsLandscape) {
-        self.bounds = CGRectMake(0, 0, self.bounds.size.height, self.bounds.size.width);
-    } else if (!isLandscape && currentBoundsIsLandscape) {
-        self.bounds = CGRectMake(0, 0, self.bounds.size.height, self.bounds.size.width);
+    if (self.lastLayoutOrientation == UIInterfaceOrientationUnknown || self.lastLayoutOrientation == 0) {
+        self.lastLayoutOrientation = orientation;
+    } else if (self.lastLayoutOrientation != orientation) {
+        BOOL wasLandscape = UIInterfaceOrientationIsLandscape(self.lastLayoutOrientation);
+        if (wasLandscape != isLandscape) {
+            // 当跨越横竖屏边界时，交换物理宽和高，确保逻辑尺寸在用户视角中完全不变
+            self.bounds = CGRectMake(0, 0, self.bounds.size.height, self.bounds.size.width);
+        }
+        self.lastLayoutOrientation = orientation;
     }
 
     [super layoutSubviews];
