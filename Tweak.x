@@ -1294,12 +1294,13 @@ static NSMutableArray *floatingWindows = nil;
 - (void)layoutSubviews {
     if (self.isStashed) return; // 核心：隐藏状态下跳过布局更新，防止干扰图标状态
 
-    // 核心强制规范：从当前场景实时探测界面方向
+    // 核心防御性规范：即使外部监听失效，窗口也要自我校验界面方向
     if (self.windowScene) {
         UIInterfaceOrientation currentOrientation = self.windowScene.interfaceOrientation;
         if (currentOrientation != UIInterfaceOrientationUnknown && currentOrientation != self.targetOrientation) {
+            CV3LogToFile(@"[Orientation] CV3Window 探测到自我修正需求: %ld -> %ld", (long)self.targetOrientation, (long)currentOrientation);
             self.targetOrientation = currentOrientation;
-            CV3LogToFile(@"[Orientation] 分屏窗口 (%@) 自动检测到方向变更: %ld", self.bundleID, (long)currentOrientation);
+            [self attachToCurrentActiveScene];
         }
     }
 
@@ -4147,15 +4148,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    
-    // 核心强制规范：从当前场景实时探测界面方向
-    if (self.windowScene) {
-        UIInterfaceOrientation currentOrientation = self.windowScene.interfaceOrientation;
-        if (currentOrientation != UIInterfaceOrientationUnknown && currentOrientation != self.targetOrientation) {
-            self.targetOrientation = currentOrientation;
-            CV3LogToFile(@"[Orientation] 主窗口自动检测到方向变更: %ld", (long)currentOrientation);
-        }
-    }
 
     UIEdgeInsets safe = self.safeAreaInsets;
     CGRect bounds = self.bounds;
@@ -4169,7 +4161,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     // 1. 设置触发区域
     self.edgeTriggerView.backgroundColor = [UIColor clearColor];
     UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
-    
+
     switch (orientation) {
         case UIInterfaceOrientationLandscapeLeft:
             self.systemEdgePan.edges = UIRectEdgeTop;
@@ -4191,20 +4183,19 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     }
 
     [self.rootViewController.view bringSubviewToFront:self.edgeTriggerView];
-    
+
     // 2. 面板容器
     self.dimmingView.frame = bounds;
     self.panelContainer.backgroundColor = [UIColor clearColor];
-    
+
     // 动态计算面板尺寸 (使用常量并确保不超出安全区域)
     CGSize maxSize = [self calculateMaxPanelSize];
-    
+
     CGFloat targetW = MIN(kChevronLayoutConstants.panelW, maxSize.width);
     CGFloat targetH = MIN(kChevronLayoutConstants.panelH, maxSize.height);
     targetH = MAX(targetH, kChevronLayoutConstants.minHeight);
-    
-    CGRect panelBounds = CGRectMake(0, 0, targetW, targetH);
-    
+
+    CGRect panelBounds = CGRectMake(0, 0, targetW, targetH);    
     // 计算目标旋转
     CGAffineTransform targetRotation = CGAffineTransformIdentity;
     switch (orientation) {
