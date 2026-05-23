@@ -1320,59 +1320,63 @@ static NSMutableArray *floatingWindows = nil;
     if (self.isStashed) return; // 核心：隐藏状态下跳过布局更新，防止干扰图标状态
 
     UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
-    CGAffineTransform targetRotation = CGAffineTransformIdentity;
     BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
-
-    switch (orientation) {
-        case UIInterfaceOrientationLandscapeLeft: targetRotation = CGAffineTransformMakeRotation(-M_PI_2); break;
-        case UIInterfaceOrientationLandscapeRight: targetRotation = CGAffineTransformMakeRotation(M_PI_2); break;
-        case UIInterfaceOrientationPortraitUpsideDown: targetRotation = CGAffineTransformMakeRotation(M_PI); break;
-        default: targetRotation = CGAffineTransformIdentity; break;
-    }
-
-    self.baseRotationTransform = targetRotation;
-
+    
+    // 1. 物理外壳跟随旋转：确保 UIWindow 的 bounds 与当前设备方向完全匹配
+    // 物理宽度在横屏下应该是较大的那个值
     BOOL currentBoundsIsLandscape = self.bounds.size.width > self.bounds.size.height;
-    if (currentBoundsIsLandscape) {
-        // 核心修复：UIWindow 必须始终保持物理竖屏尺寸 (Physical Portrait bounds)
-        // 否则在 SpringBoard 的 _UIScreenBasedSceneSession 中横向溢出会导致系统级触控和渲染截断
+    if (isLandscape && !currentBoundsIsLandscape) {
+        self.bounds = CGRectMake(0, 0, self.bounds.size.height, self.bounds.size.width);
+    } else if (!isLandscape && currentBoundsIsLandscape) {
         self.bounds = CGRectMake(0, 0, self.bounds.size.height, self.bounds.size.width);
     }
 
     [super layoutSubviews];
     
-    // 物理尺寸 (Physical Dimensions)
+    // 物理尺寸 (Physical Dimensions) - 此时物理外壳已经根据方向完成了翻转
     CGFloat physicalW = self.bounds.size.width;
     CGFloat physicalH = self.bounds.size.height;
     
-    // 逻辑尺寸 (Logical User-facing Dimensions)
-    // 旋转后，逻辑宽度占据了物理高度，逻辑高度占据了物理宽度
-    CGFloat logicalW = isLandscape ? physicalH : physicalW;
-    CGFloat logicalH = isLandscape ? physicalW : physicalH;
+    // 2. 坐标系判定：检查系统是否已经通过 _shouldAutorotate 为我们自动旋转了坐标轴
+    // 如果系统场景报告的方向已经是横屏，那么 Identity 变换就是横向的。
+    // 如果系统场景强制报告竖屏（挂载在 SpringBoard），我们需要手动通过 rootTransformContainer 旋转 90 度。
+    UIInterfaceOrientation sceneOrientation = self.windowScene ? self.windowScene.interfaceOrientation : UIInterfaceOrientationPortrait;
     
-    // 1. 同步根旋转容器 (rootTransformContainer 承载所有的 UI 组件并负责整体旋转)
+    CGAffineTransform targetRotation = CGAffineTransformIdentity;
+    if (sceneOrientation != orientation) {
+        // 只有当窗口场景坐标轴与目标方向不一致时，才需要手动补偿旋转矩阵
+        switch (orientation) {
+            case UIInterfaceOrientationLandscapeLeft: targetRotation = CGAffineTransformMakeRotation(-M_PI_2); break;
+            case UIInterfaceOrientationLandscapeRight: targetRotation = CGAffineTransformMakeRotation(M_PI_2); break;
+            case UIInterfaceOrientationPortraitUpsideDown: targetRotation = CGAffineTransformMakeRotation(M_PI); break;
+            default: targetRotation = CGAffineTransformIdentity; break;
+        }
+    }
+    self.baseRotationTransform = targetRotation;
+
+    // 逻辑尺寸 (Logical Dimensions)
+    // 如果我们需要手动旋转矩阵，那么逻辑尺寸需要对调；如果系统已经转好了，物理即逻辑。
+    BOOL needsManualRotation = !CGAffineTransformIsIdentity(targetRotation);
+    CGFloat logicalW = needsManualRotation ? physicalH : physicalW;
+    CGFloat logicalH = needsManualRotation ? physicalW : physicalH;
+    
+    // 3. 同步根旋转容器
     self.rootTransformContainer.bounds = CGRectMake(0, 0, logicalW, logicalH);
     self.rootTransformContainer.center = CGPointMake(physicalW / 2.0, physicalH / 2.0);
-
-    // 旋转必须放在 bounds 和 center 设置之后，并应用缩放
     [self applyCurrentTransformWithScale:self.isFocused ? 1.02 : 1.0];
 
-    // 2. 在逻辑坐标系下更新裁剪层与玻璃背景布局
+    // 4. 更新子组件布局 (基于逻辑坐标系)
     self.clippingContainer.bounds = self.rootTransformContainer.bounds;
     self.clippingContainer.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
     
-    // 核心修复：为玻璃背景提供 10% 的冗余空间 (Bleed)，防止在惯性形变时露边
     self.glassBackdrop.bounds = CGRectMake(0, 0, logicalW * 1.1, logicalH * 1.1);
     self.glassBackdrop.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    // 同步更新装饰图层，确保与裁剪容器完美贴合
     self.innerGlowLayer.frame = self.clippingContainer.bounds;
     self.cyanLayer.frame = self.clippingContainer.bounds;
     self.magentaLayer.frame = self.clippingContainer.bounds;
-
-    // 强制执行 1.15x 几何缩放 (Liquid Glass Engine 规范)
     for (UIView *subview in self.glassBackdrop.subviews) {
         if ([NSStringFromClass([subview class]) containsString:@"Backdrop"]) {
             subview.transform = CGAffineTransformMakeScale(1.15, 1.15);
@@ -1380,33 +1384,28 @@ static NSMutableArray *floatingWindows = nil;
     }
     [CATransaction commit];
 
-    // 3. 在逻辑坐标系下更新缩放把手的位置 (使其永远在用户的右下角)
     self.resizeHandle.frame = CGRectMake(logicalW - 60, logicalH - 60, 60, 60);
     
     CGFloat arcRadius = 18.0;
     CGFloat centerAngle = M_PI_4;
     CGFloat halfSweep = M_PI / 8.0; 
-    self.resizeHandleLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(32, 32) 
-                                                               radius:arcRadius 
-                                                           startAngle:centerAngle - halfSweep 
-                                                             endAngle:centerAngle + halfSweep 
-                                                            clockwise:YES].CGPath;
+    self.resizeHandleLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(32, 32) radius:arcRadius startAngle:centerAngle - halfSweep endAngle:centerAngle + halfSweep clockwise:YES].CGPath;
     self.resizeHandleLayer.fillColor = [UIColor clearColor].CGColor;
     self.resizeHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
     self.resizeHandleLayer.lineWidth = 2.0;
 
-    // 4. 更新内部 App 渲染视图的缩放 (基于逻辑尺寸)
+    // 5. 更新内部 App 场景 (基于物理方向)
     if (self.hostContainerProxy) {
         CGRect rawScreenBounds = [UIScreen mainScreen].bounds;
-        // 获取逻辑屏幕尺寸 (如果设备处于横屏，UIScreen 的 bounds 会自动对调为横屏比例，也可能不调，所以需要安全处理)
+        // 核心：这里的逻辑屏幕尺寸必须是 App 视角下的真横屏尺寸
         CGFloat logicalScreenW = isLandscape ? MAX(rawScreenBounds.size.width, rawScreenBounds.size.height) : MIN(rawScreenBounds.size.width, rawScreenBounds.size.height);
         CGFloat logicalScreenH = isLandscape ? MIN(rawScreenBounds.size.width, rawScreenBounds.size.height) : MAX(rawScreenBounds.size.width, rawScreenBounds.size.height);
         CGRect logicalScreenBounds = CGRectMake(0, 0, logicalScreenW, logicalScreenH);
         
+        // 计算缩放比：逻辑容器尺寸 / 逻辑屏幕全屏尺寸
         CGFloat scaleX = logicalW / logicalScreenW;
         CGFloat scaleY = logicalH / logicalScreenH;
         
-        // 动态同步场景分辨率与方向：确保 App 始终以全屏分辨率渲染，由宿主进行物理缩合
         if (self.targetScene) {
             @try {
                 FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
@@ -1416,32 +1415,24 @@ static NSMutableArray *floatingWindows = nil;
                     needsUpdate = YES;
                 }
                 
-                // 核心：强制同步场景方向，确保内部 App 画面跟随旋转
                 if ([settings respondsToSelector:@selector(setInterfaceOrientation:)]) {
                     [settings performSelector:@selector(setInterfaceOrientation:) withObject:@(orientation)];
                     needsUpdate = YES;
                 } else {
-                    @try {
-                        [settings setValue:@(orientation) forKey:@"interfaceOrientation"];
-                        needsUpdate = YES;
-                    } @catch (NSException *e) {}
+                    @try { [settings setValue:@(orientation) forKey:@"interfaceOrientation"]; needsUpdate = YES; } @catch (NSException *e) {}
                 }
 
-                if (needsUpdate) {
-                    [self.targetScene updateSettings:settings withTransitionContext:nil];
-                }
+                if (needsUpdate) [self.targetScene updateSettings:settings withTransitionContext:nil];
             } @catch (NSException *e) {}
         }
 
         self.hostContainerProxy.transform = CGAffineTransformIdentity;
         self.hostContainerProxy.frame = logicalScreenBounds; 
-        
         if (self.hostView) {
             self.hostView.transform = CGAffineTransformIdentity;
             self.hostView.frame = logicalScreenBounds;
         }
         
-        // 利用 anchorPoint 使缩放围绕中心进行，然后重置 center 匹配当前裁剪层中心
         self.hostContainerProxy.layer.anchorPoint = CGPointMake(0.5, 0.5);
         self.hostContainerProxy.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
         self.hostContainerProxy.transform = CGAffineTransformMakeScale(scaleX, scaleY);
