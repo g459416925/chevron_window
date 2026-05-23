@@ -1427,7 +1427,7 @@ static NSMutableArray *floatingWindows = nil;
                 } else {
                     @try { [settings setValue:@(orientation) forKey:@"interfaceOrientation"]; needsUpdate = YES; } @catch (NSException *e) {}
                 }
-                if (needsUpdate) [self.targetScene updateSettings:settings withTransitionContext:nil];
+                if (needsUpdate && !self.liveResizeSnapshotView) [self.targetScene updateSettings:settings withTransitionContext:nil];
             } @catch (NSException *e) {}
         }
 
@@ -2068,14 +2068,26 @@ static NSMutableArray *floatingWindows = nil;
         UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
         [gen impactOccurred];
 
-        // --- Suggestion 4: Pixel-Perfect Live Mapping (Snapshot) ---
-        // 在缩放开始瞬间捕获当前画面，作为“占位层”防止实时重绘导致的闪烁或黑边
         if (self.hostView) {
             self.liveResizeSnapshotView = [self.hostView snapshotViewAfterScreenUpdates:NO];
-            self.liveResizeSnapshotView.frame = self.hostContainerProxy.bounds;
-            self.liveResizeSnapshotView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-            [self.hostContainerProxy addSubview:self.liveResizeSnapshotView];
-            self.hostView.alpha = 0; // 隐藏真实内容，直到缩放结束
+            if (self.liveResizeSnapshotView) {
+                self.liveResizeSnapshotView.frame = self.hostContainerProxy.bounds;
+                self.liveResizeSnapshotView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                [self.hostContainerProxy addSubview:self.liveResizeSnapshotView];
+                self.hostView.alpha = 0;
+            }
+        }
+
+        if (self.targetScene) {
+            @try {
+                FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
+                if ([settings respondsToSelector:@selector(setInLiveResize:)]) {
+                    [(UIMutableApplicationSceneSettings *)settings setInLiveResize:YES];
+                    [self.targetScene updateSettings:settings withTransitionContext:nil];
+                }
+            } @catch (NSException *e) {
+                CV3LogToFile(@"[Critical] Failed to set live resize state: %@", e);
+            }
         }
 
         [CATransaction begin];
@@ -2092,12 +2104,10 @@ static NSMutableArray *floatingWindows = nil;
     CGPoint translation = [gesture translationInView:nil];
     CGPoint velocity = [gesture velocityInView:nil];
     
-    if (gesture.state == UIGestureRecognizerStateChanged || gesture.state == UIGestureRecognizerStateEnded) {
+    if (gesture.state == UIGestureRecognizerStateChanged) {
         CGRect screenBounds = [UIScreen mainScreen].bounds;
         CGFloat aspect = screenBounds.size.height / screenBounds.size.width;
         
-        // 核心优化：基于物理像素比例 (Normalized Physical Pixel Ratio)
-        // 将屏幕物理宽度定义为 1.0，设定缩放阈值
         CGFloat minAllowedWidth = screenBounds.size.width * 0.4;
         CGFloat maxAllowedWidth = screenBounds.size.width * 0.9;
         
@@ -2113,28 +2123,37 @@ static NSMutableArray *floatingWindows = nil;
         
         CGFloat targetWidth = self.initialResizeFrame.size.width * scaleFactor;
         
-        // --- Suggestion 5: Multi-Window Gravity (Repulsion) ---
-        // 检查与其他窗口的间距，如果过近则产生排斥力
-        for (CV3FloatingAppWindow *other in floatingWindows) {
+        // --- [Geek Advice] Haptic Gradient Implementation ---
+        static CGFloat lastHapticOvershoot = 0;
+        CGFloat overshoot = 0;
+        if (targetWidth < minAllowedWidth) overshoot = (minAllowedWidth - targetWidth) / (minAllowedWidth * 0.2);
+        else if (targetWidth > maxAllowedWidth) overshoot = (targetWidth - maxAllowedWidth) / (maxAllowedWidth * 0.2);
+        
+        if (overshoot > 0.05 && fabs(overshoot - lastHapticOvershoot) > 0.1) {
+            UIImpactFeedbackGenerator *gradientGen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+            [gradientGen impactOccurredWithIntensity:MIN(1.0, overshoot)];
+            lastHapticOvershoot = overshoot;
+        } else if (overshoot <= 0.05) {
+            lastHapticOvershoot = 0;
+        }
+
+        // Use copy to avoid mutation during enumeration
+        NSArray *windowsSnapshot = [floatingWindows copy];
+        for (CV3FloatingAppWindow *other in windowsSnapshot) {
             if (other == self || other.isStashed || ![other isKindOfClass:[CV3FloatingAppWindow class]]) continue;
             
             CGFloat distance = sqrt(pow(self.center.x - other.center.x, 2) + pow(self.center.y - other.center.y, 2));
             CGFloat minGap = (self.bounds.size.width + other.bounds.size.width) / 2.0 + 20.0;
             
             if (distance < minGap) {
-                // 产生排斥阻尼：缩放速度被窗口间的“压力”抵消
                 targetWidth *= (0.8 + 0.2 * (distance / minGap));
-                
-                // 视觉融合：相互渗透 Glow 颜色
-                [UIView animateWithDuration:0.2 animations:^{
-                    self.innerGlowLayer.borderColor = [other.adaptiveAppColor colorWithAlphaComponent:0.8].CGColor;
-                    other.innerGlowLayer.borderColor = [self.adaptiveAppColor colorWithAlphaComponent:0.8].CGColor;
-                }];
+                // Optimization: Don't create animations every frame if distance hasn't changed much
+                self.innerGlowLayer.borderColor = [other.adaptiveAppColor colorWithAlphaComponent:0.8].CGColor;
+                other.innerGlowLayer.borderColor = [self.adaptiveAppColor colorWithAlphaComponent:0.8].CGColor;
             }
         }
 
         CGFloat finalWidth = targetWidth;
-        
         if (targetWidth < minAllowedWidth) {
             finalWidth = minAllowedWidth - (minAllowedWidth - targetWidth) * 0.3;
         } else if (targetWidth > maxAllowedWidth) {
@@ -2158,71 +2177,26 @@ static NSMutableArray *floatingWindows = nil;
         }
         UIEdgeInsets safeArea = keyWin ? keyWin.safeAreaInsets : UIEdgeInsetsMake(47, 0, 34, 0);
         
-        // 核心修复：缩放过程中暂时禁用安全区域的强制钳位，防止窗口边缘与安全区域边界（如灵动岛）发生高频物理冲突导致抖动
-        if (gesture.state == UIGestureRecognizerStateChanged) {
-            newFrame.origin.y = initialCenter.y - finalHeight / 2.0;
-            
-            // --- 建议实现：边界触觉反馈 ---
-            if (newFrame.origin.y < safeArea.top && !hasTriggeredTopHaptic) {
-                UISelectionFeedbackGenerator *gen = [[UISelectionFeedbackGenerator alloc] init];
-                [gen selectionChanged];
-                hasTriggeredTopHaptic = YES;
-            } else if (newFrame.origin.y >= safeArea.top) {
-                hasTriggeredTopHaptic = NO;
-            }
+        if (newFrame.origin.y < safeArea.top && !hasTriggeredTopHaptic) {
+            [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
+            hasTriggeredTopHaptic = YES;
+        } else if (newFrame.origin.y >= safeArea.top) {
+            hasTriggeredTopHaptic = NO;
+        }
 
-            if (CGRectGetMaxY(newFrame) > screenBounds.size.height - safeArea.bottom && !hasTriggeredBottomHaptic) {
-                UISelectionFeedbackGenerator *gen = [[UISelectionFeedbackGenerator alloc] init];
-                [gen selectionChanged];
-                hasTriggeredBottomHaptic = YES;
-            } else if (CGRectGetMaxY(newFrame) <= screenBounds.size.height - safeArea.bottom) {
-                hasTriggeredBottomHaptic = NO;
-            }
+        if (CGRectGetMaxY(newFrame) > screenBounds.size.height - safeArea.bottom && !hasTriggeredBottomHaptic) {
+            [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
+            hasTriggeredBottomHaptic = YES;
+        } else if (CGRectGetMaxY(newFrame) <= screenBounds.size.height - safeArea.bottom) {
+            hasTriggeredBottomHaptic = NO;
+        }
 
-            // --- 建议实现：两侧边界触觉反馈 ---
-            BOOL hitSide = (newFrame.origin.x < safeArea.left || CGRectGetMaxX(newFrame) > screenBounds.size.width - safeArea.right);
-            if (hitSide && !hasTriggeredSideHaptic) {
-                UISelectionFeedbackGenerator *gen = [[UISelectionFeedbackGenerator alloc] init];
-                [gen selectionChanged];
-                hasTriggeredSideHaptic = YES;
-            } else if (!hitSide) {
-                hasTriggeredSideHaptic = NO;
-            }
-        } else {
-            // --- 建议实现：Island Snapping (灵动岛吸附) ---
-            CGFloat snapThreshold = 25.0;
-            if (fabs(newFrame.origin.y - safeArea.top) < snapThreshold) {
-                newFrame.origin.y = safeArea.top;
-                UISelectionFeedbackGenerator *gen = [[UISelectionFeedbackGenerator alloc] init];
-                [gen selectionChanged];
-            }
-
-            // --- 建议实现：物理比例吸附 (Ratio Snap Points) ---
-            // 在 0.5 (小窗口模式) 和 0.8 (大窗口模式) 增加吸附感
-            CGFloat currentRatio = finalWidth / screenBounds.size.width;
-            CGFloat targetSnapRatio = -1.0;
-            
-            if (fabs(currentRatio - 0.5) < 0.03) targetSnapRatio = 0.5;
-            else if (fabs(currentRatio - 0.8) < 0.03) targetSnapRatio = 0.8;
-            
-            if (targetSnapRatio > 0) {
-                finalWidth = screenBounds.size.width * targetSnapRatio;
-                finalHeight = finalWidth * aspect;
-                newFrame.size = CGSizeMake(finalWidth, finalHeight);
-                newFrame.origin.x = initialCenter.x - finalWidth / 2.0;
-                newFrame.origin.y = initialCenter.y - finalHeight / 2.0;
-                
-                UIImpactFeedbackGenerator *snapHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-                [snapHaptic impactOccurred];
-                CV3LogToFile(@"[Physical] 触发物理比例吸附: %.1f", targetSnapRatio);
-            }
-
-            if (newFrame.origin.x < safeArea.left) newFrame.origin.x = safeArea.left;
-            if (newFrame.origin.y < safeArea.top) newFrame.origin.y = safeArea.top;
-            if (CGRectGetMaxX(newFrame) > screenBounds.size.width - safeArea.right) 
-                newFrame.origin.x = screenBounds.size.width - safeArea.right - finalWidth;
-            if (CGRectGetMaxY(newFrame) > screenBounds.size.height - safeArea.bottom) 
-                newFrame.origin.y = screenBounds.size.height - safeArea.bottom - finalHeight;
+        BOOL hitSide = (newFrame.origin.x < safeArea.left || CGRectGetMaxX(newFrame) > screenBounds.size.width - safeArea.right);
+        if (hitSide && !hasTriggeredSideHaptic) {
+            [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
+            hasTriggeredSideHaptic = YES;
+        } else if (!hitSide) {
+            hasTriggeredSideHaptic = NO;
         }
             
         [CATransaction begin];
@@ -2230,27 +2204,18 @@ static NSMutableArray *floatingWindows = nil;
         
         self.bounds = CGRectMake(0, 0, finalWidth, finalHeight);
         self.center = CGPointMake(CGRectGetMidX(newFrame), CGRectGetMidY(newFrame));
-        
-        // 核心修复：缩放时强制重置灵动岛引力特效，防止装饰层发生位移纠缠
         self.innerGlowLayer.affineTransform = CGAffineTransformIdentity;
         
-        // --- Suggestion 3: Resize Stress Distortion ---
-        // 根据缩放速度计算“应力畸变” (Chromatic Aberration)
         CGFloat velMag = sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
-        CGFloat stress = MIN(15.0, velMag / 200.0); // 最大 15pt 的偏移
+        CGFloat stress = MIN(15.0, velMag / 200.0);
         
-        CGAffineTransform cyanTransform = CGAffineTransformMakeTranslation(-stress * 0.5, -stress * 0.5);
-        CGAffineTransform magentaTransform = CGAffineTransformMakeTranslation(stress * 0.5, stress * 0.5);
+        self.cyanLayer.affineTransform = CGAffineTransformMakeTranslation(-stress * 0.5, -stress * 0.5);
+        self.magentaLayer.affineTransform = CGAffineTransformMakeTranslation(stress * 0.5, stress * 0.5);
         
-        self.cyanLayer.affineTransform = cyanTransform;
-        self.magentaLayer.affineTransform = magentaTransform;
-        
-        // 增加动态模糊感 (通过拉伸背景实现模拟)
         if (velMag > 500) {
             CGFloat blurStretch = 1.0 + (velMag / 5000.0);
             self.glassBackdrop.transform = CGAffineTransformMakeScale(blurStretch, blurStretch);
         } else {
-            // 原有的挤压特效逻辑
             if (targetWidth < minAllowedWidth) {
                 CGFloat squeeze = 1.0 - (minAllowedWidth - targetWidth) / minAllowedWidth * 0.15;
                 self.glassBackdrop.transform = CGAffineTransformMakeScale(squeeze, squeeze);
@@ -2259,78 +2224,113 @@ static NSMutableArray *floatingWindows = nil;
             }
         }
         
+        [CATransaction commit];
+    }
+    
+    if (gesture.state == UIGestureRecognizerStateEnded || 
+        gesture.state == UIGestureRecognizerStateCancelled || 
+        gesture.state == UIGestureRecognizerStateFailed) {
+        
+        CGRect screenBounds = [UIScreen mainScreen].bounds;
+        CGFloat aspect = screenBounds.size.height / screenBounds.size.width;
+        CGPoint initialCenter = CGPointMake(CGRectGetMidX(self.frame), CGRectGetMidY(self.frame));
+
+        UIWindow *keyWin = nil;
+        if (@available(iOS 15.0, *)) { keyWin = self.windowScene.keyWindow; }
+        if (!keyWin) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            keyWin = [UIApplication sharedApplication].keyWindow;
+#pragma clang diagnostic pop
+        }
+        UIEdgeInsets safeArea = keyWin ? keyWin.safeAreaInsets : UIEdgeInsetsMake(47, 0, 34, 0);
+
+        // --- [Geek Advice] Asynchronous Frame Pipelining ---
+        // Step 1: Immediately update scene settings to final frame and release live resize lock
         if (self.targetScene) {
             @try {
                 FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
                 if ([settings respondsToSelector:@selector(setInLiveResize:)]) {
-                    [settings performSelector:@selector(setInLiveResize:) withObject:@YES];
+                    [(UIMutableApplicationSceneSettings *)settings setInLiveResize:NO];
                     [self.targetScene updateSettings:settings withTransitionContext:nil];
                 }
+                
+                // Force an immediate layout update for the new size
+                [self setNeedsLayout];
+                [self layoutIfNeeded]; 
+                
+                CV3LogToFile(@"[Pipelining] 已提交最终场景布局请求: %@", self.bundleID);
             } @catch (NSException *e) {}
         }
-        
-        [CATransaction commit];
-        
-        if (gesture.state == UIGestureRecognizerStateEnded) {
-            // --- Clean up Suggestion 4 (Snapshot) ---
-            [UIView animateWithDuration:0.3 animations:^{
+
+        // Cleanup visuals with staged fade
+        UIView *snapshot = self.liveResizeSnapshotView;
+        self.liveResizeSnapshotView = nil; // Clear state immediately to allow layoutSubviews to update the final scene frame
+
+        // Step 2: Delay the transition slightly to give the remote process time to render its first frame at the new size
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [UIView animateWithDuration:0.4 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
                 self.hostView.alpha = 1.0;
-                if (self.liveResizeSnapshotView) self.liveResizeSnapshotView.alpha = 0;
+                if (snapshot) snapshot.alpha = 0;
             } completion:^(BOOL finished) {
-                [self.liveResizeSnapshotView removeFromSuperview];
-                self.liveResizeSnapshotView = nil;
+                [snapshot removeFromSuperview];
             }];
+        });
 
-            // --- Clean up Suggestion 3 (Distortion) ---
-            [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
-                self.cyanLayer.affineTransform = CGAffineTransformIdentity;
-                self.magentaLayer.affineTransform = CGAffineTransformIdentity;
-                self.glassBackdrop.transform = CGAffineTransformIdentity;
-                self.innerGlowLayer.borderColor = [self.adaptiveAppColor colorWithAlphaComponent:0.6].CGColor;
-            } completion:nil];
+        [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
+            self.cyanLayer.affineTransform = CGAffineTransformIdentity;
+            self.magentaLayer.affineTransform = CGAffineTransformIdentity;
+            self.glassBackdrop.transform = CGAffineTransformIdentity;
+            self.innerGlowLayer.borderColor = [self.adaptiveAppColor colorWithAlphaComponent:0.6].CGColor;
+        } completion:nil];
 
-            if (self.targetScene) {
-                @try {
-                    FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
-                    if ([settings respondsToSelector:@selector(setInLiveResize:)]) {
-                        [settings performSelector:@selector(setInLiveResize:) withObject:@NO];
-                        [self.targetScene updateSettings:settings withTransitionContext:nil];
-                    }
-                } @catch (NSException *e) {}
+        [CATransaction begin];
+        [CATransaction setAnimationDuration:0.3];
+        self.resizeHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
+        self.resizeHandleLayer.lineWidth = 2.0;
+        self.resizeHandleLayer.shadowOpacity = 0; 
+        [CATransaction commit];
+
+        // Snapping and constraints for Ended state
+        if (gesture.state == UIGestureRecognizerStateEnded) {
+            CGFloat finalWidth = self.bounds.size.width;
+            
+            // Island Snapping
+            CGRect snapFrame = self.frame;
+            CGFloat snapThreshold = 25.0;
+            if (fabs(snapFrame.origin.y - safeArea.top) < snapThreshold) {
+                snapFrame.origin.y = safeArea.top;
+                [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
             }
 
-            [CATransaction begin];
-            [CATransaction setAnimationDuration:0.3];
-            self.resizeHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
-            self.resizeHandleLayer.lineWidth = 2.0;
-            self.resizeHandleLayer.shadowOpacity = 0; 
-            [CATransaction commit];
+            // Ratio Snapping
+            CGFloat currentRatio = finalWidth / screenBounds.size.width;
+            if (fabs(currentRatio - 0.5) < 0.03) finalWidth = screenBounds.size.width * 0.5;
+            else if (fabs(currentRatio - 0.8) < 0.03) finalWidth = screenBounds.size.width * 0.8;
 
-            [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
-                if (finalWidth < minAllowedWidth || finalWidth > maxAllowedWidth) {
-                    CGFloat bounceWidth = fmin(maxAllowedWidth, fmax(minAllowedWidth, finalWidth));
-                    CGFloat bounceHeight = bounceWidth * aspect;
-                    
-                    self.bounds = CGRectMake(0, 0, bounceWidth, bounceHeight);
-                    
-                    CGRect bounceFrame;
-                    bounceFrame.size = CGSizeMake(bounceWidth, bounceHeight);
-                    bounceFrame.origin.x = initialCenter.x - bounceWidth / 2.0;
-                    bounceFrame.origin.y = initialCenter.y - bounceHeight / 2.0;
-                    
-                    if (bounceFrame.origin.x < safeArea.left) bounceFrame.origin.x = safeArea.left;
-                    if (bounceFrame.origin.y < safeArea.top) bounceFrame.origin.y = safeArea.top;
-                    if (CGRectGetMaxX(bounceFrame) > screenBounds.size.width - safeArea.right) 
-                        bounceFrame.origin.x = screenBounds.size.width - safeArea.right - bounceWidth;
-                    if (CGRectGetMaxY(bounceFrame) > screenBounds.size.height - safeArea.bottom) 
-                        bounceFrame.origin.y = screenBounds.size.height - safeArea.bottom - bounceHeight;
-                        
-                    self.center = CGPointMake(CGRectGetMidX(bounceFrame), CGRectGetMidY(bounceFrame));
-                }
-            } completion:nil];
+            CGFloat finalHeight = finalWidth * aspect;
+            snapFrame.size = CGSizeMake(finalWidth, finalHeight);
             
-            self.initialResizeFrame = self.frame;
-            [self syncWindowBoundsToClient];
+            // Re-center if ratio snapped
+            if (finalWidth != self.bounds.size.width) {
+                snapFrame.origin.x = initialCenter.x - finalWidth / 2.0;
+                snapFrame.origin.y = initialCenter.y - finalHeight / 2.0;
+                [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
+            }
+
+            // Safety clamp
+            if (snapFrame.origin.x < safeArea.left) snapFrame.origin.x = safeArea.left;
+            if (snapFrame.origin.y < safeArea.top) snapFrame.origin.y = safeArea.top;
+            if (CGRectGetMaxX(snapFrame) > screenBounds.size.width - safeArea.right) 
+                snapFrame.origin.x = screenBounds.size.width - safeArea.right - finalWidth;
+            if (CGRectGetMaxY(snapFrame) > screenBounds.size.height - safeArea.bottom) 
+                snapFrame.origin.y = screenBounds.size.height - safeArea.bottom - finalHeight;
+
+            // Final bounce animation
+            [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
+                self.bounds = CGRectMake(0, 0, snapFrame.size.width, snapFrame.size.height);
+                self.center = CGPointMake(CGRectGetMidX(snapFrame), CGRectGetMidY(snapFrame));
+            } completion:nil];
         }
     }
 }
