@@ -1394,52 +1394,49 @@ static NSMutableArray *floatingWindows = nil;
     self.resizeHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
     self.resizeHandleLayer.lineWidth = 2.0;
 
-    // 5. 更新内部 App 场景 (基于物理方向与逻辑比例，防止挤压)
+    // 5. 更新内部 App 场景 (等比铺满算法：基于窗口比例动态映射虚拟画布)
     if (self.hostContainerProxy) {
         CGRect rawScreenBounds = [UIScreen mainScreen].bounds;
+        CGFloat screenLongSide = MAX(rawScreenBounds.size.width, rawScreenBounds.size.height);
         
-        // 核心：遵循竖屏时的“等比物理缩放”规范 (MilkyWay Style)
-        // App 应该始终认为自己在操作“全屏”，由我们进行整体物理压缩
-        CGFloat fullScreenW = isLandscape ? MAX(rawScreenBounds.size.width, rawScreenBounds.size.height) : MIN(rawScreenBounds.size.width, rawScreenBounds.size.height);
-        CGFloat fullScreenH = isLandscape ? MIN(rawScreenBounds.size.width, rawScreenBounds.size.height) : MAX(rawScreenBounds.size.width, rawScreenBounds.size.height);
-        CGRect fullScreenBounds = CGRectMake(0, 0, fullScreenW, fullScreenH);
+        // 核心：为了实现“等比且铺满”，我们根据窗口比例动态计算“虚拟全屏分辨率”
+        CGFloat virtualW, virtualH;
+        if (logicalW >= logicalH) { // 逻辑宽屏
+            virtualW = screenLongSide;
+            virtualH = virtualW * (logicalH / logicalW);
+        } else { // 逻辑长屏
+            virtualH = screenLongSide;
+            virtualW = virtualH * (logicalW / logicalH);
+        }
+        CGRect virtualBounds = CGRectMake(0, 0, virtualW, virtualH);
         
-        // 计算缩放比：窗口逻辑尺寸 / 屏幕物理尺寸
-        // 为了实现“等比物理缩放”，我们必须取 X 和 Y 缩放比例中的最小值，或者确保逻辑比例与物理比例一致
-        CGFloat scaleX = logicalW / fullScreenW;
-        CGFloat scaleY = logicalH / fullScreenH;
-        
-        // 核心：强制执行等比缩放 (Uniform Scaling)
-        CGFloat uniformScale = MIN(scaleX, scaleY);
+        // 由于画布比例与窗口比例完全一致，等比缩放因子在 X/Y 轴上是相同的
+        CGFloat uniformScale = logicalW / virtualW;
         
         if (self.targetScene) {
             @try {
                 FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
                 BOOL needsUpdate = NO;
-                if (!CGRectEqualToRect(settings.frame, fullScreenBounds)) {
-                    [settings setFrame:fullScreenBounds];
+                if (!CGRectEqualToRect(settings.frame, virtualBounds)) {
+                    [settings setFrame:virtualBounds];
                     needsUpdate = YES;
                 }
-                
                 if ([settings respondsToSelector:@selector(setInterfaceOrientation:)]) {
                     [settings performSelector:@selector(setInterfaceOrientation:) withObject:@(orientation)];
                     needsUpdate = YES;
                 } else {
                     @try { [settings setValue:@(orientation) forKey:@"interfaceOrientation"]; needsUpdate = YES; } @catch (NSException *e) {}
                 }
-
                 if (needsUpdate) [self.targetScene updateSettings:settings withTransitionContext:nil];
             } @catch (NSException *e) {}
         }
 
-        // 应用全屏分辨率到代理容器，并实施等比物理缩放
         self.hostContainerProxy.transform = CGAffineTransformIdentity;
-        self.hostContainerProxy.bounds = fullScreenBounds; 
+        self.hostContainerProxy.bounds = virtualBounds; 
         if (self.hostView) {
             self.hostView.transform = CGAffineTransformIdentity;
-            self.hostView.frame = fullScreenBounds;
+            self.hostView.frame = virtualBounds;
         }
-        
         self.hostContainerProxy.layer.anchorPoint = CGPointMake(0.5, 0.5);
         self.hostContainerProxy.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
         self.hostContainerProxy.transform = CGAffineTransformMakeScale(uniformScale, uniformScale);
