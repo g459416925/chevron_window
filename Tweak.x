@@ -1332,15 +1332,11 @@ static NSMutableArray *floatingWindows = nil;
 
     self.baseRotationTransform = targetRotation;
 
-    if (self.lastLayoutOrientation == UIInterfaceOrientationUnknown || self.lastLayoutOrientation == 0) {
-        self.lastLayoutOrientation = orientation;
-    } else if (self.lastLayoutOrientation != orientation) {
-        BOOL wasLandscape = UIInterfaceOrientationIsLandscape(self.lastLayoutOrientation);
-        if (wasLandscape != isLandscape) {
-            // 当跨越横竖屏边界时，交换物理宽和高，确保逻辑尺寸在用户视角中完全不变
-            self.bounds = CGRectMake(0, 0, self.bounds.size.height, self.bounds.size.width);
-        }
-        self.lastLayoutOrientation = orientation;
+    BOOL currentBoundsIsLandscape = self.bounds.size.width > self.bounds.size.height;
+    if (currentBoundsIsLandscape) {
+        // 核心修复：UIWindow 必须始终保持物理竖屏尺寸 (Physical Portrait bounds)
+        // 否则在 SpringBoard 的 _UIScreenBasedSceneSession 中横向溢出会导致系统级触控和渲染截断
+        self.bounds = CGRectMake(0, 0, self.bounds.size.height, self.bounds.size.width);
     }
 
     [super layoutSubviews];
