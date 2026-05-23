@@ -1397,25 +1397,27 @@ static NSMutableArray *floatingWindows = nil;
     // 5. 更新内部 App 场景 (基于物理方向与逻辑比例，防止挤压)
     if (self.hostContainerProxy) {
         CGRect rawScreenBounds = [UIScreen mainScreen].bounds;
-        CGFloat portraitW = MIN(rawScreenBounds.size.width, rawScreenBounds.size.height);
         
-        // 核心：不再盲目使用全屏分辨率，而是让 App 渲染一个与当前窗口比例完全一致的“高分辨率画布”
-        // 我们以 portraitW (393pt) 为基准逻辑宽度
-        CGFloat renderW = needsManualRotation ? (portraitW * (logicalW / logicalH)) : portraitW;
-        CGFloat renderH = needsManualRotation ? portraitW : (portraitW * (logicalH / logicalW));
+        // 核心：遵循竖屏时的“等比物理缩放”规范 (MilkyWay Style)
+        // App 应该始终认为自己在操作“全屏”，由我们进行整体物理压缩
+        CGFloat fullScreenW = isLandscape ? MAX(rawScreenBounds.size.width, rawScreenBounds.size.height) : MIN(rawScreenBounds.size.width, rawScreenBounds.size.height);
+        CGFloat fullScreenH = isLandscape ? MIN(rawScreenBounds.size.width, rawScreenBounds.size.height) : MAX(rawScreenBounds.size.width, rawScreenBounds.size.height);
+        CGRect fullScreenBounds = CGRectMake(0, 0, fullScreenW, fullScreenH);
         
-        // 保证渲染画布始终覆盖窗口所需的比例
-        CGRect targetRenderBounds = CGRectMake(0, 0, renderW, renderH);
+        // 计算缩放比：窗口逻辑尺寸 / 屏幕物理尺寸
+        // 为了实现“等比物理缩放”，我们必须取 X 和 Y 缩放比例中的最小值，或者确保逻辑比例与物理比例一致
+        CGFloat scaleX = logicalW / fullScreenW;
+        CGFloat scaleY = logicalH / fullScreenH;
         
-        // 计算缩放比：窗口逻辑尺寸 / App 渲染画布尺寸 (此时两者比例完全一致，所以 scaleX == scaleY)
-        CGFloat uniformScale = logicalW / renderW;
+        // 核心：强制执行等比缩放 (Uniform Scaling)
+        CGFloat uniformScale = MIN(scaleX, scaleY);
         
         if (self.targetScene) {
             @try {
                 FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
                 BOOL needsUpdate = NO;
-                if (!CGRectEqualToRect(settings.frame, targetRenderBounds)) {
-                    [settings setFrame:targetRenderBounds];
+                if (!CGRectEqualToRect(settings.frame, fullScreenBounds)) {
+                    [settings setFrame:fullScreenBounds];
                     needsUpdate = YES;
                 }
                 
@@ -1430,12 +1432,12 @@ static NSMutableArray *floatingWindows = nil;
             } @catch (NSException *e) {}
         }
 
-        // 应用统一缩放，彻底根治挤压
+        // 应用全屏分辨率到代理容器，并实施等比物理缩放
         self.hostContainerProxy.transform = CGAffineTransformIdentity;
-        self.hostContainerProxy.bounds = targetRenderBounds; 
+        self.hostContainerProxy.bounds = fullScreenBounds; 
         if (self.hostView) {
             self.hostView.transform = CGAffineTransformIdentity;
-            self.hostView.frame = targetRenderBounds;
+            self.hostView.frame = fullScreenBounds;
         }
         
         self.hostContainerProxy.layer.anchorPoint = CGPointMake(0.5, 0.5);
