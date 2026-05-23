@@ -506,6 +506,7 @@ static NSMutableArray *floatingWindows = nil;
 @interface CV3FloatingAppWindow : UIWindow <UIGestureRecognizerDelegate>
 @property (nonatomic, copy) NSString *bundleID;
 @property (nonatomic, strong) UIVisualEffectView *glassBackdrop; // New: Fluid background
+@property (nonatomic, strong) UIView *rootTransformContainer;
 @property (nonatomic, strong) UIView *clippingContainer; 
 @property (nonatomic, strong) UIView *hostContainerProxy;
 @property (nonatomic, strong) UIView *hostView;
@@ -641,6 +642,12 @@ static NSMutableArray *floatingWindows = nil;
             self.layer.cornerCurve = kCACornerCurveContinuous;
         }
         
+        // 核心修复：引入旋转根容器 (Root Transform Container)
+        // 该容器用于隔离系统 UIWindow 的 Transform 问题，承载全方位的视觉旋转
+        self.rootTransformContainer = [[UIView alloc] initWithFrame:self.bounds];
+        self.rootTransformContainer.backgroundColor = [UIColor clearColor];
+        [self addSubview:self.rootTransformContainer];
+
         // 核心修复：引入非缩放裁剪层 (Clipping Container)
         // 该层的大小始终等于窗口大小，负责强制执行圆角裁剪，不受内部缩放影响
         self.clippingContainer = [[UIView alloc] initWithFrame:self.bounds];
@@ -650,7 +657,7 @@ static NSMutableArray *floatingWindows = nil;
         }
         self.clippingContainer.layer.masksToBounds = YES;
         self.clippingContainer.backgroundColor = [UIColor clearColor];
-        [self addSubview:self.clippingContainer];
+        [self.rootTransformContainer addSubview:self.clippingContainer];
 
         // 核心修复：引入液态玻璃背景 (已移入 clippingContainer 以实现完美剪裁)
         self.glassBackdrop = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial]];
@@ -707,7 +714,7 @@ static NSMutableArray *floatingWindows = nil;
         // 右下角缩放与移动把手 (同心圆/Stage Manager 风格)
         self.resizeHandle = [[CV3ResizeHandleView alloc] initWithFrame:CGRectMake(260, 460, 60, 60)];
         self.resizeHandle.backgroundColor = [UIColor clearColor]; // 已通过 CV3ResizeHandleView 优化热区，无需背景色即可接收触控
-        [self addSubview:self.resizeHandle];
+        [self.rootTransformContainer addSubview:self.resizeHandle];
         
         self.resizeHandleLayer = [CAShapeLayer layer];
         self.resizeHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
@@ -745,7 +752,7 @@ static NSMutableArray *floatingWindows = nil;
         self.stashGrabber.layer.borderWidth = 0.5;
         self.stashGrabber.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.2].CGColor;
         self.stashGrabber.alpha = 0; // 初始隐藏
-        [self addSubview:self.stashGrabber];
+        [self.rootTransformContainer addSubview:self.stashGrabber];
 
         self.appIconMiniView = [[UIImageView alloc] initWithFrame:CGRectMake(4, 4, 36, 36)];
         self.appIconMiniView.layer.cornerRadius = 8;
@@ -1288,7 +1295,8 @@ static NSMutableArray *floatingWindows = nil;
     if (scale != 1.0) {
         transform = CGAffineTransformScale(transform, scale, scale);
     }
-    self.transform = transform;
+    self.transform = CGAffineTransformIdentity; // Keep physical upright
+    self.rootTransformContainer.transform = transform;
 }
 
 - (void)layoutSubviews {
@@ -1324,24 +1332,35 @@ static NSMutableArray *floatingWindows = nil;
         self.bounds = CGRectMake(0, 0, self.bounds.size.height, self.bounds.size.width);
     }
 
+    [super layoutSubviews];
+    
+    // 物理尺寸 (Physical Dimensions)
+    CGFloat physicalW = self.bounds.size.width;
+    CGFloat physicalH = self.bounds.size.height;
+    
+    // 逻辑尺寸 (Logical User-facing Dimensions)
+    // 旋转后，逻辑宽度占据了物理高度，逻辑高度占据了物理宽度
+    CGFloat logicalW = isLandscape ? physicalH : physicalW;
+    CGFloat logicalH = isLandscape ? physicalW : physicalH;
+    
+    // 1. 同步根旋转容器 (rootTransformContainer 承载所有的 UI 组件并负责整体旋转)
+    self.rootTransformContainer.bounds = CGRectMake(0, 0, logicalW, logicalH);
+    self.rootTransformContainer.center = CGPointMake(physicalW / 2.0, physicalH / 2.0);
+
+    // 旋转必须放在 bounds 和 center 设置之后，并应用缩放
     [self applyCurrentTransformWithScale:self.isFocused ? 1.02 : 1.0];
 
-    [super layoutSubviews];
-    CGFloat w = self.bounds.size.width;
-    CGFloat h = self.bounds.size.height;
-    
-    // 核心修复：更新裁剪层与玻璃背景布局 (必须在更新子图层之前)
-    // 使用 bounds + center 而非 frame，确保在有 Transform 的情况下依然能精准对齐，消除掉队感
-    self.clippingContainer.bounds = self.bounds;
-    self.clippingContainer.center = CGPointMake(w/2.0, h/2.0);
+    // 2. 在逻辑坐标系下更新裁剪层与玻璃背景布局
+    self.clippingContainer.bounds = self.rootTransformContainer.bounds;
+    self.clippingContainer.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
     
     // 核心修复：为玻璃背景提供 10% 的冗余空间 (Bleed)，防止在惯性形变时露边
-    self.glassBackdrop.bounds = CGRectMake(0, 0, w * 1.1, h * 1.1);
-    self.glassBackdrop.center = CGPointMake(w/2.0, h/2.0);
+    self.glassBackdrop.bounds = CGRectMake(0, 0, logicalW * 1.1, logicalH * 1.1);
+    self.glassBackdrop.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    // 同步更新装饰图层，确保与裁剪容器完美贴合（解耦背景形变，防止脱离）
+    // 同步更新装饰图层，确保与裁剪容器完美贴合
     self.innerGlowLayer.frame = self.clippingContainer.bounds;
     self.cyanLayer.frame = self.clippingContainer.bounds;
     self.magentaLayer.frame = self.clippingContainer.bounds;
@@ -1354,11 +1373,9 @@ static NSMutableArray *floatingWindows = nil;
     }
     [CATransaction commit];
 
-    self.resizeHandle.frame = CGRectMake(w - 60, h - 60, 60, 60);
+    // 3. 在逻辑坐标系下更新缩放把手的位置 (使其永远在用户的右下角)
+    self.resizeHandle.frame = CGRectMake(logicalW - 60, logicalH - 60, 60, 60);
     
-    // 核心修复：将把手弧度中心与窗口 28pt 圆角中心对齐 (32,32)
-    // 半径调整为 18pt，使其与窗口 28pt 圆角形成 10pt 的完美平行间距
-    // 这种“悬浮感”设计参考了 iPadOS Stage Manager 的角把手风格，视觉上更轻盈
     CGFloat arcRadius = 18.0;
     CGFloat centerAngle = M_PI_4;
     CGFloat halfSweep = M_PI / 8.0; 
@@ -1371,19 +1388,24 @@ static NSMutableArray *floatingWindows = nil;
     self.resizeHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
     self.resizeHandleLayer.lineWidth = 2.0;
 
-    // 核心：基于固定全屏分辨率进行等比物理缩放 (MilkyWay Style Scaling)
+    // 4. 更新内部 App 渲染视图的缩放 (基于逻辑尺寸)
     if (self.hostContainerProxy) {
-        CGRect screenBounds = [UIScreen mainScreen].bounds;
-        CGFloat scaleX = w / screenBounds.size.width;
-        CGFloat scaleY = h / screenBounds.size.height;
+        CGRect rawScreenBounds = [UIScreen mainScreen].bounds;
+        // 获取逻辑屏幕尺寸 (如果设备处于横屏，UIScreen 的 bounds 会自动对调为横屏比例，也可能不调，所以需要安全处理)
+        CGFloat logicalScreenW = isLandscape ? MAX(rawScreenBounds.size.width, rawScreenBounds.size.height) : MIN(rawScreenBounds.size.width, rawScreenBounds.size.height);
+        CGFloat logicalScreenH = isLandscape ? MIN(rawScreenBounds.size.width, rawScreenBounds.size.height) : MAX(rawScreenBounds.size.width, rawScreenBounds.size.height);
+        CGRect logicalScreenBounds = CGRectMake(0, 0, logicalScreenW, logicalScreenH);
+        
+        CGFloat scaleX = logicalW / logicalScreenW;
+        CGFloat scaleY = logicalH / logicalScreenH;
         
         // 动态同步场景分辨率与方向：确保 App 始终以全屏分辨率渲染，由宿主进行物理缩合
         if (self.targetScene) {
             @try {
                 FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
                 BOOL needsUpdate = NO;
-                if (!CGRectEqualToRect(settings.frame, screenBounds)) {
-                    [settings setFrame:screenBounds];
+                if (!CGRectEqualToRect(settings.frame, logicalScreenBounds)) {
+                    [settings setFrame:logicalScreenBounds];
                     needsUpdate = YES;
                 }
                 
@@ -1405,16 +1427,16 @@ static NSMutableArray *floatingWindows = nil;
         }
 
         self.hostContainerProxy.transform = CGAffineTransformIdentity;
-        self.hostContainerProxy.frame = screenBounds; 
+        self.hostContainerProxy.frame = logicalScreenBounds; 
         
         if (self.hostView) {
             self.hostView.transform = CGAffineTransformIdentity;
-            self.hostView.frame = screenBounds;
+            self.hostView.frame = logicalScreenBounds;
         }
         
-        // 利用 anchorPoint 使缩放围绕中心进行，然后重置 center 匹配当前窗口中心
+        // 利用 anchorPoint 使缩放围绕中心进行，然后重置 center 匹配当前裁剪层中心
         self.hostContainerProxy.layer.anchorPoint = CGPointMake(0.5, 0.5);
-        self.hostContainerProxy.center = CGPointMake(w / 2.0, h / 2.0);
+        self.hostContainerProxy.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
         self.hostContainerProxy.transform = CGAffineTransformMakeScale(scaleX, scaleY);
     }
 }
@@ -5387,6 +5409,8 @@ static NSTimeInterval lastLogTime = 0;
 }
 %end
 
+
+
 @interface SBWorkspaceEntity : NSObject
 - (id)applicationSceneEntity;
 @end
@@ -5519,7 +5543,6 @@ static NSTimeInterval lastLogTime = 0;
                 if ([layout respondsToSelector:@selector(containsItemWithBundleIdentifier:)]) {
                     for (CV3FloatingAppWindow *win in floatingWindows) {
                         if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
-                            CV3LogToFile(@"[Gesture] 保护分屏应用在 Home 手势中的缩放: %@", win.bundleID);
                             return 1.0;
                         }
                     }
@@ -5539,7 +5562,6 @@ static NSTimeInterval lastLogTime = 0;
                 if ([layout respondsToSelector:@selector(containsItemWithBundleIdentifier:)]) {
                     for (CV3FloatingAppWindow *win in floatingWindows) {
                         if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
-                            CV3LogToFile(@"[Gesture] 保护分屏应用在 Home 手势中的透明度: %@", win.bundleID);
                             return 1.0;
                         }
                     }
