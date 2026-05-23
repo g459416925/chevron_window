@@ -1394,24 +1394,28 @@ static NSMutableArray *floatingWindows = nil;
     self.resizeHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
     self.resizeHandleLayer.lineWidth = 2.0;
 
-    // 5. 更新内部 App 场景 (基于物理方向)
+    // 5. 更新内部 App 场景 (基于物理方向与逻辑比例，防止挤压)
     if (self.hostContainerProxy) {
         CGRect rawScreenBounds = [UIScreen mainScreen].bounds;
-        // 核心：这里的逻辑屏幕尺寸必须是 App 视角下的真横屏尺寸
-        CGFloat logicalScreenW = isLandscape ? MAX(rawScreenBounds.size.width, rawScreenBounds.size.height) : MIN(rawScreenBounds.size.width, rawScreenBounds.size.height);
-        CGFloat logicalScreenH = isLandscape ? MIN(rawScreenBounds.size.width, rawScreenBounds.size.height) : MAX(rawScreenBounds.size.width, rawScreenBounds.size.height);
-        CGRect logicalScreenBounds = CGRectMake(0, 0, logicalScreenW, logicalScreenH);
+        CGFloat portraitW = MIN(rawScreenBounds.size.width, rawScreenBounds.size.height);
         
-        // 计算缩放比：逻辑容器尺寸 / 逻辑屏幕全屏尺寸
-        CGFloat scaleX = logicalW / logicalScreenW;
-        CGFloat scaleY = logicalH / logicalScreenH;
+        // 核心：不再盲目使用全屏分辨率，而是让 App 渲染一个与当前窗口比例完全一致的“高分辨率画布”
+        // 我们以 portraitW (393pt) 为基准逻辑宽度
+        CGFloat renderW = needsManualRotation ? (portraitW * (logicalW / logicalH)) : portraitW;
+        CGFloat renderH = needsManualRotation ? portraitW : (portraitW * (logicalH / logicalW));
+        
+        // 保证渲染画布始终覆盖窗口所需的比例
+        CGRect targetRenderBounds = CGRectMake(0, 0, renderW, renderH);
+        
+        // 计算缩放比：窗口逻辑尺寸 / App 渲染画布尺寸 (此时两者比例完全一致，所以 scaleX == scaleY)
+        CGFloat uniformScale = logicalW / renderW;
         
         if (self.targetScene) {
             @try {
                 FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
                 BOOL needsUpdate = NO;
-                if (!CGRectEqualToRect(settings.frame, logicalScreenBounds)) {
-                    [settings setFrame:logicalScreenBounds];
+                if (!CGRectEqualToRect(settings.frame, targetRenderBounds)) {
+                    [settings setFrame:targetRenderBounds];
                     needsUpdate = YES;
                 }
                 
@@ -1426,16 +1430,17 @@ static NSMutableArray *floatingWindows = nil;
             } @catch (NSException *e) {}
         }
 
+        // 应用统一缩放，彻底根治挤压
         self.hostContainerProxy.transform = CGAffineTransformIdentity;
-        self.hostContainerProxy.frame = logicalScreenBounds; 
+        self.hostContainerProxy.bounds = targetRenderBounds; 
         if (self.hostView) {
             self.hostView.transform = CGAffineTransformIdentity;
-            self.hostView.frame = logicalScreenBounds;
+            self.hostView.frame = targetRenderBounds;
         }
         
         self.hostContainerProxy.layer.anchorPoint = CGPointMake(0.5, 0.5);
         self.hostContainerProxy.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
-        self.hostContainerProxy.transform = CGAffineTransformMakeScale(scaleX, scaleY);
+        self.hostContainerProxy.transform = CGAffineTransformMakeScale(uniformScale, uniformScale);
     }
 }
 
