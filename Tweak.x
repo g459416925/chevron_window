@@ -728,38 +728,33 @@ static NSMutableArray *floatingWindows = nil;
         }
         [self.clippingContainer.layer addSublayer:self.magentaLayer];
         
-        // 右下角缩放与移动把手 (同心圆/Stage Manager 风格)
-        self.resizeHandle = [[CV3ResizeHandleView alloc] initWithFrame:CGRectMake(260, 460, 60, 60)];
-        self.resizeHandle.backgroundColor = [UIColor clearColor]; // 已通过 CV3ResizeHandleView 优化热区，无需背景色即可接收触控
+        // 右下角缩放与移动把手 (Home Bar 样式)
+        self.resizeHandle = [[CV3ResizeHandleView alloc] initWithFrame:CGRectMake(0, 0, 100, 5)]; // Home Bar 形状
+        self.resizeHandle.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.5]; // Semi-transparent
+        self.resizeHandle.layer.cornerRadius = 2.5; // 圆角
         [self.rootTransformContainer addSubview:self.resizeHandle];
         
-        self.resizeHandleLayer = [CAShapeLayer layer];
-        self.resizeHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
-        self.resizeHandleLayer.fillColor = [UIColor clearColor].CGColor;
-        self.resizeHandleLayer.lineWidth = 2.0;
-        self.resizeHandleLayer.lineCap = kCALineCapRound;
-        [self.resizeHandle.layer addSublayer:self.resizeHandleLayer];
+        // 移除旧的 CAShapeLayer 把手
+        // self.resizeHandleLayer = [CAShapeLayer layer];
+        // ... (省略)
         
-        // 1. 缩放手势 (Pan)
+        // 1. 缩放手势 (Pan) - 保持不变
         UIPanGestureRecognizer *resizePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleResizePan:)];
         resizePan.delegate = self;
         [self.resizeHandle addGestureRecognizer:resizePan];
 
-        // 2. 移动手势 (Long Press)
-        // 核心移植：将原本顶部的拖拽功能集成到把手上，通过长按触发移动
+        // 2. 移动手势 (Long Press) - 保持不变
         UILongPressGestureRecognizer *moveLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleMoveLongPress:)];
-        moveLongPress.minimumPressDuration = 0.45; // 稍微长于普通点击，短于 Stash 关闭
+        moveLongPress.minimumPressDuration = 0.45;
         moveLongPress.delegate = self;
         [self.resizeHandle addGestureRecognizer:moveLongPress];
 
-        // 3. 隐藏手势 (Tap)
+        // 3. 隐藏手势 (Tap) - 保持不变
         UITapGestureRecognizer *resizeTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleHideAction)];
         resizeTap.delegate = self;
         [self.resizeHandle addGestureRecognizer:resizeTap];
         
-        // 确保 Pan 手势在长按触发移动时失败，防止缩放与位移冲突
         [resizePan requireGestureRecognizerToFail:moveLongPress];
-        
         self.resizeHandle.userInteractionEnabled = YES;
         
         // 侧边隐藏拉手 (Grabber -> Prism Switcher)
@@ -1384,15 +1379,25 @@ static NSMutableArray *floatingWindows = nil;
     }
     [CATransaction commit];
 
-    self.resizeHandle.frame = CGRectMake(logicalW - 60, logicalH - 60, 60, 60);
-    
-    CGFloat arcRadius = 18.0;
-    CGFloat centerAngle = M_PI_4;
-    CGFloat halfSweep = M_PI / 8.0; 
-    self.resizeHandleLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(32, 32) radius:arcRadius startAngle:centerAngle - halfSweep endAngle:centerAngle + halfSweep clockwise:YES].CGPath;
-    self.resizeHandleLayer.fillColor = [UIColor clearColor].CGColor;
-    self.resizeHandleLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
-    self.resizeHandleLayer.lineWidth = 2.0;
+    // 6. 更新 Home Bar 把手位置 (距离屏幕物理边缘最远的一侧)
+    CGRect screen = [UIScreen mainScreen].bounds;
+    CGFloat distL = self.center.x;
+    CGFloat distR = screen.size.width - self.center.x;
+    CGFloat distT = self.center.y;
+    CGFloat distB = screen.size.height - self.center.y;
+
+    CGFloat barW = 100.0;
+    CGFloat barH = 5.0;
+
+    if (distL >= distR && distL >= distT && distL >= distB) { // 左侧最远
+        self.resizeHandle.frame = CGRectMake(-barH - 10, (logicalH - barW) / 2.0, barH, barW);
+    } else if (distR >= distL && distR >= distT && distR >= distB) { // 右侧最远
+        self.resizeHandle.frame = CGRectMake(logicalW + 5, (logicalH - barW) / 2.0, barH, barW);
+    } else if (distT >= distL && distT >= distR && distT >= distB) { // 顶部最远
+        self.resizeHandle.frame = CGRectMake((logicalW - barW) / 2.0, -barH - 10, barW, barH);
+    } else { // 底部最远 (默认)
+        self.resizeHandle.frame = CGRectMake((logicalW - barW) / 2.0, logicalH + 5, barW, barH);
+    }
 
     // 5. 更新内部 App 场景 (等比铺满算法：基于窗口比例动态映射虚拟画布)
     if (self.hostContainerProxy) {
