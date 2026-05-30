@@ -516,6 +516,7 @@ static NSMutableArray *floatingWindows = nil;
 @interface CV3FloatingAppWindow : UIWindow <UIGestureRecognizerDelegate>
 @property (nonatomic, copy) NSString *bundleID;
 @property (nonatomic, strong) UIVisualEffectView *glassBackdrop; // New: Fluid background
+@property (nonatomic, strong) UIView *appContentWrapper;
 @property (nonatomic, strong) UIView *rootTransformContainer;
 @property (nonatomic, strong) UIView *clippingContainer; 
 @property (nonatomic, strong) UIView *hostContainerProxy;
@@ -677,6 +678,12 @@ static NSMutableArray *floatingWindows = nil;
         self.rootTransformContainer.backgroundColor = [UIColor clearColor];
         [self addSubview:self.rootTransformContainer];
 
+        // 核心修复：引入内容包装层 (App Content Wrapper)
+        // 该层用于统一缩放动画，确保主内容与把手 (Home Bar) 同步缩放至图标
+        self.appContentWrapper = [[UIView alloc] initWithFrame:self.rootTransformContainer.bounds];
+        self.appContentWrapper.backgroundColor = [UIColor clearColor];
+        [self.rootTransformContainer addSubview:self.appContentWrapper];
+
         // 核心修复：引入非缩放裁剪层 (Clipping Container)
         // 该层的大小始终等于窗口大小，负责强制执行圆角裁剪，不受内部缩放影响
         self.clippingContainer = [[UIView alloc] initWithFrame:self.bounds];
@@ -686,7 +693,7 @@ static NSMutableArray *floatingWindows = nil;
         }
         self.clippingContainer.layer.masksToBounds = YES;
         self.clippingContainer.backgroundColor = [UIColor clearColor];
-        [self.rootTransformContainer addSubview:self.clippingContainer];
+        [self.appContentWrapper addSubview:self.clippingContainer];
 
         // 核心修复：引入液态玻璃背景 (已移入 clippingContainer 以实现完美剪裁)
         self.glassBackdrop = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial]];
@@ -744,7 +751,7 @@ static NSMutableArray *floatingWindows = nil;
         self.resizeHandle = [[CV3ResizeHandleView alloc] initWithFrame:CGRectMake(0, 0, 100, 5)]; // Home Bar 形状
         self.resizeHandle.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.5]; // Semi-transparent
         self.resizeHandle.layer.cornerRadius = 2.5; // 圆角
-        [self.rootTransformContainer addSubview:self.resizeHandle];
+        [self.appContentWrapper addSubview:self.resizeHandle];
         
         // 1. 缩放手势 (Pan) - 保持不变
         UIPanGestureRecognizer *resizePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleResizePan:)];
@@ -1165,9 +1172,9 @@ static NSMutableArray *floatingWindows = nil;
         CGFloat targetY = self.frame.origin.y + self.frame.size.height/2.0 - 22;
         self.frame = CGRectMake(targetX, targetY, 44, 44);
         
-        // 视觉销毁：内容缩放并淡出
-        self.clippingContainer.transform = CGAffineTransformMakeScale(0.01, 0.01);
-        self.clippingContainer.alpha = 0;
+        // 视觉销毁：内容缩放并淡出 (包装层统一处理内容与把手)
+        self.appContentWrapper.transform = CGAffineTransformMakeScale(0.01, 0.01);
+        self.appContentWrapper.alpha = 0;
         
         // 玻璃背景转化为图标底色
         self.glassBackdrop.alpha = 0.8;
@@ -1179,7 +1186,7 @@ static NSMutableArray *floatingWindows = nil;
         self.stashGrabber.frame = self.bounds;
         self.appIconMiniView.frame = CGRectInset(self.bounds, 4, 4);
         
-        // 隐藏不需要的装饰
+        // 隐藏不需要的装饰 (此时 resizeHandle 已随 wrapper 缩放)
         self.resizeHandle.alpha = 0;
     } completion:^(BOOL finished) {
         // 真正从层级中移除画面渲染，释放资源
@@ -1347,8 +1354,12 @@ static NSMutableArray *floatingWindows = nil;
     self.rootTransformContainer.center = CGPointMake(physicalW / 2.0, physicalH / 2.0);
     [self applyCurrentTransformWithScale:self.isFocused ? 1.02 : 1.0];
 
+    // 同步内容包装层
+    self.appContentWrapper.bounds = self.rootTransformContainer.bounds;
+    self.appContentWrapper.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
+
     // 4. 更新子组件布局 (基于逻辑坐标系)
-    self.clippingContainer.bounds = self.rootTransformContainer.bounds;
+    self.clippingContainer.bounds = self.appContentWrapper.bounds;
     self.clippingContainer.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
     
     self.glassBackdrop.bounds = CGRectMake(0, 0, logicalW * 1.1, logicalH * 1.1);
@@ -1915,6 +1926,9 @@ static NSMutableArray *floatingWindows = nil;
             [self updateSovereigntyAssertion]; // 恢复高优先级
 
             self.stashGrabber.alpha = 0;
+            self.appContentWrapper.alpha = 1.0;
+            self.appContentWrapper.transform = CGAffineTransformIdentity;
+            
             self.clippingContainer.alpha = 1.0;
             self.clippingContainer.transform = CGAffineTransformIdentity;
             
