@@ -228,6 +228,7 @@
         ivBack.layer.shadowOffset = CGSizeMake(0, 3);
         ivBack.layer.shadowOpacity = 0.3;
         ivBack.layer.shadowRadius = 5.0;
+        ivBack.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, iconSize, iconSize) cornerRadius:13].CGPath;
         [self.contentView addSubview:ivBack];
         
         self.iconView = [[UIImageView alloc] initWithFrame:ivBack.frame];
@@ -254,6 +255,7 @@
         self.pinnedIndicator.layer.shadowOffset = CGSizeZero;
         self.pinnedIndicator.layer.shadowOpacity = 0.8;
         self.pinnedIndicator.layer.shadowRadius = 4.0;
+        self.pinnedIndicator.layer.shadowPath = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(0, 0, 16, 16)].CGPath;
         self.pinnedIndicator.hidden = YES;
         [self.iconView addSubview:self.pinnedIndicator];
 
@@ -263,6 +265,9 @@
         self.nameLabel.textAlignment = NSTextAlignmentCenter;
         self.nameLabel.numberOfLines = 2;
         [self.contentView addSubview:self.nameLabel];
+        
+        // 性能优化：在 Cell 初始化时启动动画，而不是在滚动 configure 时重复添加
+        [self startBreathing];
     }
     return self;
 }
@@ -304,8 +309,6 @@
         self.nameLabel.textColor = [UIColor labelColor];
         self.iconView.layer.borderWidth = 0;
     }
-
-    [self startBreathing];
 }
 - (void)startBreathing {
     [self.contentView.layer removeAnimationForKey:@"breathing"];
