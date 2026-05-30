@@ -557,6 +557,8 @@ static NSMutableArray *floatingWindows = nil;
 - (void)setWindowFocused:(BOOL)focused;
 - (void)restoreFromStash;
 - (void)applyCurrentTransformWithScale:(CGFloat)scale;
+- (void)handleTransitionGhosting;
+- (void)refreshHostViewPresentation;
 @end
 
 // --- Custom Resize Handle with Expanded Hit Area ---
@@ -909,13 +911,12 @@ static NSMutableArray *floatingWindows = nil;
     }
     
     @try {
-        // 核心修复：使用更全面的层级位掩码 (31 = 1|2|4|8|16)
-        // Bit 0 (1) 是主画面层，之前使用的 26 缺少了主画面位，可能导致某些转场后画面无法刷新
+        // [Safety Restore] 恢复至 7 (1|2|4)，确保键盘可弹出。
+        // 由于已解决布局死锁，恢复 2(Keyboard) 和 4(KeyboardBg) 是安全的。
         UIScenePresentationContext *context = [[%c(UIScenePresentationContext) alloc] _initWithDefaultValues];
         if ([context respondsToSelector:@selector(setPresentedLayerTypes:)]) {
-            [context setPresentedLayerTypes:31]; 
-        }
-        if ([context respondsToSelector:@selector(setAppearanceStyle:)]) {
+            [context setPresentedLayerTypes:7];
+        }        if ([context respondsToSelector:@selector(setAppearanceStyle:)]) {
             [context setAppearanceStyle:2];
         }
         if ([context respondsToSelector:@selector(setClipsToBounds:)]) {
@@ -1408,17 +1409,38 @@ static NSMutableArray *floatingWindows = nil;
             @try {
                 FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
                 BOOL needsUpdate = NO;
-                if (!CGRectEqualToRect(settings.frame, virtualBounds)) {
+                
+                // [Geek Advice] 引入精细化变更检测，避免每一帧都触发 IPC 通信导致闪烁
+                if (fabs(settings.frame.size.width - virtualBounds.size.width) > 0.1 || 
+                    fabs(settings.frame.size.height - virtualBounds.size.height) > 0.1) {
                     [settings setFrame:virtualBounds];
                     needsUpdate = YES;
                 }
-                if ([settings respondsToSelector:@selector(setInterfaceOrientation:)]) {
-                    [settings performSelector:@selector(setInterfaceOrientation:) withObject:@(orientation)];
-                    needsUpdate = YES;
+                
+                // 检查方向是否一致
+                NSInteger currentSceneOri = 0;
+                if ([settings respondsToSelector:@selector(interfaceOrientation)]) {
+                    currentSceneOri = (NSInteger)[settings performSelector:@selector(interfaceOrientation)];
                 } else {
-                    @try { [settings setValue:@(orientation) forKey:@"interfaceOrientation"]; needsUpdate = YES; } @catch (NSException *e) {}
+                    @try { currentSceneOri = [[settings valueForKey:@"interfaceOrientation"] integerValue]; } @catch (NSException *e) {}
                 }
-                if (needsUpdate && !self.liveResizeSnapshotView) [self.targetScene updateSettings:settings withTransitionContext:nil];
+
+                if (currentSceneOri != (NSInteger)orientation) {
+                    if ([settings respondsToSelector:@selector(setInterfaceOrientation:)]) {
+                        [settings performSelector:@selector(setInterfaceOrientation:) withObject:@(orientation)];
+                    } else {
+                        @try { [settings setValue:@(orientation) forKey:@"interfaceOrientation"]; } @catch (NSException *e) {}
+                    }
+                    needsUpdate = YES;
+                }
+
+                if (needsUpdate && !self.liveResizeSnapshotView && !self.isClosing) {
+                    // [Optimization] 使用无动画事务包裹，确保坐标系同步的即时性
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    [self.targetScene updateSettings:settings withTransitionContext:nil];
+                    [CATransaction commit];
+                }
             } @catch (NSException *e) {}
         }
 
@@ -1557,7 +1579,8 @@ static NSMutableArray *floatingWindows = nil;
                     _UISceneLayerHostContainerView *hostedView = [[%c(_UISceneLayerHostContainerView) alloc] initWithScene:targetScene debugDescription:@"ChevronV3Host"];
                     UIScenePresentationContext *context = [[%c(UIScenePresentationContext) alloc] _initWithDefaultValues];
                     if ([context respondsToSelector:@selector(setPresentedLayerTypes:)]) {
-                        [context setPresentedLayerTypes:31]; // 尝试强制渲染所有类型
+                        // [Safety Restore] 恢复至 7 (1|2|4)，确保键盘可弹出。
+                        [context setPresentedLayerTypes:7]; 
                     }
                     if ([context respondsToSelector:@selector(setAppearanceStyle:)]) {
                         [context setAppearanceStyle:2];
@@ -2326,12 +2349,33 @@ static NSMutableArray *floatingWindows = nil;
     }
 }
 
+- (void)handleTransitionGhosting {
+    if (self.isClosing || !self.hostView) return;
+    
+    UIView *ghostShield = [self.hostView snapshotViewAfterScreenUpdates:NO];
+    if (ghostShield) {
+        ghostShield.frame = self.hostContainerProxy.bounds;
+        [self.hostContainerProxy addSubview:ghostShield];
+        
+        self.hostView.alpha = 0;
+        [self refreshHostViewPresentation];
+        
+        [UIView animateWithDuration:0.25 delay:0.05 options:UIViewAnimationOptionCurveEaseOut animations:^{
+            ghostShield.alpha = 0;
+            self.hostView.alpha = 1.0;
+        } completion:^(BOOL finished) {
+            [ghostShield removeFromSuperview];
+        }];
+    }
+}
+
 - (void)closeWindow {
+    if (self.isClosing) return;
     self.isClosing = YES;
+    
+    CV3LogToFile(@"[Lifecycle] 正在关闭窗口: %@", self.bundleID);
     self.hidden = YES;
     [self syncWindowBoundsToClient];
-
-    // [Foreground Sovereignty] Invalidate RBSAssertion
     if (self.rbsAssertion) {
         [self.rbsAssertion invalidate];
         self.rbsAssertion = nil;
@@ -2365,12 +2409,15 @@ static NSMutableArray *floatingWindows = nil;
             }
         }
 
+        // [Geek Advice] Use explicit invalidate to release backboardd resources
         if ([self.hostView respondsToSelector:@selector(invalidate)]) {
             [self.hostView performSelector:@selector(invalidate)];
         }
         [self.hostView removeFromSuperview];
         self.hostView = nil;
     }
+
+    self.targetScene = nil;
 
     // [Aggressive Termination] Option A: Force kill the application to stop all system-level services
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -2426,6 +2473,17 @@ static NSMutableArray *floatingWindows = nil;
     
     self.windowScene = nil; // Clear scene attachment
     [floatingWindows removeObject:self];
+}
+
+- (void)dealloc {
+    CV3LogToFile(@"[Lifecycle] CV3FloatingAppWindow Dealloc: %@", self.bundleID);
+    if (self.rbsAssertion) {
+        [self.rbsAssertion invalidate];
+        self.rbsAssertion = nil;
+    }
+    if ([self.hostView respondsToSelector:@selector(invalidate)]) {
+        [self.hostView performSelector:@selector(invalidate)];
+    }
 }@end
 
 #pragma mark - Main Window
@@ -5927,6 +5985,11 @@ static NSTimeInterval lastLogTime = 0;
 
 static CV3PassthroughWindow *cv3_keyboardWindow = nil;
 
+@interface CV3SnapshotView : UIView
+@end
+@implementation CV3SnapshotView
+@end
+
 %hook _UISceneLayerHostContainerView
 - (void)layoutSubviews {
     %orig;
@@ -6085,26 +6148,22 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                         } @catch (NSException *e) {}
                     }
 
-                    // [Layout Sovereignty] 注入安全区域约束与方向硬化
-                    // 抖音搜索冻屏通常是因为在转场瞬间 SceneSettings 丢失了关键布局元数据，导致渲染引擎 Fence 等待超时
+                    // [Layout Sovereignty] 弹性布局约束
+                    // [Geek Advice] 停止强制注入 UIEdgeInsetsZero。允许 App 保留其内部安全区域，防止全屏查看图片时触发布局计算死锁。
                     if ([mutableSettings isKindOfClass:[%c(UIMutableApplicationSceneSettings) class]]) {
                         UIMutableApplicationSceneSettings *uim = (UIMutableApplicationSceneSettings *)mutableSettings;
-                        UIEdgeInsets safeArea = UIEdgeInsetsZero; // 分屏模式下通常不使用系统级 Safe Area，由宿主控制
                         
-                        if ([uim respondsToSelector:@selector(setSafeAreaInsetsPortrait:)]) uim.safeAreaInsetsPortrait = safeArea;
-                        if ([uim respondsToSelector:@selector(setSafeAreaInsetsLandscapeLeft:)]) uim.safeAreaInsetsLandscapeLeft = safeArea;
-                        if ([uim respondsToSelector:@selector(setSafeAreaInsetsLandscapeRight:)]) uim.safeAreaInsetsLandscapeRight = safeArea;
-                        if ([uim respondsToSelector:@selector(setSafeAreaInsetsPortraitUpsideDown:)]) uim.safeAreaInsetsPortraitUpsideDown = safeArea;
+                        // [Deadlock Prevention] 如果正在进行 UI 转场（如查看大图），减少干预以避免破坏系统 Fencing 同步
+                        BOOL isTransitioning = (arg2 != nil);
                         
-                        // 强制同步方向，防止在搜索弹出键盘时触发不必要的旋转计算导致的死锁
-                        if ([uim respondsToSelector:@selector(setInterfaceOrientation:)]) {
-                            [uim performSelector:@selector(setInterfaceOrientation:) withObject:@(win.targetOrientation)];
-                        }
-                        
-                        // [Deactivation Immunity] 核心防御：清除系统手势导致的失活原因 (Deactivation Reasons)
-                        // 当用户触发 Home 手势时，系统会为活跃场景附加 deactivationReasons 导致 App 进入 Inactive 状态，从而触发视频暂停。
-                        if ([uim respondsToSelector:@selector(setDeactivationReasons:)]) {
-                            uim.deactivationReasons = 0;
+                        if (!isTransitioning) {
+                            // 仅在非转场态下清除失活原因，确保视频等内容在分屏下持续播放
+                            if ([uim respondsToSelector:@selector(setDeactivationReasons:)]) {
+                                uim.deactivationReasons = 0;
+                            }
+                            
+                            // 移除原有的 UIEdgeInsetsZero 强制注入和 interfaceOrientation 强制覆盖。
+                            // 方向同步已收拢至 layoutSubviews 中的主动下发逻辑。
                         }
                         
                         modified = YES;
@@ -6117,6 +6176,10 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                     %orig(arg1, arg2);
                 }
                 
+                // [Anti-Ghosting] Detect transition and clear stale frames
+                if (arg2 != nil) {
+                    [win performSelectorOnMainThread:@selector(handleTransitionGhosting) withObject:nil waitUntilDone:NO];
+                }
                 // [Optimization] 移除此处的 refreshHostViewPresentation。
                 // 全局设置更新极其频繁，此处重置 Context 会导致画面掉帧或短暂暂停。
                 // 我们已经在 enforceSceneForegroundState 中按需处理。
@@ -6174,21 +6237,15 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                         } @catch (NSException *e) {}
                     }
 
-                    // [Layout Sovereignty] 注入安全区域约束与方向硬化
+                    // [Layout Sovereignty] 弹性布局约束
                     if ([mutableSettings isKindOfClass:[%c(UIMutableApplicationSceneSettings) class]]) {
                         UIMutableApplicationSceneSettings *uim = (UIMutableApplicationSceneSettings *)mutableSettings;
-                        UIEdgeInsets safeArea = UIEdgeInsetsZero;
-                        if ([uim respondsToSelector:@selector(setSafeAreaInsetsPortrait:)]) uim.safeAreaInsetsPortrait = safeArea;
-                        if ([uim respondsToSelector:@selector(setSafeAreaInsetsLandscapeLeft:)]) uim.safeAreaInsetsLandscapeLeft = safeArea;
-                        if ([uim respondsToSelector:@selector(setSafeAreaInsetsLandscapeRight:)]) uim.safeAreaInsetsLandscapeRight = safeArea;
-                        if ([uim respondsToSelector:@selector(setSafeAreaInsetsPortraitUpsideDown:)]) uim.safeAreaInsetsPortraitUpsideDown = safeArea;
                         
-                        if ([uim respondsToSelector:@selector(setInterfaceOrientation:)]) {
-                            [uim performSelector:@selector(setInterfaceOrientation:) withObject:@(win.targetOrientation)];
-                        }
-                        
-                        if ([uim respondsToSelector:@selector(setDeactivationReasons:)]) {
-                            uim.deactivationReasons = 0;
+                        BOOL isTransitioning = (arg2 != nil);
+                        if (!isTransitioning) {
+                            if ([uim respondsToSelector:@selector(setDeactivationReasons:)]) {
+                                uim.deactivationReasons = 0;
+                            }
                         }
                         
                         modified = YES;
@@ -6201,6 +6258,10 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                     %orig(arg1, arg2, arg3);
                 }
                 
+                // [Anti-Ghosting] Detect transition and clear stale frames
+                if (arg2 != nil) {
+                    [win performSelectorOnMainThread:@selector(handleTransitionGhosting) withObject:nil waitUntilDone:NO];
+                }
                 // [Optimization] 移除此处的 refreshHostViewPresentation，理由同上。
                 return;
             }
@@ -6245,6 +6306,7 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
 %hook SBSystemGestureManager
 - (void)addGestureRecognizer:(id)arg1 withType:(unsigned long long)arg2 {
     // 如果系统（Siri）尝试注册 112 槽位，并且当前有我们的手势占用，则主动让出槽位避免崩溃
+
     if (arg2 == 112 && sharedWindow && sharedWindow.systemEdgePan && arg1 != sharedWindow.systemEdgePan) {
         @try {
             [self removeGestureRecognizer:sharedWindow.systemEdgePan];
@@ -6262,6 +6324,17 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                 [[%c(SBSystemGestureManager) mainDisplayManager] addGestureRecognizer:sharedWindow.systemEdgePan withType:112];
             } @catch (NSException *e) {}
         });
+    }
+}
+%end
+
+%hook UIScenePresentationContext
+- (void)setAppearanceStyle:(NSUInteger)arg1 {
+    %orig(arg1);
+    if (arg1 == 2) { // 2 = Interactive/Real-time
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if (!win.isClosing) [win performSelectorOnMainThread:@selector(refreshHostViewPresentation) withObject:nil waitUntilDone:NO];
+        }
     }
 }
 %end
