@@ -202,6 +202,96 @@
 }
 @end
 
+// --- 新增：集中化样式配置 ---
+struct {
+    // UI 样式
+    CGFloat iconCornerRadius;
+    CGFloat iconShadowOpacity;
+    CGFloat iconShadowRadius;
+    CGFloat highlightAlpha;
+    // 物理引擎参数
+    CGFloat parallaxPanelFactor;
+    CGFloat parallaxDecoFactor;
+    CGFloat lerpFactor;
+    CGFloat hapticThreshold;
+    CGFloat tiltMaxAngle;
+    CGFloat scrollTiltFactor;
+    CGFloat momentumDamping;
+    CGFloat maxStretch;
+    CGFloat stretchDamping;
+    // 动画参数
+    CGFloat durationShort;
+    CGFloat durationMedium;
+    CGFloat durationLong;
+    CGFloat springDamping;
+    CGFloat springVelocity;
+    // 窗口层级
+    CGFloat maxBound;
+    CGFloat floatingApp;
+    CGFloat panel;
+    CGFloat background;
+    CGFloat keyboard;
+    // 布局参数
+    CGFloat panelW;
+    CGFloat panelH;
+    CGFloat triggerHotzoneWidth;
+    CGFloat triggerVisualWidth;
+    CGFloat triggerBottomOffset;
+    CGFloat safeAreaBreath;
+    CGFloat cornerRadius;
+    CGFloat minHeight;
+    CGFloat trafficCapsuleW;
+    CGFloat trafficCapsuleH;
+    CGFloat trafficDotSize;
+    CGFloat windowHandleW;
+    CGFloat windowHandleH;
+    CGFloat resizeHandleHitArea;
+    CGFloat resizeHandleWindowExpansion;
+} static const CV3Style = {
+    .iconCornerRadius = 13.0,
+    .iconShadowOpacity = 0.3,
+    .iconShadowRadius = 5.0,
+    .highlightAlpha = 0.35,
+    // 物理引擎参数
+    .parallaxPanelFactor = 8.0,
+    .parallaxDecoFactor = 11.0,
+    .lerpFactor = 0.15,
+    .hapticThreshold = 0.6,
+    .tiltMaxAngle = 0.12,
+    .scrollTiltFactor = 0.0015,
+    .momentumDamping = 0.92,
+    .maxStretch = 0.12,
+    .stretchDamping = 3500.0,
+    // 动画参数
+    .durationShort = 0.15,
+    .durationMedium = 0.3,
+    .durationLong = 0.5,
+    .springDamping = 0.6,
+    .springVelocity = 0.8,
+    // 窗口层级
+    .maxBound = 2100.0,
+    .floatingApp = 2098.5,
+    .panel = 2099.0,
+    .background = -1.0,
+    .keyboard = 10000.0,
+    // 布局参数
+    .panelW = 370.0,
+    .panelH = 520.0,
+    .triggerHotzoneWidth = 50.0,
+    .triggerVisualWidth = 20.0,
+    .triggerBottomOffset = 100.0,
+    .safeAreaBreath = 10.0,
+    .cornerRadius = 28.0,
+    .minHeight = 300.0,
+    .trafficCapsuleW = 64.0,
+    .trafficCapsuleH = 24.0,
+    .trafficDotSize = 8.0,
+    .windowHandleW = 44.0,
+    .windowHandleH = 6.0,
+    .resizeHandleHitArea = 80.0,
+    .resizeHandleWindowExpansion = 40.0
+};
+
 #pragma mark - Custom Cell
 @interface CV3AppCell : UICollectionViewCell
 @property (nonatomic, strong) UIImageView *iconView;
@@ -223,23 +313,23 @@
         CGFloat iconSize = 54.0;
         UIView *ivBack = [[UIView alloc] initWithFrame:CGRectMake((frame.size.width - iconSize)/2, 8, iconSize, iconSize)];
         ivBack.backgroundColor = [[UIColor labelColor] colorWithAlphaComponent:0.08];
-        ivBack.layer.cornerRadius = 13;
+        ivBack.layer.cornerRadius = CV3Style.iconCornerRadius;
         ivBack.layer.shadowColor = [UIColor blackColor].CGColor;
         ivBack.layer.shadowOffset = CGSizeMake(0, 3);
-        ivBack.layer.shadowOpacity = 0.3;
-        ivBack.layer.shadowRadius = 5.0;
-        ivBack.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, iconSize, iconSize) cornerRadius:13].CGPath;
+        ivBack.layer.shadowOpacity = (float)CV3Style.iconShadowOpacity;
+        ivBack.layer.shadowRadius = CV3Style.iconShadowRadius;
+        ivBack.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, iconSize, iconSize) cornerRadius:CV3Style.iconCornerRadius].CGPath;
         [self.contentView addSubview:ivBack];
         
         self.iconView = [[UIImageView alloc] initWithFrame:ivBack.frame];
-        self.iconView.layer.cornerRadius = 13;
+        self.iconView.layer.cornerRadius = CV3Style.iconCornerRadius;
         self.iconView.clipsToBounds = YES;
         [self.contentView addSubview:self.iconView];
 
         self.iconHighlight = [CAGradientLayer layer];
         self.iconHighlight.frame = self.iconView.bounds;
         self.iconHighlight.colors = @[(id)[[UIColor labelColor] colorWithAlphaComponent:0.0].CGColor,
-                                      (id)[[UIColor labelColor] colorWithAlphaComponent:0.35].CGColor,
+                                      (id)[[UIColor labelColor] colorWithAlphaComponent:CV3Style.highlightAlpha].CGColor,
                                       (id)[[UIColor labelColor] colorWithAlphaComponent:0.0].CGColor];
         self.iconHighlight.startPoint = CGPointMake(0, 0);
         self.iconHighlight.endPoint = CGPointMake(1, 1);
@@ -404,90 +494,7 @@ static void CV3LogToFile(NSString *format, ...) {
 @end
 
 #pragma mark - Window Level Constants
-struct {
-    CGFloat maxBound;
-    CGFloat floatingApp;
-    CGFloat panel;
-    CGFloat background;
-    CGFloat keyboard;
-} static const kChevronWindowLevels = {
-    .maxBound = 2100.0,
-    .floatingApp = 2098.5,
-    .panel = 2099.0,
-    .background = -1.0,
-    .keyboard = 10000.0
-};
-
-#pragma mark - Layout & Physics Constants
-struct {
-    CGFloat panelW;
-    CGFloat panelH;
-    CGFloat triggerHotzoneWidth;
-    CGFloat triggerVisualWidth;
-    CGFloat triggerBottomOffset;
-    CGFloat safeAreaBreath;
-    CGFloat cornerRadius;
-    CGFloat minHeight;
-    CGFloat trafficCapsuleW;
-    CGFloat trafficCapsuleH;
-    CGFloat trafficDotSize;
-    CGFloat windowHandleW;
-    CGFloat windowHandleH;
-    CGFloat resizeHandleHitArea;
-    CGFloat resizeHandleWindowExpansion;
-} static const kChevronLayoutConstants = {
-    .panelW = 370.0,
-    .panelH = 520.0,
-    .triggerHotzoneWidth = 50.0,
-    .triggerVisualWidth = 20.0,
-    .triggerBottomOffset = 100.0,
-    .safeAreaBreath = 10.0,
-    .cornerRadius = 28.0,
-    .minHeight = 300.0,
-    .trafficCapsuleW = 64.0,
-    .trafficCapsuleH = 24.0,
-    .trafficDotSize = 8.0,
-    .windowHandleW = 44.0,
-    .windowHandleH = 6.0,
-    .resizeHandleHitArea = 80.0,
-    .resizeHandleWindowExpansion = 40.0
-};
-
-struct {
-    CGFloat parallaxPanelFactor;
-    CGFloat parallaxDecoFactor;
-    CGFloat lerpFactor;
-    CGFloat hapticThreshold;
-    CGFloat tiltMaxAngle;
-    CGFloat scrollTiltFactor;
-    CGFloat momentumDamping;
-    CGFloat maxStretch;
-    CGFloat stretchDamping;
-} static const kChevronPhysicsConstants = {
-    .parallaxPanelFactor = 8.0,
-    .parallaxDecoFactor = 11.0,
-    .lerpFactor = 0.15,
-    .hapticThreshold = 0.6,
-    .tiltMaxAngle = 0.12,
-    .scrollTiltFactor = 0.0015,
-    .momentumDamping = 0.92,
-    .maxStretch = 0.12,
-    .stretchDamping = 3500.0
-};
-
-struct {
-    CGFloat durationShort;
-    CGFloat durationMedium;
-    CGFloat durationLong;
-    CGFloat springDamping;
-    CGFloat springVelocity;
-} static const __attribute__((unused)) kChevronAnimationConstants = {
-    .durationShort = 0.15,
-    .durationMedium = 0.3,
-    .durationLong = 0.5,
-    .springDamping = 0.6,
-    .springVelocity = 0.8
-};
+// WindowLevel 参数已迁移至 CV3Style
 
 #pragma mark - Helper: Color Extraction
 static UIColor *CV3AverageColorFromImage(UIImage *image) {
@@ -558,7 +565,7 @@ static NSMutableArray *floatingWindows = nil;
 @implementation CV3ResizeHandleView
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
     // 深度优化敏感度：使用全局常量扩充热区，确保盲操作也能精准捕捉
-    CGFloat hitArea = kChevronLayoutConstants.resizeHandleHitArea;
+    CGFloat hitArea = CV3Style.resizeHandleHitArea;
     CGFloat widthDelta = MAX(0, hitArea - self.bounds.size.width);
     CGFloat heightDelta = MAX(0, hitArea - self.bounds.size.height);
     CGRect hitFrame = CGRectInset(self.bounds, -widthDelta/2.0, -heightDelta/2.0);
@@ -606,10 +613,10 @@ static NSMutableArray *floatingWindows = nil;
     if (CGRectContainsPoint(self.bounds, point)) return YES;
     
     // 专门为右下角缩放把手留出外部“吸附热区”
-    // 使用 kChevronLayoutConstants.resizeHandleWindowExpansion 确保与把手热区同步
+    // 使用 CV3Style.resizeHandleWindowExpansion 确保与把手热区同步
     // 我们将捕捉范围扩大到以右下角为顶点的正方形区域，确保手指即便在窗口外很远也能“吸住”
     CGRect bounds = self.bounds;
-    CGFloat expansion = kChevronLayoutConstants.resizeHandleWindowExpansion;
+    CGFloat expansion = CV3Style.resizeHandleWindowExpansion;
     CGRect resizeExtraHitBox = CGRectMake(bounds.size.width - expansion, bounds.size.height - expansion, expansion * 2, expansion * 2);
     if (CGRectContainsPoint(resizeExtraHitBox, point)) return YES;
     
@@ -648,7 +655,7 @@ static NSMutableArray *floatingWindows = nil;
         
         self.bundleID = bundleID;
         self.center = center;
-        self.windowLevel = kChevronWindowLevels.floatingApp; // 覆盖在面板之上，但不超过控制中心 (kChevronWindowLevels.maxBound)
+        self.windowLevel = CV3Style.floatingApp; // 覆盖在面板之上，但不超过控制中心 (CV3Style.maxBound)
         self.backgroundColor = [UIColor clearColor];
         self.alpha = 1.0;
         
@@ -657,7 +664,7 @@ static NSMutableArray *floatingWindows = nil;
         self.layer.shadowOffset = CGSizeMake(0, 10);
         self.layer.shadowOpacity = 0.4;
         self.layer.shadowRadius = 20.0;
-        self.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+        self.layer.cornerRadius = CV3Style.cornerRadius;
         if (@available(iOS 13.0, *)) {
             self.layer.cornerCurve = kCACornerCurveContinuous;
         }
@@ -671,7 +678,7 @@ static NSMutableArray *floatingWindows = nil;
         // 核心修复：引入非缩放裁剪层 (Clipping Container)
         // 该层的大小始终等于窗口大小，负责强制执行圆角裁剪，不受内部缩放影响
         self.clippingContainer = [[UIView alloc] initWithFrame:self.bounds];
-        self.clippingContainer.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+        self.clippingContainer.layer.cornerRadius = CV3Style.cornerRadius;
         if (@available(iOS 13.0, *)) {
             self.clippingContainer.layer.cornerCurve = kCACornerCurveContinuous;
         }
@@ -682,7 +689,7 @@ static NSMutableArray *floatingWindows = nil;
         // 核心修复：引入液态玻璃背景 (已移入 clippingContainer 以实现完美剪裁)
         self.glassBackdrop = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial]];
         self.glassBackdrop.frame = self.clippingContainer.bounds;
-        self.glassBackdrop.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+        self.glassBackdrop.layer.cornerRadius = CV3Style.cornerRadius;
         if (@available(iOS 13.0, *)) {
             self.glassBackdrop.layer.cornerCurve = kCACornerCurveContinuous;
         }
@@ -705,7 +712,7 @@ static NSMutableArray *floatingWindows = nil;
         self.innerGlowLayer.frame = self.clippingContainer.bounds;
         self.innerGlowLayer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.45].CGColor;
         self.innerGlowLayer.borderWidth = 0.3;
-        self.innerGlowLayer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+        self.innerGlowLayer.cornerRadius = CV3Style.cornerRadius;
         if (@available(iOS 13.0, *)) {
             self.innerGlowLayer.cornerCurve = kCACornerCurveContinuous;
         }
@@ -715,7 +722,7 @@ static NSMutableArray *floatingWindows = nil;
         self.cyanLayer.frame = self.clippingContainer.bounds;
         self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.15].CGColor;
         self.cyanLayer.borderWidth = 0.4;
-        self.cyanLayer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+        self.cyanLayer.cornerRadius = CV3Style.cornerRadius;
         if (@available(iOS 13.0, *)) {
             self.cyanLayer.cornerCurve = kCACornerCurveContinuous;
         }
@@ -725,7 +732,7 @@ static NSMutableArray *floatingWindows = nil;
         self.magentaLayer.frame = self.clippingContainer.bounds;
         self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:0.15].CGColor;
         self.magentaLayer.borderWidth = 0.4;
-        self.magentaLayer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+        self.magentaLayer.cornerRadius = CV3Style.cornerRadius;
         if (@available(iOS 13.0, *)) {
             self.magentaLayer.cornerCurve = kCACornerCurveContinuous;
         }
@@ -785,7 +792,7 @@ static NSMutableArray *floatingWindows = nil;
         // Snap Preview View (Hidden by default)
         self.snapPreviewView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
         self.snapPreviewView.backgroundColor = [[UIColor cyanColor] colorWithAlphaComponent:0.1];
-        self.snapPreviewView.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+        self.snapPreviewView.layer.cornerRadius = CV3Style.cornerRadius;
         self.snapPreviewView.layer.masksToBounds = YES;
         self.snapPreviewView.layer.borderWidth = 1.5;
         self.snapPreviewView.layer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.3].CGColor;
@@ -982,46 +989,26 @@ static NSMutableArray *floatingWindows = nil;
         if (needsUpdate) {
             // [Foreground Sovereignty] Final Hardening: Force occluded=NO and visibility=2 to ensure hardware access (Camera/Mic)
             @try {
-                if ([settings respondsToSelector:@selector(setOccluded:)]) {
-                    [settings setValue:@NO forKey:@"occluded"];
-                }
-                if ([settings respondsToSelector:@selector(setVisibility:)]) {
-                    [settings setValue:@2 forKey:@"visibility"];
-                }
-                // 禁止分屏 App 触发自动锁屏
-                if ([settings respondsToSelector:@selector(setIdleTimerDisabled:)]) {
-                    [settings setValue:@YES forKey:@"idleTimerDisabled"];
-                }
-                
-                // [Foreground Sovereignty] Force interruptionPolicy to 1 (Suppress)
-                // This is critical for camera/mic apps and video playback to prevent the system from pausing capture/playback.
-                if ([settings respondsToSelector:@selector(setInterruptionPolicy:)]) {
-                    [settings setInterruptionPolicy:1];
-                } else {
-                    @try { [settings setValue:@1 forKey:@"interruptionPolicy"]; } @catch (NSException *e) {}
-                }
-
-                // [Deactivation Immunity] Clear deactivationReasons in foreground enforcement
-                if ([settings respondsToSelector:@selector(setDeactivationReasons:)]) {
-                    @try { [settings setValue:@0 forKey:@"deactivationReasons"]; } @catch (NSException *e) {}
-                }
-            } @catch (NSException *e) {}
+                // 强制修正 Settings 关键属性以维持前台表现
+                [settings setValue:@NO forKey:@"occluded"];
+                [settings setValue:@2 forKey:@"visibility"];
+                [settings setValue:@YES forKey:@"idleTimerDisabled"];
+                [settings setInterruptionPolicy:1]; // Suppress
+                [settings setValue:@0 forKey:@"deactivationReasons"];
+            } @catch (NSException *e) {
+                CV3LogToFile(@"[Error] 设置强制 Scene 参数失败: %@", e);
+            }
 
             [self.targetScene updateSettings:settings withTransitionContext:nil];
+            
+            // 确保内容状态强制为前台
             if ([self.targetScene respondsToSelector:@selector(_setContentState:)]) {
                 [self.targetScene _setContentState:2]; 
             }
             
-            // [Optimization] 只有在设置真正发生变更时，才重置 Presentation Context。
-            // 避免在每个 Scene 背景化通知中都触发 Context 重置，减少画面暂停的可能性。
-            if (self.hostView && [self.hostView respondsToSelector:@selector(_setPresentationContext:)]) {
-                UIScenePresentationContext *context = [[%c(UIScenePresentationContext) alloc] _initWithDefaultValues];
-                if ([context respondsToSelector:@selector(setPresentedLayerTypes:)]) [context setPresentedLayerTypes:31];
-                if ([context respondsToSelector:@selector(setAppearanceStyle:)]) [context setAppearanceStyle:2];
-                if ([context respondsToSelector:@selector(setClipsToBounds:)]) [context setClipsToBounds:YES];
-                [self.hostView performSelector:@selector(_setPresentationContext:) withObject:context];
-                CV3LogToFile(@"[Lifecycle] 已同步更新 %@ 渲染上下文", self.bundleID);
-            }
+            // 立即实施层级重刷，而非等待主循环
+            [self refreshHostViewPresentation];
+            CV3LogToFile(@"[Lifecycle] 已强制更新 %@ 场景设置与渲染上下文", self.bundleID);
         }
     } @catch (NSException *e) {
         CV3LogToFile(@"[Error] enforceSceneForegroundState 异常: %@", e);
@@ -1584,7 +1571,7 @@ static NSMutableArray *floatingWindows = nil;
                     }
                     
                     if (hostedView) {
-                        hostedView.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+                        hostedView.layer.cornerRadius = CV3Style.cornerRadius;
                         hostedView.layer.masksToBounds = YES;
                         
                         self.hostView = hostedView;
@@ -1758,8 +1745,8 @@ static NSMutableArray *floatingWindows = nil;
 
         // 2. 惯性畸变 (Liquid Glass)
         CGFloat velMag = sqrt(lastVelocity.x * lastVelocity.x + lastVelocity.y * lastVelocity.y);
-        CGFloat rawStretch = velMag / kChevronPhysicsConstants.stretchDamping;
-        CGFloat stretch = kChevronPhysicsConstants.maxStretch * (1.0 - exp(-rawStretch)); 
+        CGFloat rawStretch = velMag / CV3Style.stretchDamping;
+        CGFloat stretch = CV3Style.maxStretch * (1.0 - exp(-rawStretch)); 
         CGFloat angle = atan2(lastVelocity.y, lastVelocity.x);
         
         [CATransaction begin];
@@ -1883,8 +1870,8 @@ static NSMutableArray *floatingWindows = nil;
 }
 
 - (void)restoreFromStash {
-    // 强制提升 WindowLevel 并置顶，确保成为主焦点，但不能超过控制中心 (kChevronWindowLevels.maxBound)
-    self.windowLevel = kChevronWindowLevels.floatingApp; 
+    // 强制提升 WindowLevel 并置顶，确保成为主焦点，但不能超过控制中心 (CV3Style.maxBound)
+    self.windowLevel = CV3Style.floatingApp; 
     [self makeKeyAndVisible];
     [self setWindowFocused:YES];
 
@@ -2838,7 +2825,7 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
         // 建议2：搜索框液态响应 (Liquid Search Focus)
         // 面板圆角呼吸动画：28pt -> 32pt -> 28pt
         CABasicAnimation *cornerAnim = [CABasicAnimation animationWithKeyPath:@"cornerRadius"];
-        cornerAnim.fromValue = @(kChevronLayoutConstants.cornerRadius);
+        cornerAnim.fromValue = @(CV3Style.cornerRadius);
         cornerAnim.toValue = @(32.0);
         cornerAnim.duration = 0.6;
         cornerAnim.autoreverses = YES;
@@ -2953,11 +2940,11 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
     CGFloat maxW, maxH;
     
     if (isLandscape) {
-        maxW = h - (safe.top + safe.bottom + kChevronLayoutConstants.safeAreaBreath * 2);
-        maxH = w - (safe.left + safe.right + kChevronLayoutConstants.safeAreaBreath * 2);
+        maxW = h - (safe.top + safe.bottom + CV3Style.safeAreaBreath * 2);
+        maxH = w - (safe.left + safe.right + CV3Style.safeAreaBreath * 2);
     } else {
-        maxW = w - (safe.left + safe.right + kChevronLayoutConstants.safeAreaBreath * 2);
-        maxH = h - (safe.top + safe.bottom + kChevronLayoutConstants.safeAreaBreath * 2);
+        maxW = w - (safe.left + safe.right + CV3Style.safeAreaBreath * 2);
+        maxH = h - (safe.top + safe.bottom + CV3Style.safeAreaBreath * 2);
     }
     return CGSizeMake(maxW, maxH);
 }
@@ -3153,7 +3140,7 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
     self.bezierLayer.fillColor = [UIColor labelColor].CGColor;
     self.bezierBlur.layer.mask = self.bezierLayer; 
     
-    self.panelContainer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kChevronLayoutConstants.panelW, kChevronLayoutConstants.panelH)];
+    self.panelContainer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, CV3Style.panelW, CV3Style.panelH)];
     self.panelContainer.backgroundColor = [UIColor clearColor];
     self.panelContainer.hidden = YES;
     self.panelContainer.layer.shadowColor = [UIColor blackColor].CGColor;
@@ -3175,7 +3162,7 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
 
     self.appPanel = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];    self.appPanel.frame = self.panelContainer.bounds;
     self.appPanel.backgroundColor = [[UIColor clearColor] colorWithAlphaComponent:0.0]; // 移除黄色测试色
-    self.appPanel.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+    self.appPanel.layer.cornerRadius = CV3Style.cornerRadius;
     if (@available(iOS 13.0, *)) {
         self.appPanel.layer.cornerCurve = kCACornerCurveContinuous;
     }
@@ -3201,7 +3188,7 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
     self.innerGlowLayer.frame = self.appPanel.bounds;
     self.innerGlowLayer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.45].CGColor;
     self.innerGlowLayer.borderWidth = 0.3;
-    self.innerGlowLayer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+    self.innerGlowLayer.cornerRadius = CV3Style.cornerRadius;
     if (@available(iOS 13.0, *)) {
         self.innerGlowLayer.cornerCurve = kCACornerCurveContinuous;
     }
@@ -3213,7 +3200,7 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
     [self.appPanel.layer addSublayer:self.specularHighlight];
 
     self.dispersionContainer = [[UIView alloc] initWithFrame:self.appPanel.bounds];
-    self.dispersionContainer.layer.cornerRadius = kChevronLayoutConstants.cornerRadius;
+    self.dispersionContainer.layer.cornerRadius = CV3Style.cornerRadius;
     if (@available(iOS 13.0, *)) {
         self.dispersionContainer.layer.cornerCurve = kCACornerCurveContinuous;
     }
@@ -3280,9 +3267,9 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
         else self.greenGlow = glow;
     }
 
-    self.trafficCapsule = [[UIView alloc] initWithFrame:CGRectMake(16, 14, kChevronLayoutConstants.trafficCapsuleW, kChevronLayoutConstants.trafficCapsuleH)];
+    self.trafficCapsule = [[UIView alloc] initWithFrame:CGRectMake(16, 14, CV3Style.trafficCapsuleW, CV3Style.trafficCapsuleH)];
     self.trafficCapsule.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.08];
-    self.trafficCapsule.layer.cornerRadius = kChevronLayoutConstants.trafficCapsuleH / 2.0;
+    self.trafficCapsule.layer.cornerRadius = CV3Style.trafficCapsuleH / 2.0;
     [self.panelContainer addSubview:self.trafficCapsule];
     
     NSMutableArray *dots = [NSMutableArray array];
@@ -3290,13 +3277,13 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
     for (int i = 0; i < 3; i++) {
         UIButton *dotBtn = [UIButton buttonWithType:UIButtonTypeCustom];
         // 扩展热区：每个按钮占据更大的点击范围 (约 17.3x24)
-        CGFloat btnW = (kChevronLayoutConstants.trafficCapsuleW - 12) / 3.0;
-        dotBtn.frame = CGRectMake(6 + i * btnW, 0, btnW, kChevronLayoutConstants.trafficCapsuleH);
+        CGFloat btnW = (CV3Style.trafficCapsuleW - 12) / 3.0;
+        dotBtn.frame = CGRectMake(6 + i * btnW, 0, btnW, CV3Style.trafficCapsuleH);
         
         // 视觉圆点作为子视图，保持原有 8x8 外观
-        UIView *visualDot = [[UIView alloc] initWithFrame:CGRectMake((btnW - kChevronLayoutConstants.trafficDotSize)/2, (kChevronLayoutConstants.trafficCapsuleH - kChevronLayoutConstants.trafficDotSize)/2, kChevronLayoutConstants.trafficDotSize, kChevronLayoutConstants.trafficDotSize)];
+        UIView *visualDot = [[UIView alloc] initWithFrame:CGRectMake((btnW - CV3Style.trafficDotSize)/2, (CV3Style.trafficCapsuleH - CV3Style.trafficDotSize)/2, CV3Style.trafficDotSize, CV3Style.trafficDotSize)];
         visualDot.backgroundColor = tc[i];
-        visualDot.layer.cornerRadius = kChevronLayoutConstants.trafficDotSize / 2.0;
+        visualDot.layer.cornerRadius = CV3Style.trafficDotSize / 2.0;
         visualDot.userInteractionEnabled = NO;
         [dotBtn addSubview:visualDot];
         
@@ -3313,7 +3300,7 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
     self.trafficDots = dots;
 
 #pragma mark - Search Bar Setup
-    UIView *searchContainer = [[UIView alloc] initWithFrame:CGRectMake(15, 50, kChevronLayoutConstants.panelW - 30, 36)];
+    UIView *searchContainer = [[UIView alloc] initWithFrame:CGRectMake(15, 50, CV3Style.panelW - 30, 36)];
     searchContainer.backgroundColor = [UIColor clearColor];
     [self.appPanel.contentView addSubview:searchContainer];
 
@@ -3340,7 +3327,7 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
     [searchContainer addSubview:self.searchField];
 
 #pragma mark - No Results Label Setup
-    self.noResultsLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 150, kChevronLayoutConstants.panelW, 40)];
+    self.noResultsLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 150, CV3Style.panelW, 40)];
     self.noResultsLabel.text = @"未找到相关应用";
     self.noResultsLabel.textColor = [UIColor secondaryLabelColor];
     self.noResultsLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
@@ -3349,12 +3336,12 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
     [self.appPanel.contentView addSubview:self.noResultsLabel];
 
     self.selectedCategory = @"全部";
-    self.categoryBar = [[UIScrollView alloc] initWithFrame:CGRectMake(15, 96, kChevronLayoutConstants.panelW - 30, 40)];
+    self.categoryBar = [[UIScrollView alloc] initWithFrame:CGRectMake(15, 96, CV3Style.panelW - 30, 40)];
     self.categoryBar.showsHorizontalScrollIndicator = NO;
     self.categoryBar.backgroundColor = [UIColor clearColor];
     [self.appPanel.contentView addSubview:self.categoryBar];
 
-    self.resizingHandle = [[CV3ResizeHandleView alloc] initWithFrame:CGRectMake(kChevronLayoutConstants.panelW - 40, kChevronLayoutConstants.panelH - 40, 40, 40)];
+    self.resizingHandle = [[CV3ResizeHandleView alloc] initWithFrame:CGRectMake(CV3Style.panelW - 40, CV3Style.panelH - 40, 40, 40)];
     self.resizingHandle.backgroundColor = [UIColor clearColor];
     [self.panelContainer addSubview:self.resizingHandle];
     
@@ -3383,7 +3370,7 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
     layout.minimumInteritemSpacing = 5.0;
     layout.minimumLineSpacing = 10.0;
     // 调整 CollectionView 的 y 起点以避开搜索框和分类栏 (从 96 移至 140)
-    self.collectionView = [[UICollectionView alloc] initWithFrame:CGRectMake(0, 140, kChevronLayoutConstants.panelW, kChevronLayoutConstants.panelH-140) collectionViewLayout:layout];
+    self.collectionView = [[UICollectionView alloc] initWithFrame:CGRectMake(0, 140, CV3Style.panelW, CV3Style.panelH-140) collectionViewLayout:layout];
     self.collectionView.dataSource = self; self.collectionView.delegate = self;
     self.collectionView.backgroundColor = [UIColor clearColor];
     self.collectionView.delaysContentTouches = NO; // 关键：禁用触碰延迟实现即时反馈
@@ -3947,7 +3934,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 #pragma mark - 核心修复：基于投影的全方位边界钳位
         CGRect screenBounds = self.bounds;
         UIEdgeInsets safe = self.safeAreaInsets;
-        CGFloat breath = kChevronLayoutConstants.safeAreaBreath;
+        CGFloat breath = CV3Style.safeAreaBreath;
         UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
         BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
         
@@ -4127,10 +4114,10 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     CGFloat h = bounds.size.height;
     
     // 计算安全区域内的有效绘图区
-    CGRect safeBounds = CGRectMake(safe.left + kChevronLayoutConstants.safeAreaBreath, 
-                                   safe.top + kChevronLayoutConstants.safeAreaBreath, 
-                                   w - safe.left - safe.right - 2 * kChevronLayoutConstants.safeAreaBreath, 
-                                   h - safe.top - safe.bottom - 2 * kChevronLayoutConstants.safeAreaBreath);
+    CGRect safeBounds = CGRectMake(safe.left + CV3Style.safeAreaBreath, 
+                                   safe.top + CV3Style.safeAreaBreath, 
+                                   w - safe.left - safe.right - 2 * CV3Style.safeAreaBreath, 
+                                   h - safe.top - safe.bottom - 2 * CV3Style.safeAreaBreath);
                                    
     return CGPointMake(CGRectGetMidX(safeBounds), CGRectGetMidY(safeBounds));
 }
@@ -4147,9 +4134,9 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         // 最大化/重置逻辑也同步触发
         [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.8 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
             CGSize maxSize = [self calculateMaxPanelSize];
-            CGFloat targetW = MIN(kChevronLayoutConstants.panelW, maxSize.width);
-            CGFloat targetH = MIN(kChevronLayoutConstants.panelH, maxSize.height);
-            targetH = MAX(targetH, kChevronLayoutConstants.minHeight);
+            CGFloat targetW = MIN(CV3Style.panelW, maxSize.width);
+            CGFloat targetH = MIN(CV3Style.panelH, maxSize.height);
+            targetH = MAX(targetH, CV3Style.minHeight);
             
             self.panelContainer.bounds = CGRectMake(0, 0, targetW, targetH);
             self.panelContainer.center = [self calculateTargetCenter];
@@ -4184,20 +4171,20 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     switch (orientation) {
         case UIInterfaceOrientationLandscapeLeft:
             self.systemEdgePan.edges = UIRectEdgeTop;
-            self.edgeTriggerView.frame = CGRectMake(0, 0, w, kChevronLayoutConstants.triggerHotzoneWidth);
+            self.edgeTriggerView.frame = CGRectMake(0, 0, w, CV3Style.triggerHotzoneWidth);
             break;
         case UIInterfaceOrientationLandscapeRight:
             self.systemEdgePan.edges = UIRectEdgeBottom;
-            self.edgeTriggerView.frame = CGRectMake(0, h - kChevronLayoutConstants.triggerHotzoneWidth, w, kChevronLayoutConstants.triggerHotzoneWidth);
+            self.edgeTriggerView.frame = CGRectMake(0, h - CV3Style.triggerHotzoneWidth, w, CV3Style.triggerHotzoneWidth);
             break;
         case UIInterfaceOrientationPortraitUpsideDown:
             self.systemEdgePan.edges = UIRectEdgeLeft;
-            self.edgeTriggerView.frame = CGRectMake(0, safe.top, kChevronLayoutConstants.triggerHotzoneWidth, h - safe.top - kChevronLayoutConstants.triggerBottomOffset);
+            self.edgeTriggerView.frame = CGRectMake(0, safe.top, CV3Style.triggerHotzoneWidth, h - safe.top - CV3Style.triggerBottomOffset);
             break;
         case UIInterfaceOrientationPortrait:
         default:
             self.systemEdgePan.edges = UIRectEdgeRight;
-            self.edgeTriggerView.frame = CGRectMake(w - kChevronLayoutConstants.triggerHotzoneWidth, safe.top, kChevronLayoutConstants.triggerHotzoneWidth, h - safe.top - kChevronLayoutConstants.triggerBottomOffset);
+            self.edgeTriggerView.frame = CGRectMake(w - CV3Style.triggerHotzoneWidth, safe.top, CV3Style.triggerHotzoneWidth, h - safe.top - CV3Style.triggerBottomOffset);
             break;
     }
 
@@ -4210,9 +4197,9 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     // 动态计算面板尺寸 (使用常量并确保不超出安全区域)
     CGSize maxSize = [self calculateMaxPanelSize];
 
-    CGFloat targetW = MIN(kChevronLayoutConstants.panelW, maxSize.width);
-    CGFloat targetH = MIN(kChevronLayoutConstants.panelH, maxSize.height);
-    targetH = MAX(targetH, kChevronLayoutConstants.minHeight);
+    CGFloat targetW = MIN(CV3Style.panelW, maxSize.width);
+    CGFloat targetH = MIN(CV3Style.panelH, maxSize.height);
+    targetH = MAX(targetH, CV3Style.minHeight);
 
     CGRect panelBounds = CGRectMake(0, 0, targetW, targetH);    
     // 计算目标旋转
@@ -4255,7 +4242,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             self.collectionView.frame = CGRectMake(0, 140, targetW, targetH - 140);
             self.noResultsLabel.frame = CGRectMake(0, 150, targetW, 40);
             
-            self.trafficCapsule.frame = CGRectMake(16, 14, kChevronLayoutConstants.trafficCapsuleW, kChevronLayoutConstants.trafficCapsuleH);
+            self.trafficCapsule.frame = CGRectMake(16, 14, CV3Style.trafficCapsuleW, CV3Style.trafficCapsuleH);
             [self updateResizingHandleFrame];
             
             [CATransaction begin];
@@ -4573,9 +4560,9 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
         // 计算当前环境下合法的尺寸 (同步 layoutSubviews 逻辑)
         CGSize maxSize = [self calculateMaxPanelSize];        
-        CGFloat targetW = MIN(kChevronLayoutConstants.panelW, maxSize.width);
-        CGFloat targetH = MIN(kChevronLayoutConstants.panelH, maxSize.height);
-        targetH = MAX(targetH, kChevronLayoutConstants.minHeight);
+        CGFloat targetW = MIN(CV3Style.panelW, maxSize.width);
+        CGFloat targetH = MIN(CV3Style.panelH, maxSize.height);
+        targetH = MAX(targetH, CV3Style.minHeight);
         
         // 重置视差形变，防止修改 frame 时发生坐标跳变 (Geometry Jump)
         self.appPanel.transform = CGAffineTransformIdentity;
@@ -4596,7 +4583,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         self.collectionView.frame = CGRectMake(0, 140, targetW, targetH - 140);
         self.noResultsLabel.frame = CGRectMake(0, 150, targetW, 40);
         
-        self.trafficCapsule.frame = CGRectMake(16, 14, kChevronLayoutConstants.trafficCapsuleW, kChevronLayoutConstants.trafficCapsuleH);
+        self.trafficCapsule.frame = CGRectMake(16, 14, CV3Style.trafficCapsuleW, CV3Style.trafficCapsuleH);
         [self updateResizingHandleFrame];
         self.contrastBackdrop.frame = self.appPanel.bounds;
         self.innerGlowLayer.frame = self.appPanel.bounds;
@@ -4747,8 +4734,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
     // 建议2：视差解耦 (Parallax Decoupling) 2.0 - 多平面深度体系
     // 核心原理：层级越高（越靠近用户），位移系数越大
-    CGFloat panelDX = deltaRoll * kChevronPhysicsConstants.parallaxPanelFactor;
-    CGFloat panelDY = deltaPitch * kChevronPhysicsConstants.parallaxPanelFactor;
+    CGFloat panelDX = deltaRoll * CV3Style.parallaxPanelFactor;
+    CGFloat panelDY = deltaPitch * CV3Style.parallaxPanelFactor;
     self.appPanel.transform = CGAffineTransformMakeTranslation(panelDX, panelDY);
 
     // 建议 3：Glow & Content Depth (发光与内容深度差)
@@ -4768,18 +4755,18 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     }
 
     // 装饰件深度视差 (Layered Decoration Parallax) + 惯性衰减 (Inertial Damping)
-    CGFloat targetDecoDX = deltaRoll * kChevronPhysicsConstants.parallaxDecoFactor;
-    CGFloat targetDecoDY = deltaPitch * kChevronPhysicsConstants.parallaxDecoFactor;
+    CGFloat targetDecoDX = deltaRoll * CV3Style.parallaxDecoFactor;
+    CGFloat targetDecoDY = deltaPitch * CV3Style.parallaxDecoFactor;
 
     // 惯性平滑逻辑：使用插值 (Lerp) 实现物理质量感
     CGFloat oldDecoDX = self.currentDecoDX;
     CGFloat oldDecoDY = self.currentDecoDY;
-    self.currentDecoDX += (targetDecoDX - self.currentDecoDX) * kChevronPhysicsConstants.lerpFactor;
-    self.currentDecoDY += (targetDecoDY - self.currentDecoDY) * kChevronPhysicsConstants.lerpFactor;
+    self.currentDecoDX += (targetDecoDX - self.currentDecoDX) * CV3Style.lerpFactor;
+    self.currentDecoDY += (targetDecoDY - self.currentDecoDY) * CV3Style.lerpFactor;
 
     // 建议：触觉阻尼 (Haptic Damping Feedback)
     CGFloat frameDisplacement = hypot(self.currentDecoDX - oldDecoDX, self.currentDecoDY - oldDecoDY);
-    if (frameDisplacement > kChevronPhysicsConstants.hapticThreshold) { 
+    if (frameDisplacement > CV3Style.hapticThreshold) { 
         static NSTimeInterval lastHapticTime = 0;
         NSTimeInterval now = CACurrentMediaTime();
         if (now - lastHapticTime > 0.1) { 
@@ -5239,7 +5226,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 - (void)applyAdaptiveLevel {
     // 建议：层级对齐 (Level Alignment)
     // 根据 GEMINI.md 规范，锁定在 panel (2099) 以确保覆盖所有第三方 App，且保持在控制中心之下
-    CGFloat targetLevel = kChevronWindowLevels.panel; 
+    CGFloat targetLevel = CV3Style.panel; 
     
     if (self.windowLevel != targetLevel) {
         self.windowLevel = targetLevel;
@@ -5291,7 +5278,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         CV3LogToFile(@"[Debug] 拦截到非法的 unhide 请求 (当前处于系统压制状态)");
         [super setHidden:YES];
         self.alpha = 0;
-        self.windowLevel = kChevronWindowLevels.background; // 降到最低层
+        self.windowLevel = CV3Style.background; // 降到最低层
         return;
     }
     
@@ -5603,7 +5590,7 @@ static NSTimeInterval lastLogTime = 0;
                     for (CV3FloatingAppWindow *win in floatingWindows) {
                         if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
                             // 保持窗口原生圆角，防止系统在 Home 手势时强加巨大的圆角
-                            return kChevronLayoutConstants.cornerRadius;
+                            return CV3Style.cornerRadius;
                         }
                     }
                 }
@@ -5958,7 +5945,7 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                 } else {
                     cv3_keyboardWindow = [[CV3PassthroughWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
                 }
-                cv3_keyboardWindow.windowLevel = kChevronWindowLevels.keyboard;
+                cv3_keyboardWindow.windowLevel = CV3Style.keyboard;
                 cv3_keyboardWindow.backgroundColor = [UIColor clearColor];
                 cv3_keyboardWindow.hidden = NO;
             }
