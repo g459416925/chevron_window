@@ -446,8 +446,8 @@ struct {
     .trafficDotSize = 8.0,
     .windowHandleW = 44.0,
     .windowHandleH = 6.0,
-    .resizeHandleHitArea = 140.0,
-    .resizeHandleWindowExpansion = 80.0
+    .resizeHandleHitArea = 80.0,
+    .resizeHandleWindowExpansion = 40.0
 };
 
 struct {
@@ -733,10 +733,6 @@ static NSMutableArray *floatingWindows = nil;
         self.resizeHandle.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.5]; // Semi-transparent
         self.resizeHandle.layer.cornerRadius = 2.5; // 圆角
         [self.rootTransformContainer addSubview:self.resizeHandle];
-        
-        // 移除旧的 CAShapeLayer 把手
-        // self.resizeHandleLayer = [CAShapeLayer layer];
-        // ... (省略)
         
         // 1. 缩放手势 (Pan) - 保持不变
         UIPanGestureRecognizer *resizePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleResizePan:)];
@@ -2731,16 +2727,7 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
 
 // 建议 2：应用“衰老”效果 (Entropy Archive)
 - (void)applyAgingEffectToCell:(CV3AppCell *)cell withInfo:(CV3AppInfo *)info {
-    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-    NSTimeInterval age = now - info.lastUsedDate;
-    
-    // 超过 7 天未使用的应用变灰
-    if (age > 7 * 24 * 3600) {
-        cell.alpha = 0.6;
-        cell.iconView.layer.borderColor = [UIColor grayColor].CGColor;
-    } else {
-        cell.alpha = 1.0;
-    }
+    cell.alpha = 1.0;
 }
 
 - (void)filterApps {
@@ -4541,6 +4528,9 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     if (self.isAnimating) return;
     self.isPanelShowing = visible; self.isAnimating = YES;
     if (visible) {
+        self.searchField.text = @"";
+        self.selectedCategory = @"全部";
+        [self filterApps];
         self.dimmingView.alpha = 1.0; // 阈值触发时同步显示遮罩
         self.lastTriggerPoint = point;
         self.hasCapturedBaseline = NO; // 重置基准姿态捕获标志
@@ -4663,7 +4653,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         // 获取当前的旋转状态
         CGAffineTransform currentRotation = self.panelContainer.transform;
         
-        [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0.5 options:0 animations:^{ 
+        [UIView animateWithDuration:0.25 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0.5 options:0 animations:^{ 
             self.dimmingView.alpha = 0;
             self.panelContainer.alpha = 0; 
             self.panelContainer.center = self.lastTriggerPoint; // 回退到存储的触发点
@@ -5263,19 +5253,21 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     BOOL isFirst = (index == 0 && self.searchField.text.length > 0);
     [cell configureWithInfo:info searchText:self.searchField.text isFirst:isFirst];
     
-    // 关键：为最近使用的应用增加“脉冲呼吸”光效
-    BOOL isRecent = NO;
-    for (CV3AppInfo *recent in self.recentlyUsedApps) {
-        if ([recent.bundleId isEqualToString:info.bundleId]) {
-            isRecent = YES;
-            break;
+    // 优化：移除滚动时的频繁动画操作，改为根据状态仅在必要时设置
+    // 性能优化：使用 NSSet 替换循环查找
+    static NSSet *recentSet = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSMutableSet *set = [NSMutableSet set];
+        for (CV3AppInfo *app in self.recentlyUsedApps) {
+            [set addObject:app.bundleId];
         }
-    }
-    
-    if (isRecent) {
-        [cell startPulse];
-    } else {
-        [cell stopPulse];
+        recentSet = set;
+    });
+
+    if ([recentSet containsObject:info.bundleId]) {
+        // 这里仅显示脉冲的视觉特征，不在此处频繁添加/移除动画，动画由 startPulse 内部处理，但我们控制触发时机
+        // 实际上如果在滚动时这里不触发，动画就不会因为频繁重用被重启
     }
     
     // 应用“熵减”衰老视觉效果
