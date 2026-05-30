@@ -3235,8 +3235,12 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
         self.appPanel.layer.cornerCurve = kCACornerCurveContinuous;
     }
     self.appPanel.layer.masksToBounds = YES;
-    self.appPanel.layer.borderWidth = 0.4;
+    self.appPanel.layer.borderWidth = 0.5; // 建议：微增描边宽度以强化边缘抗锯齿
     self.appPanel.layer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.2].CGColor;
+    
+    // 建议：注入三线性过滤 (Trilinear Filtering) 消除次像素位移锯齿
+    self.appPanel.layer.magnificationFilter = kCAFilterTrilinear;
+    self.appPanel.layer.minificationFilter = kCAFilterTrilinear;
     
     // 1. 对比度增强层 (Contrast Booster): 极淡的黑色，用于压住背景杂色，让 App 图标更浮出
     self.contrastBackdrop = [[UIView alloc] initWithFrame:self.appPanel.bounds];
@@ -4804,7 +4808,33 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     // 核心原理：层级越高（越靠近用户），位移系数越大
     CGFloat panelDX = deltaRoll * CV3Style.parallaxPanelFactor;
     CGFloat panelDY = deltaPitch * CV3Style.parallaxPanelFactor;
-    self.appPanel.transform = CGAffineTransformMakeTranslation(panelDX, panelDY);
+    
+    // 核心修复：停止移动整个 appPanel 以避免边缘空白 (The "Gaps" Fix)
+    // 相反，我们移动内部的每一个组件，利用背景模糊层已有的 1.15x 缩放作为安全边距
+    self.appPanel.transform = CGAffineTransformIdentity; 
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    for (UIView *subview in self.appPanel.subviews) {
+        if ([NSStringFromClass([subview class]) containsString:@"Backdrop"]) {
+            // 背景层：保持 1.15x 缩放的同时增加位移，由于有 15% 的溢出，位移不会导致露底
+            subview.transform = CGAffineTransformConcat(CGAffineTransformMakeScale(1.15, 1.15), CGAffineTransformMakeTranslation(panelDX, panelDY));
+        }
+    }
+    
+    // 移动内容层 (Content Parallax)
+    CGAffineTransform contentParallax = CGAffineTransformMakeTranslation(panelDX, panelDY);
+    self.searchField.superview.transform = contentParallax;
+    self.categoryBar.transform = contentParallax;
+    self.collectionView.transform = contentParallax;
+    self.noResultsLabel.transform = contentParallax;
+    
+    // 移动特效层 (Effect Layers)
+    self.contrastBackdrop.transform = contentParallax;
+    self.whiteFilter.transform = contentParallax;
+    self.dispersionContainer.transform = contentParallax;
+    self.specularHighlight.affineTransform = contentParallax;
+    [CATransaction commit];
 
     // 建议 3：Glow & Content Depth (发光与内容深度差)
     // 内发光层位移略大于面板，创造玻璃边缘的折射感
