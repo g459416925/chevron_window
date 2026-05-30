@@ -542,6 +542,7 @@ static NSMutableArray *floatingWindows = nil;
 // Pro Enhancements
 @property (nonatomic, assign) BOOL isFocused;
 @property (nonatomic, assign) BOOL isClosing;
+@property (nonatomic, assign) BOOL isInLayout;
 @property (nonatomic, assign) CGPoint lastVelocity;
 @property (nonatomic, strong) UIView *crystalPreviewContainer;
 @property (nonatomic, strong) UIView *splashView;
@@ -557,6 +558,7 @@ static NSMutableArray *floatingWindows = nil;
 - (void)updateAdaptiveColor;
 - (void)setWindowFocused:(BOOL)focused;
 - (void)restoreFromStash;
+- (void)setTargetOrientation:(UIInterfaceOrientation)orientation;
 - (void)applyCurrentTransformWithScale:(CGFloat)scale;
 - (void)handleTransitionGhosting;
 - (void)refreshHostViewPresentation;
@@ -1306,23 +1308,16 @@ static NSMutableArray *floatingWindows = nil;
 }
 
 - (void)layoutSubviews {
-    if (self.isStashed) return; // 核心：隐藏状态下跳过布局更新，防止干扰图标状态
+    if (self.isStashed || self.isInLayout) return; 
+    self.isInLayout = YES;
 
     UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
-    BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
     
-    // 1. 物理外壳跟随旋转：确保 UIWindow 的 bounds 与当前设备方向完全匹配
-    // 物理宽度在横屏下应该是较大的那个值
-    BOOL currentBoundsIsLandscape = self.bounds.size.width > self.bounds.size.height;
-    if (isLandscape && !currentBoundsIsLandscape) {
-        self.bounds = CGRectMake(0, 0, self.bounds.size.height, self.bounds.size.width);
-    } else if (!isLandscape && currentBoundsIsLandscape) {
-        self.bounds = CGRectMake(0, 0, self.bounds.size.height, self.bounds.size.width);
-    }
-
+    // [Safety] 移除在 layoutSubviews 中直接修改 bounds 的逻辑，该逻辑已移至 setTargetOrientation 或全局同步 Hook。
+    // 直接调用 super 进行基础布局。
     [super layoutSubviews];
     
-    // 物理尺寸 (Physical Dimensions) - 此时物理外壳已经根据方向完成了翻转
+    // 物理尺寸 (Physical Dimensions)
     CGFloat physicalW = self.bounds.size.width;
     CGFloat physicalH = self.bounds.size.height;
     
@@ -1465,6 +1460,7 @@ static NSMutableArray *floatingWindows = nil;
         self.hostContainerProxy.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
         self.hostContainerProxy.transform = CGAffineTransformMakeScale(uniformScale, uniformScale);
     }
+    self.isInLayout = NO;
 }
 
 - (void)clampToScreenBounds {
@@ -5448,8 +5444,15 @@ static NSTimeInterval lastLogTime = 0;
             isUpdating = YES;
             // 使用异步确保当前 layout 周期执行完毕，避免重入导致的错位
             dispatch_async(dispatch_get_main_queue(), ^{
+                BOOL isLandscape = UIInterfaceOrientationIsLandscape(currentOrientation);
+                
                 if (sharedWindow) {
                     sharedWindow.targetOrientation = currentOrientation;
+                    BOOL currentIsLandscape = sharedWindow.bounds.size.width > sharedWindow.bounds.size.height;
+                    if (isLandscape != currentIsLandscape) {
+                        CGRect b = sharedWindow.bounds;
+                        sharedWindow.bounds = CGRectMake(0, 0, b.size.height, b.size.width);
+                    }
                     [sharedWindow attachToCurrentActiveScene];
                     [sharedWindow setNeedsLayout];
                 }
@@ -5458,6 +5461,13 @@ static NSTimeInterval lastLogTime = 0;
                     for (CV3FloatingAppWindow *win in floatingWindows) {
                         if ([win isKindOfClass:[CV3FloatingAppWindow class]] && !win.isClosing) {
                             win.targetOrientation = currentOrientation; // 核心：同步目标方向
+                            
+                            BOOL winIsLandscape = win.bounds.size.width > win.bounds.size.height;
+                            if (isLandscape != winIsLandscape) {
+                                CGRect b = win.bounds;
+                                win.bounds = CGRectMake(0, 0, b.size.height, b.size.width);
+                            }
+                            
                             [win attachToCurrentActiveScene];
                             [win setNeedsLayout];
                         }
