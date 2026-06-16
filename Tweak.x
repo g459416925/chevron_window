@@ -270,7 +270,7 @@ struct {
     .springVelocity = 0.8,
     // 窗口层级
     .maxBound = 2100.0,
-    .floatingApp = 2098.5,
+    .floatingApp = 999.0,
     .panel = 2099.0,
     .background = -1.0,
     .keyboard = 10000.0,
@@ -670,7 +670,7 @@ static NSMutableArray *floatingWindows = nil;
         
         self.bundleID = bundleID;
         self.center = center;
-        self.windowLevel = CV3Style.floatingApp; // 覆盖在面板之上，但不超过控制中心 (CV3Style.maxBound)
+        self.windowLevel = CV3Style.floatingApp; // 高于普通 App，但低于通知栏/控制中心
         self.backgroundColor = [UIColor clearColor];
         self.alpha = 1.0;
         
@@ -1102,6 +1102,7 @@ static NSMutableArray *floatingWindows = nil;
     
     if (focused) {
         [self makeKeyAndVisible];
+        self.windowLevel = CV3Style.floatingApp;
         // Dim other windows
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if (win != self && [win isKindOfClass:[CV3FloatingAppWindow class]]) [win setWindowFocused:NO];
@@ -1910,9 +1911,10 @@ static NSMutableArray *floatingWindows = nil;
 }
 
 - (void)restoreFromStash {
-    // 强制提升 WindowLevel 并置顶，确保成为主焦点，但不能超过控制中心 (CV3Style.maxBound)
+    // 恢复为普通 App 之上的浮窗层级，保留系统通知栏/控制中心在上方
     self.windowLevel = CV3Style.floatingApp; 
     [self makeKeyAndVisible];
+    self.windowLevel = CV3Style.floatingApp;
     [self setWindowFocused:YES];
 
     if (self.isStashed) {
@@ -3610,6 +3612,7 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
                         CV3FloatingAppWindow *floatingWindow = [[CV3FloatingAppWindow alloc] initWithBundleID:bundleID center:screenPoint windowScene:self.windowScene];
                         [floatingWindows addObject:floatingWindow];
                         [floatingWindow makeKeyAndVisible];
+                        floatingWindow.windowLevel = CV3Style.floatingApp;
                     }
                 });
                 
@@ -5969,6 +5972,7 @@ static NSTimeInterval lastLogTime = 0;
             if ([win isKindOfClass:[CV3FloatingAppWindow class]]) {
                 [win setHidden:NO];
                 [win makeKeyAndVisible];
+                win.windowLevel = CV3Style.floatingApp;
             }
         }
     }
@@ -6164,6 +6168,7 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
             if ([win isKindOfClass:[CV3FloatingAppWindow class]] && !win.isClosing) {
                 [win setHidden:NO];
                 [win makeKeyAndVisible];
+                win.windowLevel = CV3Style.floatingApp;
                 [win refreshHostViewPresentation];
             }
         }
