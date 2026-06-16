@@ -435,6 +435,16 @@ struct {
 
 @interface CV3RootViewController : UIViewController
 @end
+
+static dispatch_queue_t CV3LogQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("com.xu.chevronv3.log", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
 static void CV3LogToFile(NSString *format, ...) {
     va_list args;
     va_start(args, format);
@@ -456,7 +466,7 @@ static void CV3LogToFile(NSString *format, ...) {
     // 立即输出到系统日志，作为第一层保障
     NSLog(@"[ChevronV3] %@", message);
 
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+    dispatch_async(CV3LogQueue(), ^{
         @try {
             NSFileManager *fm = [NSFileManager defaultManager];
             NSString *logPath = @"/var/mobile/Documents/ChevronV3_Logs.txt";
@@ -2384,6 +2394,7 @@ static NSMutableArray *floatingWindows = nil;
     self.isClosing = YES;
     
     CV3LogToFile(@"[Lifecycle] 正在关闭窗口: %@", self.bundleID);
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
     self.hidden = YES;
     [self syncWindowBoundsToClient];
     if (self.rbsAssertion) {
@@ -2487,6 +2498,7 @@ static NSMutableArray *floatingWindows = nil;
 
 - (void)dealloc {
     CV3LogToFile(@"[Lifecycle] CV3FloatingAppWindow Dealloc: %@", self.bundleID);
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
     if (self.rbsAssertion) {
         [self.rbsAssertion invalidate];
         self.rbsAssertion = nil;
@@ -2524,6 +2536,7 @@ static NSMutableArray *floatingWindows = nil;
 @property (nonatomic, strong) UISelectionFeedbackGenerator *selectionFeedback;
 @property (nonatomic, strong) NSTimer *heartbeatTimer;
 @property (nonatomic, assign) BOOL isKeyboardVisible; 
+@property (nonatomic, assign) BOOL observersRegistered;
 @property (nonatomic, assign) BOOL hasBeenMoved;
 @property (nonatomic, strong) UIView *dimmingView;
 @property (nonatomic, strong) UIView *resizingHandle;
@@ -5133,24 +5146,43 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 - (void)show {
     [self attachToCurrentActiveScene];
     self.hidden = NO;
-    
-    [[NSNotificationCenter defaultCenter] addObserver:self 
-                                             selector:@selector(attachToCurrentActiveScene) 
-                                                 name:UISceneDidActivateNotification 
-                                               object:nil];
-                                               
-    [[NSNotificationCenter defaultCenter] addObserver:self 
-                                             selector:@selector(handleMemoryWarning) 
-                                                 name:UIApplicationDidReceiveMemoryWarningNotification 
-                                               object:nil];
+
+    if (!self.observersRegistered) {
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(attachToCurrentActiveScene)
+                                                     name:UISceneDidActivateNotification
+                                                   object:nil];
+
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(handleMemoryWarning)
+                                                     name:UIApplicationDidReceiveMemoryWarningNotification
+                                                   object:nil];
+
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillShow:) name:UIKeyboardWillShowNotification object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillHide:) name:UIKeyboardWillHideNotification object:nil];
+        self.observersRegistered = YES;
+    }
                                                
     if (!self.heartbeatTimer) {
         self.heartbeatTimer = [NSTimer scheduledTimerWithTimeInterval:5.0 target:self selector:@selector(monitorState) userInfo:nil repeats:YES];
         [[NSRunLoop mainRunLoop] addTimer:self.heartbeatTimer forMode:NSRunLoopCommonModes];
     }
-    
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillShow:) name:UIKeyboardWillShowNotification object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillHide:) name:UIKeyboardWillHideNotification object:nil];
+}
+
+- (void)cleanupRuntimeResources {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    self.observersRegistered = NO;
+
+    if (self.heartbeatTimer) {
+        [self.heartbeatTimer invalidate];
+        self.heartbeatTimer = nil;
+    }
+
+    [self stopLiquidMotion];
+}
+
+- (void)dealloc {
+    [self cleanupRuntimeResources];
 }
 
 
