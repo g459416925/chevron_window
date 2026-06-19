@@ -245,6 +245,9 @@ struct {
     CGFloat trafficDotSize;
     CGFloat windowHandleW;
     CGFloat windowHandleH;
+    CGFloat floatingChromeH;
+    CGFloat floatingChromeControlSize;
+    CGFloat floatingChromeCornerRadius;
     CGFloat resizeHandleHitArea;
     CGFloat resizeHandleWindowExpansion;
 } static const CV3Style = {
@@ -288,6 +291,9 @@ struct {
     .trafficDotSize = 8.0,
     .windowHandleW = 44.0,
     .windowHandleH = 6.0,
+    .floatingChromeH = 28.0,
+    .floatingChromeControlSize = 20.0,
+    .floatingChromeCornerRadius = 18.0,
     .resizeHandleHitArea = 80.0,
     .resizeHandleWindowExpansion = 40.0
 };
@@ -804,6 +810,11 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 @property (nonatomic, strong) UIView *clippingContainer; 
 @property (nonatomic, strong) UIView *hostContainerProxy;
 @property (nonatomic, strong) UIView *hostView;
+@property (nonatomic, strong) UIView *windowChromeView;
+@property (nonatomic, strong) UIView *chromeDragHandle;
+@property (nonatomic, strong) UIButton *chromeCloseButton;
+@property (nonatomic, strong) UIButton *chromeMinimizeButton;
+@property (nonatomic, strong) UIButton *chromeModeButton;
 @property (nonatomic, strong) UIView *resizeHandle;
 @property (nonatomic, strong) CAShapeLayer *resizeHandleLayer;
 @property (nonatomic, strong) FBScene *targetScene;
@@ -847,6 +858,11 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (void)refreshHostViewPresentation;
 - (void)normalizeStashedGrabberLayout;
 - (void)updateResizeHandleAppearance;
+- (void)updateFloatingChromeAppearance;
+- (UIButton *)chromeButtonWithTitle:(NSString *)title action:(SEL)action;
+- (void)handleChromeCloseAction:(id)sender;
+- (void)handleChromeMinimizeAction:(id)sender;
+- (void)handleChromeModeAction:(id)sender;
 - (void)enforcePortraitWindowGeometry;
 - (void)applyInterfaceOrientation:(UIInterfaceOrientation)orientation force:(BOOL)force;
 - (void)applyTrustedOrientationNow;
@@ -871,6 +887,10 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
     return CGRectContainsPoint(hitFrame, point);
 }
 @end
+
+static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
+    (void)preferredScene;
+}
 
 %hook UIWindow
 - (NSString *)_role {
@@ -1119,6 +1139,47 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
     }
 }
 
+- (UIButton *)chromeButtonWithTitle:(NSString *)title action:(SEL)action {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button.backgroundColor = [[UIColor colorWithWhite:1.0 alpha:1.0] colorWithAlphaComponent:0.12];
+    button.tintColor = [[UIColor whiteColor] colorWithAlphaComponent:0.88];
+    button.titleLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
+    [button setTitle:title forState:UIControlStateNormal];
+    [button setTitleColor:[[UIColor whiteColor] colorWithAlphaComponent:0.88] forState:UIControlStateNormal];
+    [button setTitleColor:[UIColor whiteColor] forState:UIControlStateHighlighted];
+    button.layer.cornerRadius = CV3Style.floatingChromeControlSize / 2.0;
+    button.layer.masksToBounds = YES;
+    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    return button;
+}
+
+- (void)updateFloatingChromeAppearance {
+    self.windowChromeView.backgroundColor = [UIColor clearColor];
+    self.windowChromeView.layer.cornerRadius = 0;
+    self.chromeModeButton.hidden = YES;
+    self.chromeMinimizeButton.hidden = YES;
+    self.chromeCloseButton.hidden = YES;
+
+    self.chromeDragHandle.backgroundColor = [[UIColor systemGrayColor] colorWithAlphaComponent:0.72];
+    self.chromeDragHandle.layer.shadowColor = [UIColor blackColor].CGColor;
+    self.chromeDragHandle.layer.shadowOffset = CGSizeMake(0, 0.5);
+    self.chromeDragHandle.layer.shadowOpacity = 0.18;
+    self.chromeDragHandle.layer.shadowRadius = 1.5;
+}
+
+- (void)handleChromeCloseAction:(id)sender {
+    [self closeWindow];
+}
+
+- (void)handleChromeMinimizeAction:(id)sender {
+    [self handleHideAction];
+}
+
+- (void)handleChromeModeAction:(id)sender {
+    [self setWindowFocused:YES];
+    [self applyCurrentTransformWithScale:1.0];
+}
+
 - (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene {
     if (windowScene) {
         self = [super initWithWindowScene:windowScene];
@@ -1156,7 +1217,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
         
         self.layer.shadowOpacity = 0;
         self.layer.shadowRadius = 0;
-        self.layer.cornerRadius = CV3Style.cornerRadius;
+        self.layer.cornerRadius = CV3Style.floatingChromeCornerRadius;
         if (@available(iOS 13.0, *)) {
             self.layer.cornerCurve = kCACornerCurveContinuous;
         }
@@ -1173,10 +1234,42 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
         self.appContentWrapper.backgroundColor = [UIColor clearColor];
         [self.rootTransformContainer addSubview:self.appContentWrapper];
 
+        self.windowChromeView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.bounds.size.width, CV3Style.floatingChromeH)];
+        self.windowChromeView.userInteractionEnabled = YES;
+        [self.appContentWrapper addSubview:self.windowChromeView];
+
+        self.chromeModeButton = [self chromeButtonWithTitle:@"[]" action:@selector(handleChromeModeAction:)];
+        self.chromeModeButton.hidden = YES;
+        [self.windowChromeView addSubview:self.chromeModeButton];
+
+        self.chromeMinimizeButton = [self chromeButtonWithTitle:@"-" action:@selector(handleChromeMinimizeAction:)];
+        self.chromeMinimizeButton.hidden = YES;
+        [self.windowChromeView addSubview:self.chromeMinimizeButton];
+
+        self.chromeCloseButton = [self chromeButtonWithTitle:@"x" action:@selector(handleChromeCloseAction:)];
+        self.chromeCloseButton.hidden = YES;
+        [self.windowChromeView addSubview:self.chromeCloseButton];
+
+        self.chromeDragHandle = [[UIView alloc] initWithFrame:CGRectZero];
+        self.chromeDragHandle.layer.cornerRadius = CV3Style.windowHandleH / 2.0;
+        self.chromeDragHandle.userInteractionEnabled = YES;
+        [self.windowChromeView addSubview:self.chromeDragHandle];
+
+        UILongPressGestureRecognizer *chromeMoveLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleMoveLongPress:)];
+        chromeMoveLongPress.minimumPressDuration = 0.18;
+        chromeMoveLongPress.delegate = self;
+        [self.windowChromeView addGestureRecognizer:chromeMoveLongPress];
+
+        UILongPressGestureRecognizer *handleMoveLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleMoveLongPress:)];
+        handleMoveLongPress.minimumPressDuration = 0.12;
+        handleMoveLongPress.delegate = self;
+        [self.chromeDragHandle addGestureRecognizer:handleMoveLongPress];
+        [self updateFloatingChromeAppearance];
+
         // 核心修复：引入非缩放裁剪层 (Clipping Container)
         // 该层的大小始终等于窗口大小，负责强制执行圆角裁剪，不受内部缩放影响
         self.clippingContainer = [[UIView alloc] initWithFrame:self.bounds];
-        self.clippingContainer.layer.cornerRadius = CV3Style.cornerRadius;
+        self.clippingContainer.layer.cornerRadius = CV3Style.floatingChromeCornerRadius;
         if (@available(iOS 13.0, *)) {
             self.clippingContainer.layer.cornerCurve = kCACornerCurveContinuous;
         }
@@ -1471,10 +1564,9 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
         darkStyle = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
     }
 
-    UIColor *handleColor = darkStyle ? [[UIColor whiteColor] colorWithAlphaComponent:0.72] : [[UIColor blackColor] colorWithAlphaComponent:0.48];
     UIColor *borderColor = darkStyle ? [[UIColor whiteColor] colorWithAlphaComponent:0.18] : [[UIColor blackColor] colorWithAlphaComponent:0.16];
-
-    self.resizeHandle.backgroundColor = handleColor;
+    
+    self.resizeHandle.backgroundColor = [UIColor clearColor];
     self.clippingContainer.layer.borderColor = borderColor.CGColor;
 }
 
@@ -1521,6 +1613,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
         // 真正从层级中移除画面渲染，释放资源
         [self.hostView removeFromSuperview];
         [self normalizeStashedGrabberLayout];
+        CV3UpdateFloatingBackdrop(self.windowScene);
     }];
 }
 
@@ -1591,9 +1684,11 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
     [super layoutSubviews];
     
     CGRect physicalFrame = self.bounds;
-    CGRect logicalFrame = [self visiblePortraitContentFrame];
-    CGFloat logicalW = logicalFrame.size.width;
-    CGFloat logicalH = logicalFrame.size.height;
+    CGFloat fullW = physicalFrame.size.width;
+    CGFloat fullH = physicalFrame.size.height;
+    CGRect contentFrame = [self visiblePortraitContentFrame];
+    CGFloat contentW = contentFrame.size.width;
+    CGFloat contentH = contentFrame.size.height;
 
     CGAffineTransform targetRotation = CGAffineTransformIdentity;
     self.baseRotationTransform = targetRotation;
@@ -1601,24 +1696,32 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
     // 3. 同步根旋转容器
     self.rootTransformContainer.transform = CGAffineTransformIdentity;
     self.rootTransformContainer.frame = physicalFrame;
-    self.rootTransformContainer.bounds = CGRectMake(0, 0, logicalW, logicalH);
+    self.rootTransformContainer.bounds = CGRectMake(0, 0, fullW, fullH);
     self.rootTransformContainer.center = CGPointMake(CGRectGetMidX(physicalFrame), CGRectGetMidY(physicalFrame));
     [self applyCurrentTransformWithScale:1.0];
 
     // 同步内容包装层
     self.appContentWrapper.bounds = self.rootTransformContainer.bounds;
-    self.appContentWrapper.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
+    self.appContentWrapper.center = CGPointMake(fullW / 2.0, fullH / 2.0);
+
+    CGFloat chromeH = MIN(CV3Style.floatingChromeH, MAX(0.0, fullH));
+    self.windowChromeView.frame = CGRectMake(0, 0, fullW, chromeH);
+    self.chromeModeButton.frame = CGRectZero;
+    self.chromeMinimizeButton.frame = CGRectZero;
+    self.chromeCloseButton.frame = CGRectZero;
+    self.chromeDragHandle.frame = CGRectMake((fullW - CV3Style.windowHandleW) / 2.0, 7.0, CV3Style.windowHandleW, CV3Style.windowHandleH);
+    [self updateFloatingChromeAppearance];
 
     // 4. 更新子组件布局 (基于逻辑坐标系)
-    self.clippingContainer.bounds = self.appContentWrapper.bounds;
-    self.clippingContainer.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
-    self.clippingContainer.layer.cornerRadius = CV3Style.cornerRadius;
+    self.clippingContainer.bounds = CGRectMake(0, 0, contentW, contentH);
+    self.clippingContainer.center = CGPointMake(contentW / 2.0, contentH / 2.0);
+    self.clippingContainer.layer.cornerRadius = CV3Style.floatingChromeCornerRadius;
     self.clippingContainer.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;
     [self updateResizeHandleAppearance];
     
     CGFloat barW = 100.0;
     CGFloat barH = 5.0;
-    self.resizeHandle.frame = CGRectMake((logicalW - barW) / 2.0, logicalH + 5, barW, barH);
+    self.resizeHandle.frame = CGRectMake((contentW - barW) / 2.0, contentH - barH - 2.0, barW, barH);
 
     // 5. 更新内部 App 场景 (等比铺满算法：基于窗口比例动态映射虚拟画布)
     if (self.hostContainerProxy) {
@@ -1626,7 +1729,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
         
         // 普通 App 按窗口宽度等比映射；强制竖屏承载的 App 也以窗口宽度铺满，
         // 溢出的竖屏高度由 clippingContainer 裁剪，避免横屏下画面缩成中间小块。
-        CGFloat uniformScale = logicalW / MAX(virtualBounds.size.width, 1.0);
+        CGFloat uniformScale = contentW / MAX(virtualBounds.size.width, 1.0);
         
         if (!self.liveResizeSnapshotView) {
             [self syncHostedSceneLayoutForce:NO];
@@ -1639,9 +1742,11 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
             self.hostView.frame = virtualBounds;
         }
         self.hostContainerProxy.layer.anchorPoint = CGPointMake(0.5, 0.5);
-        self.hostContainerProxy.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
+        self.hostContainerProxy.center = CGPointMake(contentW / 2.0, contentH / 2.0);
         self.hostContainerProxy.transform = CGAffineTransformMakeScale(uniformScale, uniformScale);
     }
+    [self.appContentWrapper bringSubviewToFront:self.windowChromeView];
+    [self.appContentWrapper bringSubviewToFront:self.resizeHandle];
     self.isInLayout = NO;
 }
 
@@ -1984,7 +2089,9 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
                     }
                 }
             }
-        } completion:nil];
+        } completion:^(BOOL finished) {
+            CV3UpdateFloatingBackdrop(self.windowScene);
+        }];
     }
 }
 
@@ -2060,6 +2167,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
             [self setNeedsLayout];
             [self layoutIfNeeded];
         } completion:^(BOOL finished) {
+            CV3UpdateFloatingBackdrop(self.windowScene);
             // 通知其他窗口更新堆叠状态
             for (CV3FloatingAppWindow *win in floatingWindows) {
                 if (win.isStashed) [win updateGrabberStack];
@@ -2149,17 +2257,18 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
     if (self.bundleID) {
         NSString *path = @"/var/mobile/Library/Preferences/com.xu.chevronv3.plist";
         NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithContentsOfFile:path] ?: [NSMutableDictionary dictionary];
+        CGRect contentFrame = [self visiblePortraitContentFrame];
         
         dict[[NSString stringWithFormat:@"isHosted_%@", self.bundleID]] = @(!self.hidden);
-        dict[[NSString stringWithFormat:@"currentWidth_%@", self.bundleID]] = @(self.bounds.size.width);
-        dict[[NSString stringWithFormat:@"currentHeight_%@", self.bundleID]] = @(self.bounds.size.height);
+        dict[[NSString stringWithFormat:@"currentWidth_%@", self.bundleID]] = @(contentFrame.size.width);
+        dict[[NSString stringWithFormat:@"currentHeight_%@", self.bundleID]] = @(contentFrame.size.height);
         
         [dict writeToFile:path atomically:YES];
         
         // 赋予全局可读权限，确保沙盒内的 App 能读取到尺寸数据
         chmod([path UTF8String], 0644);
         
-        CV3LogToFile(@"宿主窗口 (%@) 尺寸已同步: 宽度=%.1f, 高度=%.1f", self.bundleID, self.bounds.size.width, self.bounds.size.height);
+        CV3LogToFile(@"宿主窗口 (%@) 内容尺寸已同步: 宽度=%.1f, 高度=%.1f", self.bundleID, contentFrame.size.width, contentFrame.size.height);
         
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (CFStringRef)@"com.xu.chevronv3/SizeChanged", NULL, NULL, YES);
     }
@@ -2170,6 +2279,15 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 
     // 1. 深度优化：由于 App 渲染视图往往具备极高的触控优先级（尤其是带滚动的视图），
     // 我们必须在 hitTest 阶段显式干预，优先判定装饰性交互组件。
+
+    CGPoint pInChrome = [self convertPoint:point toView:self.windowChromeView];
+    if ([self.windowChromeView pointInside:pInChrome withEvent:event]) {
+        CGRect handleHitFrame = CGRectInset(self.chromeDragHandle.frame, -22.0, -12.0);
+        if (CGRectContainsPoint(handleHitFrame, pInChrome)) {
+            UIView *chromeHit = [self.windowChromeView hitTest:pInChrome withEvent:event];
+            return chromeHit ?: self.windowChromeView;
+        }
+    }
     
     // 检查右下角缩放/移动热区 (最高优先级)
     CGPoint pInResize = [self convertPoint:point toView:self.resizeHandle];
@@ -2203,7 +2321,9 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     // 强制要求其他手势（即来自宿主 App 内部的手势）在我们自己的控制手势面前失败
     // 这可以防止拖拽或缩放/位移窗口时，底下的 App 还在疯狂滚动
-    if (gestureRecognizer.view == self.resizeHandle) {
+    if (gestureRecognizer.view == self.resizeHandle ||
+        gestureRecognizer.view == self.windowChromeView ||
+        gestureRecognizer.view == self.chromeDragHandle) {
         return YES;
     }
     return NO;
@@ -2582,6 +2702,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
     
     self.windowScene = nil; // Clear scene attachment
     [floatingWindows removeObject:self];
+    CV3UpdateFloatingBackdrop(nil);
 }
 
 - (void)dealloc {
@@ -3761,6 +3882,7 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
                         [floatingWindows addObject:floatingWindow];
                         [floatingWindow makeKeyAndVisible];
                         floatingWindow.windowLevel = CV3Style.floatingApp;
+                        CV3UpdateFloatingBackdrop(self.windowScene);
                     }
                 });
                 
