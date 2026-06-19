@@ -214,38 +214,84 @@ typedef struct {
     float height;        // 窗口高度
 } CV3SharedGeometry;
 
-static CV3SharedGeometry *sharedGeometry = NULL;
-static int sharedGeometryFD = -1;
-
-static void CV3InitSharedGeometry(void) {
+static NSMutableDictionary<NSString *, NSMutableDictionary *> *CV3SharedGeometryRegistry(void) {
+    static NSMutableDictionary<NSString *, NSMutableDictionary *> *registry = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        NSString *path = @"/var/mobile/Library/Preferences/com.xu.chevronv3.shm";
-        NSFileManager *fm = [NSFileManager defaultManager];
-        NSString *parentDir = [path stringByDeletingLastPathComponent];
-        
-        @try {
-            if (![fm fileExistsAtPath:parentDir]) {
-                [fm createDirectoryAtPath:parentDir withIntermediateDirectories:YES attributes:nil error:nil];
-            }
-            
-            int fd = open([path UTF8String], O_RDWR | O_CREAT, 0666);
-            if (fd >= 0) {
-                ftruncate(fd, sizeof(CV3SharedGeometry));
-                chmod([path UTF8String], 0666); // 赋予全局读写权限，供沙盒 App 映射
-                
-                void *addr = mmap(NULL, sizeof(CV3SharedGeometry), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-                if (addr != MAP_FAILED) {
-                    sharedGeometry = (CV3SharedGeometry *)addr;
-                    sharedGeometryFD = fd;
-                    sharedGeometry->magic = 0x43563353;
-                    NSLog(@"[ChevronV3] [SHM] 跨进程 mmap 共享内存初始化成功：%p", sharedGeometry);
-                } else {
-                    close(fd);
-                }
-            }
-        } @catch (NSException *e) {}
+        registry = [NSMutableDictionary dictionary];
     });
+    return registry;
+}
+
+static NSString *CV3SanitizedGeometryIdentifier(NSString *bundleID) {
+    if (bundleID.length == 0) return @"default";
+
+    NSMutableCharacterSet *allowed = [NSMutableCharacterSet alphanumericCharacterSet];
+    [allowed addCharactersInString:@"._-"];
+
+    NSMutableString *sanitized = [NSMutableString stringWithCapacity:bundleID.length];
+    for (NSUInteger i = 0; i < bundleID.length; i++) {
+        unichar ch = [bundleID characterAtIndex:i];
+        if ([allowed characterIsMember:ch]) {
+            [sanitized appendFormat:@"%C", ch];
+        } else {
+            [sanitized appendString:@"_"];
+        }
+    }
+    return sanitized.length > 0 ? sanitized : @"default";
+}
+
+static CV3SharedGeometry *CV3SharedGeometryForBundleID(NSString *bundleID) {
+    if (bundleID.length == 0) return NULL;
+
+    NSMutableDictionary *registry = CV3SharedGeometryRegistry();
+    NSMutableDictionary *existingEntry = registry[bundleID];
+    if (existingEntry) {
+        return [existingEntry[@"pointer"] pointerValue];
+    }
+
+    NSString *sanitizedBundleID = CV3SanitizedGeometryIdentifier(bundleID);
+    NSString *path = [@"/var/mobile/Library/Preferences" stringByAppendingPathComponent:
+                      [NSString stringWithFormat:@"com.xu.chevronv3.%@.shm", sanitizedBundleID]];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *parentDir = [path stringByDeletingLastPathComponent];
+
+    @try {
+        if (![fm fileExistsAtPath:parentDir]) {
+            [fm createDirectoryAtPath:parentDir withIntermediateDirectories:YES attributes:nil error:nil];
+        }
+
+        int fd = open([path UTF8String], O_RDWR | O_CREAT, 0644);
+        if (fd < 0) {
+            return NULL;
+        }
+
+        if (ftruncate(fd, sizeof(CV3SharedGeometry)) != 0) {
+            close(fd);
+            return NULL;
+        }
+        chmod([path UTF8String], 0644);
+
+        void *addr = mmap(NULL, sizeof(CV3SharedGeometry), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (addr == MAP_FAILED) {
+            close(fd);
+            return NULL;
+        }
+
+        CV3SharedGeometry *geometry = (CV3SharedGeometry *)addr;
+        geometry->magic = 0x43563353;
+
+        registry[bundleID] = [@{
+            @"pointer": [NSValue valueWithPointer:geometry],
+            @"fd": @(fd),
+            @"path": path
+        } mutableCopy];
+
+        NSLog(@"[ChevronV3] [SHM] %@ geometry initialized at %p", bundleID, geometry);
+        return geometry;
+    } @catch (NSException *e) {
+        return NULL;
+    }
 }
 
 // --- 新增：集中化样式配置 ---
@@ -493,6 +539,15 @@ static dispatch_queue_t CV3LogQueue(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         queue = dispatch_queue_create("com.xu.chevronv3.log", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
+static dispatch_queue_t CV3AppLoadQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("com.xu.chevronv3.appload", DISPATCH_QUEUE_SERIAL);
     });
     return queue;
 }
@@ -909,6 +964,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 @property (nonatomic, assign) BOOL isCompactMode;
 @property (nonatomic, strong) UIView *liveResizeSnapshotView;
 @property (nonatomic, strong) RBSAssertion *rbsAssertion; 
+@property (nonatomic, assign) BOOL allowProcessTerminationOnClose;
 
 - (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene;
 - (void)triggerCollisionImpulse;
@@ -1764,6 +1820,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
         self.targetOrientation = currentOrientation;
         
         self.bundleID = bundleID;
+        self.allowProcessTerminationOnClose = NO;
         self.center = center;
         [self enforcePortraitWindowGeometry];
         self.windowLevel = CV3Style.floatingApp; // 高于普通 App，但低于通知栏/控制中心
@@ -2933,12 +2990,12 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
     if (self.bundleID) {
         CGRect contentFrame = [self visiblePortraitContentFrame];
         
-        // 1. 高频写入 mmap 共享内存（零磁盘 IO，跨进程物理共享）
-        CV3InitSharedGeometry();
-        if (sharedGeometry) {
-            sharedGeometry->isHosted = self.hidden ? 0 : 1;
-            sharedGeometry->width = (float)contentFrame.size.width;
-            sharedGeometry->height = (float)contentFrame.size.height;
+        // 1. 高频写入 bundle 级 mmap，避免多窗口互相覆盖状态
+        CV3SharedGeometry *geometry = CV3SharedGeometryForBundleID(self.bundleID);
+        if (geometry) {
+            geometry->isHosted = self.hidden ? 0 : 1;
+            geometry->width = (float)contentFrame.size.width;
+            geometry->height = (float)contentFrame.size.height;
         }
         
         // 2. 仅在需要通知的静态时刻，才落盘 Plist 提供持久化记录和兼容性
@@ -3370,7 +3427,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
     if (self.isClosing) return;
     self.isClosing = YES;
     
-    CV3LogToFile(@"[Lifecycle] 正在关闭窗口: %@", self.bundleID);
+    CV3LogToFile(@"[Lifecycle] 正在关闭窗口(默认仅分离宿主，不强杀应用): %@", self.bundleID);
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     self.hidden = YES;
     [self syncWindowBoundsToClient];
@@ -3416,58 +3473,9 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
     }
 
     self.targetScene = nil;
-
-    // [Aggressive Termination] Option A: Force kill the application to stop all system-level services
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (!self.bundleID) return;
-        
-        @try {
-            // 1. First attempt: Official SBApplication termination
-            SBApplication *app = [[%c(SBApplicationController) sharedInstance] applicationWithBundleIdentifier:self.bundleID];
-            if (app && [app respondsToSelector:@selector(_terminateWithReason:description:)]) {
-                CV3LogToFile(@"[Aggressive] 正在通过 SBApplication 终止应用: %@", self.bundleID);
-                [app _terminateWithReason:1 description:@"ChevronV3 Close"];
-            }
-
-            // 2. Second attempt: FBProcessManager with Context
-            FBProcessManager *procMgr = [%c(FBProcessManager) sharedInstance];
-            FBProcess *proc = [procMgr processForBundleIdentifier:self.bundleID];
-            if (proc) {
-                CV3LogToFile(@"[Aggressive] 发现活动进程 %d, 正在执行 FBProcess 终止...", proc.pid);
-                
-                @try {
-                    FBProcessTerminationContext *context = [[%c(FBProcessTerminationContext) alloc] init];
-                    context.explanation = @"ChevronV3 User Request";
-                    context.exceptionCode = 0xDEADBEEF;
-                    context.reportTermination = NO;
-                    
-                    if ([procMgr respondsToSelector:@selector(terminateProcess:withContext:)]) {
-                        [procMgr terminateProcess:proc withContext:context];
-                    } else if ([proc respondsToSelector:@selector(terminateWithContext:)]) {
-                        [proc terminateWithContext:context];
-                    } else {
-                        [proc terminate];
-                    }
-                } @catch (NSException *inner) {
-                    CV3LogToFile(@"[Error] FBProcess termination failed: %@", inner);
-                }
-
-                // 3. Final fallback: SIGKILL (The most aggressive way)
-                // We check if the process is still alive after a tiny delay
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    FBProcess *recheck = [[%c(FBProcessManager) sharedInstance] processForBundleIdentifier:self.bundleID];
-                    if (recheck && recheck.pid > 0) {
-                        CV3LogToFile(@"[Aggressive] 进程 %d 依然存活，发送 SIGKILL 强杀！", recheck.pid);
-                        kill(recheck.pid, SIGKILL);
-                    } else {
-                        CV3LogToFile(@"[Aggressive] 应用 %@ 已成功退出。", self.bundleID);
-                    }
-                });
-            }
-        } @catch (NSException *e) {
-            CV3LogToFile(@"[Error] 终止流程异常: %@", e);
-        }
-    });
+    if (self.allowProcessTerminationOnClose) {
+        CV3LogToFile(@"[Warning] allowProcessTerminationOnClose 已启用，但当前默认关闭路径不执行 kill: %@", self.bundleID);
+    }
     
     self.windowScene = nil; // Clear scene attachment
     [floatingWindows removeObject:self];
@@ -3570,6 +3578,7 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 @property (nonatomic, strong) NSArray<CV3AppInfo *> *recentlyUsedApps; 
 @property (nonatomic, strong) NSMutableSet *pinnedBundleIDs; 
 @property (nonatomic, strong) UILabel *noResultsLabel;
+@property (nonatomic, assign) NSUInteger appLoadGeneration;
 @property (nonatomic, assign) CGFloat lastHapticX;
 @property (nonatomic, strong) UIScreenEdgePanGestureRecognizer *systemEdgePan;
 @property (nonatomic, strong) CAGradientLayer *triggerPreviewLayer;
@@ -6050,79 +6059,97 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 }
 
 - (void)loadAppsAsync {
+    NSUInteger requestedGeneration = ++self.appLoadGeneration;
     BOOL needsFullReload = self.needsFullReload || self.apps.count == 0;
     NSArray<CV3AppInfo *> *appsSnapshot = [self.apps copy] ?: @[];
     NSSet *pinnedSnapshot = [self.pinnedBundleIDs copy] ?: [NSSet set];
 
-    dispatch_async(dispatch_get_global_queue(0,0), ^{
-        // 建议1：增量更新机制。如果不需要全量重载且列表不为空，则跳过重型资源获取过程
-        NSMutableArray<CV3AppInfo *> *workingApps = [NSMutableArray arrayWithCapacity:appsSnapshot.count];
-        for (CV3AppInfo *source in appsSnapshot) {
-            CV3AppInfo *copiedInfo = CV3CopyAppInfo(source);
-            if (copiedInfo) [workingApps addObject:copiedInfo];
-        }
+    dispatch_async(CV3AppLoadQueue(), ^{
+        @autoreleasepool {
+            NSMutableArray<CV3AppInfo *> *workingApps = [NSMutableArray arrayWithCapacity:appsSnapshot.count];
+            for (CV3AppInfo *source in appsSnapshot) {
+                CV3AppInfo *copiedInfo = CV3CopyAppInfo(source);
+                if (copiedInfo) [workingApps addObject:copiedInfo];
+            }
 
-        if (!needsFullReload && workingApps.count > 0) {
-            CV3LogToFile(@"[Debug] 命中增量更新，仅刷新置顶与排序状态");
-        } else {
-            CV3LogToFile(@"[Debug] 执行全量应用资源同步 (needsFullReload=%d)", needsFullReload);
-            [cv3IconCache removeAllObjects];
+            if (!needsFullReload && workingApps.count > 0) {
+                CV3LogToFile(@"[Debug] 命中增量更新，仅刷新置顶与排序状态 (generation=%lu)", (unsigned long)requestedGeneration);
+            } else {
+                CV3LogToFile(@"[Debug] 执行全量应用资源同步 (needsFullReload=%d, generation=%lu)", needsFullReload, (unsigned long)requestedGeneration);
+                [cv3IconCache removeAllObjects];
 
-            NSMutableArray *temp = [NSMutableArray array];
-            // 尝试从 SpringBoard 获取真正的桌面可见图标模型
-            id iconController = [NSClassFromString(@"SBIconController") sharedInstance];
-            id iconModel = nil;
-            if ([iconController respondsToSelector:@selector(iconManager)]) {
-                id iconManager = [iconController performSelector:@selector(iconManager)];
-                if ([iconManager respondsToSelector:@selector(model)]) {
-                    iconModel = [iconManager performSelector:@selector(model)];
+                NSMutableArray *temp = [NSMutableArray array];
+                id iconController = [NSClassFromString(@"SBIconController") sharedInstance];
+                id iconModel = nil;
+                if ([iconController respondsToSelector:@selector(iconManager)]) {
+                    id iconManager = [iconController performSelector:@selector(iconManager)];
+                    if ([iconManager respondsToSelector:@selector(model)]) {
+                        iconModel = [iconManager performSelector:@selector(model)];
+                    }
                 }
-            }
-            if (!iconModel && [iconController respondsToSelector:@selector(model)]) {
-                iconModel = [iconController performSelector:@selector(model)];
-            }
-            
-            if (iconModel && [iconModel respondsToSelector:@selector(leafIcons)]) {
-                id leafIcons = [iconModel performSelector:@selector(leafIcons)];
-                for (id icon in leafIcons) {
-                    if ([icon respondsToSelector:@selector(isApplicationIcon)] && [icon performSelector:@selector(isApplicationIcon)]) {
-                        NSString *bundleId = nil;
-                        if ([icon respondsToSelector:@selector(applicationBundleID)]) {
-                            bundleId = [icon performSelector:@selector(applicationBundleID)];
-                        } else if ([icon respondsToSelector:@selector(leafIdentifier)]) {
-                            bundleId = [icon performSelector:@selector(leafIdentifier)];
+                if (!iconModel && [iconController respondsToSelector:@selector(model)]) {
+                    iconModel = [iconController performSelector:@selector(model)];
+                }
+                
+                if (iconModel && [iconModel respondsToSelector:@selector(leafIcons)]) {
+                    id leafIcons = [iconModel performSelector:@selector(leafIcons)];
+                    for (id icon in leafIcons) {
+                        if ([icon respondsToSelector:@selector(isApplicationIcon)] && [icon performSelector:@selector(isApplicationIcon)]) {
+                            NSString *bundleId = nil;
+                            if ([icon respondsToSelector:@selector(applicationBundleID)]) {
+                                bundleId = [icon performSelector:@selector(applicationBundleID)];
+                            } else if ([icon respondsToSelector:@selector(leafIdentifier)]) {
+                                bundleId = [icon performSelector:@selector(leafIdentifier)];
+                            }
+                            
+                            NSString *name = nil;
+                            if ([icon respondsToSelector:@selector(displayNameForLocation:)]) {
+                                name = [icon performSelector:@selector(displayNameForLocation:) withObject:nil];
+                            }
+                            if (!name && [icon respondsToSelector:@selector(displayName)]) {
+                                name = [icon performSelector:@selector(displayName)];
+                            }
+                            
+                            if (!bundleId || !name) continue;
+                            
+                            CV3AppInfo *info = [[CV3AppInfo alloc] init];
+                            info.name = name;
+                            info.bundleId = bundleId;
+                            info.sbIcon = icon;
+                            [info generatePinyin];
+                            
+                            @try {
+                                Class LSAP = NSClassFromString(@"LSApplicationProxy");
+                                id proxy = nil;
+                                if ([LSAP respondsToSelector:@selector(applicationProxyForIdentifier:)]) {
+                                    proxy = [LSAP performSelector:@selector(applicationProxyForIdentifier:) withObject:bundleId];
+                                } else if ([LSAP respondsToSelector:@selector(applicationProxyForBundleIdentifier:)]) {
+                                    proxy = [LSAP performSelector:@selector(applicationProxyForBundleIdentifier:) withObject:bundleId];
+                                }
+                                if (proxy && [proxy respondsToSelector:@selector(genre)]) {
+                                    info.category = [proxy performSelector:@selector(genre)];
+                                }
+                            } @catch (NSException *e) {}
+                            if (!info.category) info.category = @"其他";
+                            
+                            info.icon = [UIImage _applicationIconImageForBundleIdentifier:bundleId format:10 scale:[UIScreen mainScreen].scale];
+                            if (info.icon) {
+                                [cv3IconCache setObject:info.icon forKey:bundleId];
+                                [temp addObject:info];
+                            }
                         }
-                        
-                        NSString *name = nil;
-                        if ([icon respondsToSelector:@selector(displayNameForLocation:)]) {
-                            name = [icon performSelector:@selector(displayNameForLocation:) withObject:nil];
-                        }
-                        if (!name && [icon respondsToSelector:@selector(displayName)]) {
-                            name = [icon performSelector:@selector(displayName)];
-                        }
-                        
-                        if (!bundleId || !name) continue;
-                        
+                    }
+                }
+                
+                if (temp.count == 0) {
+                    id ws = [NSClassFromString(@"LSApplicationWorkspace") defaultWorkspace];
+                    for (id p in [ws performSelector:@selector(allInstalledApplications)]) {
+                        if (![self shouldIncludeApp:p]) continue;
+                        NSString *bundleId = [p performSelector:@selector(bundleIdentifier)];
+                        NSString *name = [p performSelector:@selector(localizedName)];
                         CV3AppInfo *info = [[CV3AppInfo alloc] init];
                         info.name = name;
                         info.bundleId = bundleId;
-                        info.sbIcon = icon; 
-                        [info generatePinyin];
-                        
-                        @try {
-                            Class LSAP = NSClassFromString(@"LSApplicationProxy");
-                            id proxy = nil;
-                            if ([LSAP respondsToSelector:@selector(applicationProxyForIdentifier:)]) {
-                                proxy = [LSAP performSelector:@selector(applicationProxyForIdentifier:) withObject:bundleId];
-                            } else if ([LSAP respondsToSelector:@selector(applicationProxyForBundleIdentifier:)]) {
-                                proxy = [LSAP performSelector:@selector(applicationProxyForBundleIdentifier:) withObject:bundleId];
-                            }
-                            if (proxy && [proxy respondsToSelector:@selector(genre)]) {
-                                info.category = [proxy performSelector:@selector(genre)];
-                            }
-                        } @catch (NSException *e) {}
-                        if (!info.category) info.category = @"其他";
-                        
                         info.icon = [UIImage _applicationIconImageForBundleIdentifier:bundleId format:10 scale:[UIScreen mainScreen].scale];
                         if (info.icon) {
                             [cv3IconCache setObject:info.icon forKey:bundleId];
@@ -6130,72 +6157,63 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
                         }
                     }
                 }
+                workingApps = temp;
             }
-            
-            if (temp.count == 0) {
-                id ws = [NSClassFromString(@"LSApplicationWorkspace") defaultWorkspace];
-                for (id p in [ws performSelector:@selector(allInstalledApplications)]) {
-                    if (![self shouldIncludeApp:p]) continue;
-                    NSString *bundleId = [p performSelector:@selector(bundleIdentifier)];
-                    NSString *name = [p performSelector:@selector(localizedName)];
-                    CV3AppInfo *info = [[CV3AppInfo alloc] init];
-                    info.name = name;
-                    info.bundleId = bundleId;
-                    info.icon = [UIImage _applicationIconImageForBundleIdentifier:bundleId format:10 scale:[UIScreen mainScreen].scale];
-                    if (info.icon) {
-                        [cv3IconCache setObject:info.icon forKey:bundleId];
-                        [temp addObject:info];
-                    }
+
+            NSDictionary *usageData = [[NSUserDefaults standardUserDefaults] dictionaryForKey:@"CV3AppUsageData"];
+            NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+            NSTimeInterval sevenDaysInSeconds = 7 * 24 * 3600;
+
+            for (CV3AppInfo *info in workingApps) {
+                info.isPinned = [pinnedSnapshot containsObject:info.bundleId];
+                NSArray *ts = usageData[info.bundleId];
+                if (ts && ts.count > 0) {
+                    info.lastUsedDate = [[ts lastObject] doubleValue];
+                } else {
+                    info.lastUsedDate = 0;
                 }
             }
-            workingApps = temp;
+
+            [workingApps sortUsingComparator:^NSComparisonResult(CV3AppInfo *obj1, CV3AppInfo *obj2) {
+                if (obj1.isPinned != obj2.isPinned) return obj1.isPinned ? NSOrderedAscending : NSOrderedDescending;
+
+                NSArray *ts1 = usageData[obj1.bundleId];
+                NSArray *ts2 = usageData[obj2.bundleId];
+
+                double score1 = 0;
+                for (NSNumber *ts in ts1) {
+                    double diff = now - [ts doubleValue];
+                    if (diff < sevenDaysInSeconds) score1 += (1.0 / (diff / 3600.0 + 1.0));
+                }
+
+                double score2 = 0;
+                for (NSNumber *ts in ts2) {
+                    double diff = now - [ts doubleValue];
+                    if (diff < sevenDaysInSeconds) score2 += (1.0 / (diff / 3600.0 + 1.0));
+                }
+
+                if (score1 != score2) return score1 > score2 ? NSOrderedAscending : NSOrderedDescending;
+                if (obj1.lastUsedDate != obj2.lastUsedDate) return obj1.lastUsedDate > obj2.lastUsedDate ? NSOrderedAscending : NSOrderedDescending;
+                return [obj1.name localizedCaseInsensitiveCompare:obj2.name];
+            }];
+
+            NSArray<CV3AppInfo *> *sortedApps = [workingApps copy];
+
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (requestedGeneration != self.appLoadGeneration) {
+                    CV3LogToFile(@"[Debug] 丢弃过期应用列表结果 (generation=%lu, latest=%lu)",
+                                 (unsigned long)requestedGeneration,
+                                 (unsigned long)self.appLoadGeneration);
+                    return;
+                }
+
+                self.apps = [sortedApps mutableCopy];
+                if (needsFullReload) self.needsFullReload = NO;
+                self.recentlyUsedApps = [self.apps subarrayWithRange:NSMakeRange(0, MIN(12, self.apps.count))];
+                [self updateCategoryBar];
+                [self filterApps];
+            });
         }
-
-        // 始终刷新置顶状态与使用频率排序
-        NSDictionary *usageData = [[NSUserDefaults standardUserDefaults] dictionaryForKey:@"CV3AppUsageData"];
-        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-        NSTimeInterval sevenDaysInSeconds = 7 * 24 * 3600;
-
-        for (CV3AppInfo *info in workingApps) {
-            info.isPinned = [pinnedSnapshot containsObject:info.bundleId];
-            NSArray *ts = usageData[info.bundleId];
-            if (ts && ts.count > 0) {
-                info.lastUsedDate = [[ts lastObject] doubleValue];
-            } else {
-                info.lastUsedDate = 0;
-            }
-        }
-
-        [workingApps sortUsingComparator:^NSComparisonResult(CV3AppInfo *obj1, CV3AppInfo *obj2) {
-            // 1. 置顶优先
-            if (obj1.isPinned != obj2.isPinned) return obj1.isPinned ? NSOrderedAscending : NSOrderedDescending;
-
-            // 2. 熵减逻辑：最近使用过且频率高的排在前面
-            NSArray *ts1 = usageData[obj1.bundleId];
-            NSArray *ts2 = usageData[obj2.bundleId];
-
-            // 计算 7 天内的加权分数（最近的权重大）
-            double score1 = 0; for (NSNumber *ts in ts1) { double diff = now - [ts doubleValue]; if (diff < sevenDaysInSeconds) score1 += (1.0 / (diff / 3600.0 + 1.0)); }
-            double score2 = 0; for (NSNumber *ts in ts2) { double diff = now - [ts doubleValue]; if (diff < sevenDaysInSeconds) score2 += (1.0 / (diff / 3600.0 + 1.0)); }
-
-            if (score1 != score2) return score1 > score2 ? NSOrderedAscending : NSOrderedDescending;
-
-            // 3. 最后使用时间兜底
-            if (obj1.lastUsedDate != obj2.lastUsedDate) return obj1.lastUsedDate > obj2.lastUsedDate ? NSOrderedAscending : NSOrderedDescending;
-
-            // 4. 拼音/名称排序
-            return [obj1.name localizedCaseInsensitiveCompare:obj2.name];
-        }];
-
-        NSArray<CV3AppInfo *> *sortedApps = [workingApps copy];
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            self.apps = [sortedApps mutableCopy];
-            if (needsFullReload) self.needsFullReload = NO;
-            self.recentlyUsedApps = [self.apps subarrayWithRange:NSMakeRange(0, MIN(12, self.apps.count))];
-            [self updateCategoryBar];
-            [self filterApps];
-        });
     });
 }
 
@@ -6226,7 +6244,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     }
                                                
     if (!self.heartbeatTimer) {
-        self.heartbeatTimer = [NSTimer scheduledTimerWithTimeInterval:5.0 target:self selector:@selector(monitorState) userInfo:nil repeats:YES];
+        self.heartbeatTimer = [NSTimer scheduledTimerWithTimeInterval:15.0 target:self selector:@selector(monitorState) userInfo:nil repeats:YES];
         [[NSRunLoop mainRunLoop] addTimer:self.heartbeatTimer forMode:NSRunLoopCommonModes];
     }
 }
@@ -6307,11 +6325,35 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
 - (void)monitorState {
     @try {
-        [self attachToCurrentActiveScene];
-        
-        // 核心修复：同步监控所有浮动窗口的持久状态
+        if ([self isSystemUIActive]) return;
+
+        BOOL launcherNeedsRecovery = (self.windowScene == nil || self.hidden);
+        BOOL floatingNeedsRecovery = NO;
+
         for (CV3FloatingAppWindow *win in floatingWindows) {
-            if ([win respondsToSelector:@selector(attachToCurrentActiveScene)]) {
+            if (![win isKindOfClass:[CV3FloatingAppWindow class]] || win.isClosing || win.isStashed) continue;
+            BOOL hostDisconnected = (win.windowScene == nil || win.targetScene == nil || win.hostView == nil);
+            BOOL visibilityDrift = win.hidden;
+            if (hostDisconnected || visibilityDrift) {
+                floatingNeedsRecovery = YES;
+                break;
+            }
+        }
+
+        if (!launcherNeedsRecovery && !floatingNeedsRecovery && !self.isPanelShowing) {
+            return;
+        }
+
+        if (launcherNeedsRecovery || self.isPanelShowing) {
+            [self attachToCurrentActiveScene];
+        }
+
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if ([win isKindOfClass:[CV3FloatingAppWindow class]] &&
+                !win.isClosing &&
+                !win.isStashed &&
+                (floatingNeedsRecovery || win.windowScene == nil || win.targetScene == nil || win.hostView == nil || win.hidden) &&
+                [win respondsToSelector:@selector(attachToCurrentActiveScene)]) {
                 [win attachToCurrentActiveScene];
             }
         }
