@@ -3811,11 +3811,26 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
             [defaults synchronize];
         });
 
+        NSString *activeBundleID = [[self currentActiveBundleID] copy];
+        CV3BeginWorkspaceTransitionProtection([NSString stringWithFormat:@"LauncherOpen:%@", bid]);
         [self.searchField resignFirstResponder];
         [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
-        CV3BeginWorkspaceTransitionProtection([NSString stringWithFormat:@"LauncherOpen:%@", bid]);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-            [[NSClassFromString(@"LSApplicationWorkspace") defaultWorkspace] openApplicationWithBundleID:bid];
+
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+            @try {
+                BOOL hasForegroundApp = (activeBundleID.length > 0 &&
+                                         ![activeBundleID isEqualToString:@"com.apple.springboard"] &&
+                                         ![activeBundleID isEqualToString:bid]);
+                if (hasForegroundApp &&
+                    [[UIApplication sharedApplication] respondsToSelector:@selector(launchApplicationWithIdentifier:suspended:)]) {
+                    [[UIApplication sharedApplication] launchApplicationWithIdentifier:bid suspended:NO];
+                } else {
+                    [[NSClassFromString(@"LSApplicationWorkspace") defaultWorkspace] openApplicationWithBundleID:bid];
+                }
+            } @catch (NSException *e) {
+                CV3LogToFile(@"[Error] Launcher 打开普通应用失败 %@: %@", bid, e);
+                [[NSClassFromString(@"LSApplicationWorkspace") defaultWorkspace] openApplicationWithBundleID:bid];
+            }
         });
     }
 }
