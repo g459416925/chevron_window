@@ -289,10 +289,10 @@ struct {
     .trafficCapsuleW = 64.0,
     .trafficCapsuleH = 24.0,
     .trafficDotSize = 8.0,
-    .windowHandleW = 44.0,
-    .windowHandleH = 6.0,
+    .windowHandleW = 58.0,
+    .windowHandleH = 18.0,
     .floatingChromeH = 28.0,
-    .floatingChromeControlSize = 20.0,
+    .floatingChromeControlSize = 12.0,
     .floatingChromeCornerRadius = 18.0,
     .resizeHandleHitArea = 80.0,
     .resizeHandleWindowExpansion = 40.0
@@ -815,6 +815,9 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 @property (nonatomic, strong) UIButton *chromeCloseButton;
 @property (nonatomic, strong) UIButton *chromeMinimizeButton;
 @property (nonatomic, strong) UIButton *chromeModeButton;
+@property (nonatomic, strong) UIVisualEffectView *multitaskingMenuView;
+@property (nonatomic, assign) BOOL chromeControlsExpanded;
+@property (nonatomic, strong) NSTimer *chromeCollapseTimer;
 @property (nonatomic, strong) UIView *resizeHandle;
 @property (nonatomic, strong) CAShapeLayer *resizeHandleLayer;
 @property (nonatomic, strong) FBScene *targetScene;
@@ -844,6 +847,10 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 @property (nonatomic, assign) UIInterfaceOrientation targetOrientation;
 @property (nonatomic, assign) UIInterfaceOrientation lastLayoutOrientation;
 @property (nonatomic, assign) CGAffineTransform baseRotationTransform;
+@property (nonatomic, assign) CGRect preFullscreenFrame;
+@property (nonatomic, assign) CGRect preCompactFrame;
+@property (nonatomic, assign) BOOL isFullscreenMode;
+@property (nonatomic, assign) BOOL isCompactMode;
 @property (nonatomic, strong) UIView *liveResizeSnapshotView;
 @property (nonatomic, strong) RBSAssertion *rbsAssertion; 
 
@@ -859,10 +866,20 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (void)normalizeStashedGrabberLayout;
 - (void)updateResizeHandleAppearance;
 - (void)updateFloatingChromeAppearance;
+- (void)setChromeControlsExpanded:(BOOL)expanded animated:(BOOL)animated;
+- (void)scheduleChromeControlsCollapse;
+- (void)handleChromeControlTouchDown:(id)sender;
+- (void)handleChromeControlTap:(id)sender;
 - (UIButton *)chromeButtonWithTitle:(NSString *)title action:(SEL)action;
 - (void)handleChromeCloseAction:(id)sender;
 - (void)handleChromeMinimizeAction:(id)sender;
 - (void)handleChromeModeAction:(id)sender;
+- (void)toggleMultitaskingMenu;
+- (void)dismissMultitaskingMenu;
+- (void)handleFullscreenMenuAction:(id)sender;
+- (void)handleCompactMenuAction:(id)sender;
+- (void)handleCloseMenuAction:(id)sender;
+- (UIButton *)multitaskingMenuButtonWithTitle:(NSString *)title symbol:(NSString *)symbol action:(SEL)action;
 - (void)enforcePortraitWindowGeometry;
 - (void)applyInterfaceOrientation:(UIInterfaceOrientation)orientation force:(BOOL)force;
 - (void)applyTrustedOrientationNow;
@@ -1141,14 +1158,15 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
 
 - (UIButton *)chromeButtonWithTitle:(NSString *)title action:(SEL)action {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-    button.backgroundColor = [[UIColor colorWithWhite:1.0 alpha:1.0] colorWithAlphaComponent:0.12];
-    button.tintColor = [[UIColor whiteColor] colorWithAlphaComponent:0.88];
-    button.titleLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
-    [button setTitle:title forState:UIControlStateNormal];
-    [button setTitleColor:[[UIColor whiteColor] colorWithAlphaComponent:0.88] forState:UIControlStateNormal];
-    [button setTitleColor:[UIColor whiteColor] forState:UIControlStateHighlighted];
+    (void)title;
+    button.tintColor = [UIColor clearColor];
+    [button setTitle:nil forState:UIControlStateNormal];
+    [button setImage:nil forState:UIControlStateNormal];
     button.layer.cornerRadius = CV3Style.floatingChromeControlSize / 2.0;
     button.layer.masksToBounds = YES;
+    button.layer.borderWidth = 0.5 / [UIScreen mainScreen].scale;
+    button.layer.borderColor = [[UIColor blackColor] colorWithAlphaComponent:0.18].CGColor;
+    [button addTarget:self action:@selector(handleChromeControlTouchDown:) forControlEvents:UIControlEventTouchDown | UIControlEventTouchDragEnter];
     [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
     return button;
 }
@@ -1156,28 +1174,273 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
 - (void)updateFloatingChromeAppearance {
     self.windowChromeView.backgroundColor = [UIColor clearColor];
     self.windowChromeView.layer.cornerRadius = 0;
-    self.chromeModeButton.hidden = YES;
-    self.chromeMinimizeButton.hidden = YES;
-    self.chromeCloseButton.hidden = YES;
+    self.chromeModeButton.hidden = NO;
+    self.chromeMinimizeButton.hidden = NO;
+    self.chromeCloseButton.hidden = NO;
 
-    self.chromeDragHandle.backgroundColor = [[UIColor systemGrayColor] colorWithAlphaComponent:0.72];
+    self.chromeDragHandle.backgroundColor = self.chromeControlsExpanded ? [[UIColor systemBackgroundColor] colorWithAlphaComponent:0.36] : [UIColor clearColor];
+    self.chromeDragHandle.layer.cornerRadius = CV3Style.windowHandleH / 2.0;
     self.chromeDragHandle.layer.shadowColor = [UIColor blackColor].CGColor;
-    self.chromeDragHandle.layer.shadowOffset = CGSizeMake(0, 0.5);
-    self.chromeDragHandle.layer.shadowOpacity = 0.18;
-    self.chromeDragHandle.layer.shadowRadius = 1.5;
+    self.chromeDragHandle.layer.shadowOffset = CGSizeMake(0, 1.0);
+    self.chromeDragHandle.layer.shadowOpacity = self.chromeControlsExpanded ? 0.20 : 0.0;
+    self.chromeDragHandle.layer.shadowRadius = self.chromeControlsExpanded ? 4.0 : 0.0;
+
+    if (self.chromeControlsExpanded) {
+        self.chromeCloseButton.layer.borderWidth = 0.5 / [UIScreen mainScreen].scale;
+        self.chromeMinimizeButton.layer.borderWidth = 0.5 / [UIScreen mainScreen].scale;
+        self.chromeModeButton.layer.borderWidth = 0.5 / [UIScreen mainScreen].scale;
+        self.chromeCloseButton.backgroundColor = [UIColor colorWithRed:1.00 green:0.36 blue:0.32 alpha:0.96];
+        self.chromeMinimizeButton.backgroundColor = [UIColor colorWithRed:1.00 green:0.78 blue:0.28 alpha:0.96];
+        self.chromeModeButton.backgroundColor = [UIColor colorWithRed:0.22 green:0.82 blue:0.37 alpha:0.96];
+    } else {
+        self.chromeCloseButton.layer.borderWidth = 0;
+        self.chromeMinimizeButton.layer.borderWidth = 0;
+        self.chromeModeButton.layer.borderWidth = 0;
+        UIColor *dotColor = [[UIColor systemGrayColor] colorWithAlphaComponent:0.46];
+        self.chromeCloseButton.backgroundColor = dotColor;
+        self.chromeMinimizeButton.backgroundColor = dotColor;
+        self.chromeModeButton.backgroundColor = dotColor;
+    }
+
+    self.chromeCloseButton.transform = CGAffineTransformIdentity;
+    self.chromeMinimizeButton.transform = CGAffineTransformIdentity;
+    self.chromeModeButton.transform = CGAffineTransformIdentity;
+    self.chromeCloseButton.layer.cornerRadius = self.chromeCloseButton.bounds.size.height / 2.0;
+    self.chromeMinimizeButton.layer.cornerRadius = self.chromeMinimizeButton.bounds.size.height / 2.0;
+    self.chromeModeButton.layer.cornerRadius = self.chromeModeButton.bounds.size.height / 2.0;
+    self.chromeCloseButton.alpha = self.chromeControlsExpanded ? 1.0 : 0.64;
+    self.chromeMinimizeButton.alpha = self.chromeControlsExpanded ? 1.0 : 0.64;
+    self.chromeModeButton.alpha = self.chromeControlsExpanded ? 1.0 : 0.64;
+    [self.windowChromeView bringSubviewToFront:self.chromeCloseButton];
+    [self.windowChromeView bringSubviewToFront:self.chromeMinimizeButton];
+    [self.windowChromeView bringSubviewToFront:self.chromeModeButton];
+}
+
+- (void)setChromeControlsExpanded:(BOOL)expanded animated:(BOOL)animated {
+    self.chromeControlsExpanded = expanded;
+    void (^changes)(void) = ^{
+        [self updateFloatingChromeAppearance];
+    };
+    if (animated) {
+        [UIView animateWithDuration:0.18 delay:0 options:UIViewAnimationOptionCurveEaseOut animations:changes completion:nil];
+    } else {
+        changes();
+    }
+}
+
+- (void)scheduleChromeControlsCollapse {
+    [self.chromeCollapseTimer invalidate];
+    self.chromeCollapseTimer = [NSTimer scheduledTimerWithTimeInterval:1.8 target:self selector:@selector(collapseChromeControlsTimerFired:) userInfo:nil repeats:NO];
+    [[NSRunLoop mainRunLoop] addTimer:self.chromeCollapseTimer forMode:NSRunLoopCommonModes];
+}
+
+- (void)collapseChromeControlsTimerFired:(NSTimer *)timer {
+    self.chromeCollapseTimer = nil;
+    [self setChromeControlsExpanded:NO animated:YES];
+}
+
+- (void)handleChromeControlTouchDown:(id)sender {
+    [self.chromeCollapseTimer invalidate];
+    self.chromeCollapseTimer = nil;
+    [self setChromeControlsExpanded:YES animated:YES];
+}
+
+- (void)handleChromeControlTap:(id)sender {
+    [self setChromeControlsExpanded:YES animated:YES];
+    [self scheduleChromeControlsCollapse];
 }
 
 - (void)handleChromeCloseAction:(id)sender {
+    if (!self.chromeControlsExpanded) {
+        [self setChromeControlsExpanded:YES animated:YES];
+        [self scheduleChromeControlsCollapse];
+        return;
+    }
+    [self setChromeControlsExpanded:YES animated:YES];
     [self closeWindow];
 }
 
 - (void)handleChromeMinimizeAction:(id)sender {
+    if (!self.chromeControlsExpanded) {
+        [self setChromeControlsExpanded:YES animated:YES];
+        [self scheduleChromeControlsCollapse];
+        return;
+    }
+    [self setChromeControlsExpanded:YES animated:YES];
     [self handleHideAction];
 }
 
 - (void)handleChromeModeAction:(id)sender {
-    [self setWindowFocused:YES];
-    [self applyCurrentTransformWithScale:1.0];
+    if (!self.chromeControlsExpanded) {
+        [self setChromeControlsExpanded:YES animated:YES];
+        [self scheduleChromeControlsCollapse];
+        return;
+    }
+    [self setChromeControlsExpanded:YES animated:YES];
+    [self scheduleChromeControlsCollapse];
+    [self handleFullscreenMenuAction:sender];
+}
+
+- (UIButton *)multitaskingMenuButtonWithTitle:(NSString *)title symbol:(NSString *)symbol action:(SEL)action {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button.tintColor = [UIColor labelColor];
+    button.titleLabel.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold];
+    button.titleLabel.numberOfLines = 1;
+    button.backgroundColor = [UIColor clearColor];
+    button.layer.cornerRadius = 10.0;
+    if (@available(iOS 13.0, *)) {
+        UIImage *image = [UIImage systemImageNamed:symbol];
+        [button setImage:image forState:UIControlStateNormal];
+    }
+    [button setTitle:[NSString stringWithFormat:@" %@", title] forState:UIControlStateNormal];
+    [button setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
+    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    return button;
+}
+
+- (void)toggleMultitaskingMenu {
+    if (self.multitaskingMenuView && !self.multitaskingMenuView.hidden) {
+        [self dismissMultitaskingMenu];
+        return;
+    }
+
+    if (!self.multitaskingMenuView) {
+        UIBlurEffect *effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial];
+        self.multitaskingMenuView = [[UIVisualEffectView alloc] initWithEffect:effect];
+        self.multitaskingMenuView.clipsToBounds = YES;
+        self.multitaskingMenuView.layer.cornerRadius = 16.0;
+        if (@available(iOS 13.0, *)) {
+            self.multitaskingMenuView.layer.cornerCurve = kCACornerCurveContinuous;
+        }
+        self.multitaskingMenuView.layer.shadowColor = [UIColor blackColor].CGColor;
+        self.multitaskingMenuView.layer.shadowOffset = CGSizeMake(0, 8);
+        self.multitaskingMenuView.layer.shadowOpacity = 0.18;
+        self.multitaskingMenuView.layer.shadowRadius = 18.0;
+
+        UIButton *fullscreen = [self multitaskingMenuButtonWithTitle:@"全屏" symbol:@"rectangle.fill" action:@selector(handleFullscreenMenuAction:)];
+        UIButton *compact = [self multitaskingMenuButtonWithTitle:@"缩小" symbol:@"rectangle.inset.filled" action:@selector(handleCompactMenuAction:)];
+        UIButton *close = [self multitaskingMenuButtonWithTitle:@"关闭" symbol:@"xmark" action:@selector(handleCloseMenuAction:)];
+        fullscreen.tag = 101;
+        compact.tag = 102;
+        close.tag = 103;
+        [self.multitaskingMenuView.contentView addSubview:fullscreen];
+        [self.multitaskingMenuView.contentView addSubview:compact];
+        [self.multitaskingMenuView.contentView addSubview:close];
+        [self.appContentWrapper addSubview:self.multitaskingMenuView];
+    }
+
+    CGFloat menuW = MIN(250.0, MAX(210.0, self.bounds.size.width - 32.0));
+    CGFloat menuH = 54.0;
+    self.multitaskingMenuView.frame = CGRectMake((self.bounds.size.width - menuW) / 2.0, 24.0, menuW, menuH);
+    CGFloat itemW = menuW / 3.0;
+    for (UIButton *button in self.multitaskingMenuView.contentView.subviews) {
+        if (![button isKindOfClass:[UIButton class]]) continue;
+        NSInteger idx = button.tag - 101;
+        button.frame = CGRectMake(itemW * idx, 0, itemW, menuH);
+    }
+
+    self.multitaskingMenuView.hidden = NO;
+    self.multitaskingMenuView.alpha = 0;
+    self.multitaskingMenuView.transform = CGAffineTransformMakeScale(0.92, 0.92);
+    [self.appContentWrapper bringSubviewToFront:self.multitaskingMenuView];
+    [UIView animateWithDuration:0.18 delay:0 options:UIViewAnimationOptionCurveEaseOut animations:^{
+        self.multitaskingMenuView.alpha = 1.0;
+        self.multitaskingMenuView.transform = CGAffineTransformIdentity;
+    } completion:nil];
+}
+
+- (void)dismissMultitaskingMenu {
+    if (!self.multitaskingMenuView || self.multitaskingMenuView.hidden) return;
+    [UIView animateWithDuration:0.14 delay:0 options:UIViewAnimationOptionCurveEaseIn animations:^{
+        self.multitaskingMenuView.alpha = 0;
+        self.multitaskingMenuView.transform = CGAffineTransformMakeScale(0.96, 0.96);
+    } completion:^(BOOL finished) {
+        self.multitaskingMenuView.hidden = YES;
+        self.multitaskingMenuView.transform = CGAffineTransformIdentity;
+    }];
+}
+
+- (void)handleFullscreenMenuAction:(id)sender {
+    [self dismissMultitaskingMenu];
+
+    if (self.isFullscreenMode && !CGRectIsEmpty(self.preFullscreenFrame)) {
+        CGRect restoreFrame = self.preFullscreenFrame;
+        self.isFullscreenMode = NO;
+        self.isCompactMode = NO;
+        [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.86 initialSpringVelocity:0.0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
+            self.frame = restoreFrame;
+            [self setNeedsLayout];
+            [self layoutIfNeeded];
+        } completion:^(BOOL finished) {
+            [self syncHostedSceneLayoutForce:YES];
+            [self syncWindowBoundsToClient];
+        }];
+        return;
+    }
+
+    if (!self.isFullscreenMode) {
+        self.preFullscreenFrame = self.frame;
+        self.isFullscreenMode = YES;
+        self.isCompactMode = NO;
+    }
+
+    CGRect targetFrame = self.windowScene ? self.windowScene.coordinateSpace.bounds : [UIScreen mainScreen].bounds;
+    [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.86 initialSpringVelocity:0.0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
+        self.transform = CGAffineTransformIdentity;
+        self.frame = targetFrame;
+        [self setNeedsLayout];
+        [self layoutIfNeeded];
+    } completion:^(BOOL finished) {
+        [self syncHostedSceneLayoutForce:YES];
+        [self syncWindowBoundsToClient];
+    }];
+}
+
+- (void)handleCompactMenuAction:(id)sender {
+    [self dismissMultitaskingMenu];
+
+    if (self.isCompactMode) {
+        CGRect restoreFrame = !CGRectIsEmpty(self.preCompactFrame) ? self.preCompactFrame : self.preFullscreenFrame;
+        if (!CGRectIsEmpty(restoreFrame)) {
+            self.isCompactMode = NO;
+            self.isFullscreenMode = NO;
+            [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.86 initialSpringVelocity:0.0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
+                self.frame = restoreFrame;
+                [self setNeedsLayout];
+                [self layoutIfNeeded];
+            } completion:^(BOOL finished) {
+                [self syncHostedSceneLayoutForce:YES];
+                [self syncWindowBoundsToClient];
+            }];
+        }
+        return;
+    }
+
+    self.preCompactFrame = self.frame;
+    self.isCompactMode = YES;
+    self.isFullscreenMode = NO;
+
+    CGRect screenBounds = self.windowScene ? self.windowScene.coordinateSpace.bounds : [UIScreen mainScreen].bounds;
+    CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
+    CGFloat compactW = MIN(390.0, MAX(300.0, shortSide * 0.48));
+    CGFloat compactH = MIN(screenBounds.size.height - 80.0, compactW * 1.55);
+    CGFloat targetX = CGRectGetMaxX(screenBounds) - compactW - 14.0;
+    CGFloat targetY = CGRectGetMidY(screenBounds) - compactH / 2.0;
+    CGRect targetFrame = CGRectMake(targetX, MAX(CGRectGetMinY(screenBounds) + 20.0, targetY), compactW, compactH);
+
+    [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.86 initialSpringVelocity:0.0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
+        self.frame = targetFrame;
+        [self setNeedsLayout];
+        [self layoutIfNeeded];
+    } completion:^(BOOL finished) {
+        [self syncHostedSceneLayoutForce:YES];
+        [self syncWindowBoundsToClient];
+    }];
+}
+
+- (void)handleCloseMenuAction:(id)sender {
+    [self dismissMultitaskingMenu];
+    [self closeWindow];
 }
 
 - (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene {
@@ -1215,8 +1478,10 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
         self.backgroundColor = [UIColor clearColor];
         self.alpha = 1.0;
         
-        self.layer.shadowOpacity = 0;
-        self.layer.shadowRadius = 0;
+        self.layer.shadowColor = [UIColor blackColor].CGColor;
+        self.layer.shadowOffset = CGSizeMake(0, 10);
+        self.layer.shadowOpacity = 0.16;
+        self.layer.shadowRadius = 24.0;
         self.layer.cornerRadius = CV3Style.floatingChromeCornerRadius;
         if (@available(iOS 13.0, *)) {
             self.layer.cornerCurve = kCACornerCurveContinuous;
@@ -1238,16 +1503,13 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
         self.windowChromeView.userInteractionEnabled = YES;
         [self.appContentWrapper addSubview:self.windowChromeView];
 
-        self.chromeModeButton = [self chromeButtonWithTitle:@"[]" action:@selector(handleChromeModeAction:)];
-        self.chromeModeButton.hidden = YES;
+        self.chromeModeButton = [self chromeButtonWithTitle:@"" action:@selector(handleChromeModeAction:)];
         [self.windowChromeView addSubview:self.chromeModeButton];
 
-        self.chromeMinimizeButton = [self chromeButtonWithTitle:@"-" action:@selector(handleChromeMinimizeAction:)];
-        self.chromeMinimizeButton.hidden = YES;
+        self.chromeMinimizeButton = [self chromeButtonWithTitle:@"" action:@selector(handleChromeMinimizeAction:)];
         [self.windowChromeView addSubview:self.chromeMinimizeButton];
 
-        self.chromeCloseButton = [self chromeButtonWithTitle:@"x" action:@selector(handleChromeCloseAction:)];
-        self.chromeCloseButton.hidden = YES;
+        self.chromeCloseButton = [self chromeButtonWithTitle:@"" action:@selector(handleChromeCloseAction:)];
         [self.windowChromeView addSubview:self.chromeCloseButton];
 
         self.chromeDragHandle = [[UIView alloc] initWithFrame:CGRectZero];
@@ -1264,6 +1526,12 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
         handleMoveLongPress.minimumPressDuration = 0.12;
         handleMoveLongPress.delegate = self;
         [self.chromeDragHandle addGestureRecognizer:handleMoveLongPress];
+
+        UITapGestureRecognizer *handleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleChromeControlTap:)];
+        handleTap.delegate = self;
+        [self.chromeDragHandle addGestureRecognizer:handleTap];
+        [handleTap requireGestureRecognizerToFail:handleMoveLongPress];
+        [self setChromeControlsExpanded:NO animated:NO];
         [self updateFloatingChromeAppearance];
 
         // 核心修复：引入非缩放裁剪层 (Clipping Container)
@@ -1289,8 +1557,11 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
         [self.clippingContainer addSubview:self.hostContainerProxy];
         
         // 右下角缩放与移动把手 (Home Bar 样式)
-        self.resizeHandle = [[CV3ResizeHandleView alloc] initWithFrame:CGRectMake(0, 0, 100, 5)]; // Home Bar 形状
-        self.resizeHandle.layer.cornerRadius = 2.5; // 圆角
+        self.resizeHandle = [[CV3ResizeHandleView alloc] initWithFrame:CGRectMake(0, 0, 44, 22)];
+        self.resizeHandle.layer.cornerRadius = 11.0;
+        self.resizeHandle.layer.masksToBounds = YES;
+        self.resizeHandleLayer = [CAShapeLayer layer];
+        [self.resizeHandle.layer addSublayer:self.resizeHandleLayer];
         [self.appContentWrapper addSubview:self.resizeHandle];
         [self updateResizeHandleAppearance];
         
@@ -1544,8 +1815,8 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     
     [self updateSovereigntyAssertion]; // 同步更新优先级
     [self applyCurrentTransformWithScale:1.0];
-    self.layer.shadowOpacity = 0;
-    self.layer.shadowRadius = 0;
+    self.layer.shadowOpacity = focused ? 0.18 : 0.12;
+    self.layer.shadowRadius = focused ? 26.0 : 18.0;
     self.hostContainerProxy.alpha = 1.0;
     
     if (focused) {
@@ -1563,10 +1834,48 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     if (@available(iOS 12.0, *)) {
         darkStyle = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
     }
-
+    
     UIColor *borderColor = darkStyle ? [[UIColor whiteColor] colorWithAlphaComponent:0.18] : [[UIColor blackColor] colorWithAlphaComponent:0.16];
     
+    UIColor *baseColor = self.adaptiveAppColor ?: (darkStyle ? [UIColor systemGrayColor] : [UIColor whiteColor]);
+    CGFloat hue = 0, saturation = 0, brightness = 0, alpha = 0;
+    if ([baseColor getHue:&hue saturation:&saturation brightness:&brightness alpha:&alpha]) {
+        saturation = MIN(0.55, MAX(0.18, saturation));
+        brightness = darkStyle ? MIN(0.82, MAX(0.36, brightness)) : MIN(0.98, MAX(0.72, brightness));
+        baseColor = [UIColor colorWithHue:hue saturation:saturation brightness:brightness alpha:1.0];
+    }
+
     self.resizeHandle.backgroundColor = [UIColor clearColor];
+    self.resizeHandle.layer.borderWidth = 0;
+    self.resizeHandle.layer.shadowOpacity = 0;
+
+    CGRect b = self.resizeHandle.bounds;
+    if (!CGRectIsEmpty(b)) {
+        self.resizeHandleLayer.frame = b;
+        UIBezierPath *path = [UIBezierPath bezierPath];
+
+        CGPoint cornerCenter = CGPointMake(CGRectGetMinX(b), CGRectGetMinY(b));
+        CGFloat windowScale = MIN(1.35, MAX(0.78, MIN(self.bounds.size.width, self.bounds.size.height) / 390.0));
+        CGFloat arcRadius = MAX(10.0, MIN(b.size.width - 4.0, (CV3Style.floatingChromeCornerRadius + 4.0) * windowScale));
+        CGFloat startAngle = (CGFloat)(M_PI_4 * 0.18);
+        CGFloat endAngle = (CGFloat)(M_PI_4 * 1.52);
+        [path addArcWithCenter:cornerCenter radius:arcRadius startAngle:startAngle endAngle:endAngle clockwise:YES];
+
+        UIColor *strokeColor = baseColor;
+        CGFloat strokeHue = 0, strokeSaturation = 0, strokeBrightness = 0, strokeAlpha = 0;
+        if ([strokeColor getHue:&strokeHue saturation:&strokeSaturation brightness:&strokeBrightness alpha:&strokeAlpha]) {
+            BOOL sourceIsBright = strokeBrightness > 0.62;
+            strokeSaturation = sourceIsBright ? MIN(0.42, MAX(0.10, strokeSaturation * 0.65)) : MIN(0.62, MAX(0.20, strokeSaturation + 0.10));
+            strokeBrightness = darkStyle ? MIN(0.92, MAX(0.68, strokeBrightness + 0.22)) : (sourceIsBright ? 0.30 : 0.78);
+            strokeColor = [UIColor colorWithHue:strokeHue saturation:strokeSaturation brightness:strokeBrightness alpha:1.0];
+        }
+        self.resizeHandleLayer.path = path.CGPath;
+        self.resizeHandleLayer.strokeColor = [strokeColor colorWithAlphaComponent:(darkStyle ? 0.72 : 0.58)].CGColor;
+        self.resizeHandleLayer.fillColor = [UIColor clearColor].CGColor;
+        self.resizeHandleLayer.lineWidth = MAX(1.5, MIN(2.2, 1.75 * windowScale));
+        self.resizeHandleLayer.lineCap = kCALineCapRound;
+    }
+
     self.clippingContainer.layer.borderColor = borderColor.CGColor;
 }
 
@@ -1583,6 +1892,7 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
 }
 
 - (void)handleHideAction {
+    [self dismissMultitaskingMenu];
     UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [gen impactOccurred];
 
@@ -1638,6 +1948,7 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
             if (self.largeSplashIcon) {
                 self.largeSplashIcon.image = icon;
             }
+            [self updateResizeHandleAppearance];
         });
     });
 }
@@ -1706,11 +2017,30 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
 
     CGFloat chromeH = MIN(CV3Style.floatingChromeH, MAX(0.0, fullH));
     self.windowChromeView.frame = CGRectMake(0, 0, fullW, chromeH);
-    self.chromeModeButton.frame = CGRectZero;
-    self.chromeMinimizeButton.frame = CGRectZero;
-    self.chromeCloseButton.frame = CGRectZero;
-    self.chromeDragHandle.frame = CGRectMake((fullW - CV3Style.windowHandleW) / 2.0, 7.0, CV3Style.windowHandleW, CV3Style.windowHandleH);
+    CGFloat capsuleX = self.chromeControlsExpanded ? 9.0 : 15.0;
+    CGFloat capsuleY = self.chromeControlsExpanded ? 6.0 : 10.0;
+    CGFloat capsuleW = self.chromeControlsExpanded ? CV3Style.windowHandleW : 46.0;
+    CGFloat capsuleH = self.chromeControlsExpanded ? CV3Style.windowHandleH : 12.0;
+    CGFloat dot = self.chromeControlsExpanded ? CV3Style.floatingChromeControlSize : 5.5;
+    CGFloat dotGap = self.chromeControlsExpanded ? 6.0 : 8.5;
+    self.chromeDragHandle.frame = CGRectMake(capsuleX - 8.0, capsuleY - 6.0, capsuleW + 16.0, capsuleH + 12.0);
+    CGFloat dotY = capsuleY + (capsuleH - dot) / 2.0;
+    CGFloat firstDotX = capsuleX + (self.chromeControlsExpanded ? 7.0 : 0.0);
+    self.chromeCloseButton.frame = CGRectMake(firstDotX, dotY, dot, dot);
+    self.chromeMinimizeButton.frame = CGRectMake(CGRectGetMaxX(self.chromeCloseButton.frame) + dotGap, dotY, dot, dot);
+    self.chromeModeButton.frame = CGRectMake(CGRectGetMaxX(self.chromeMinimizeButton.frame) + dotGap, dotY, dot, dot);
     [self updateFloatingChromeAppearance];
+    if (self.multitaskingMenuView && !self.multitaskingMenuView.hidden) {
+        CGFloat menuW = MIN(250.0, MAX(210.0, fullW - 32.0));
+        CGFloat menuH = 54.0;
+        self.multitaskingMenuView.frame = CGRectMake((fullW - menuW) / 2.0, 24.0, menuW, menuH);
+        CGFloat itemW = menuW / 3.0;
+        for (UIButton *button in self.multitaskingMenuView.contentView.subviews) {
+            if (![button isKindOfClass:[UIButton class]]) continue;
+            NSInteger idx = button.tag - 101;
+            button.frame = CGRectMake(itemW * idx, 0, itemW, menuH);
+        }
+    }
 
     // 4. 更新子组件布局 (基于逻辑坐标系)
     self.clippingContainer.bounds = CGRectMake(0, 0, contentW, contentH);
@@ -1719,9 +2049,12 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     self.clippingContainer.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;
     [self updateResizeHandleAppearance];
     
-    CGFloat barW = 100.0;
-    CGFloat barH = 5.0;
-    self.resizeHandle.frame = CGRectMake((contentW - barW) / 2.0, contentH - barH - 2.0, barW, barH);
+    CGFloat handleScale = MIN(1.35, MAX(0.78, MIN(contentW, contentH) / 390.0));
+    CGFloat barW = 26.0 * handleScale;
+    CGFloat barH = 26.0 * handleScale;
+    self.resizeHandle.frame = CGRectMake(contentW - barW, contentH - barH, barW, barH);
+    self.resizeHandle.layer.cornerRadius = 0;
+    [self updateResizeHandleAppearance];
 
     // 5. 更新内部 App 场景 (等比铺满算法：基于窗口比例动态映射虚拟画布)
     if (self.hostContainerProxy) {
@@ -1990,6 +2323,10 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     CGRect screen = [UIScreen mainScreen].bounds;
     
     if (gesture.state == UIGestureRecognizerStateBegan) {
+        [self dismissMultitaskingMenu];
+        self.isFullscreenMode = NO;
+        self.isCompactMode = NO;
+        [self setChromeControlsExpanded:YES animated:YES];
         [self setWindowFocused:YES];
         CGPoint centerInWindow = self.center;
         initialTouchOffset = CGPointMake(currentPoint.x - centerInWindow.x, currentPoint.y - centerInWindow.y);
@@ -2033,6 +2370,7 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     }
     
     if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        [self scheduleChromeControlsCollapse];
         CGFloat velMag = sqrt(lastVelocity.x * lastVelocity.x + lastVelocity.y * lastVelocity.y);
         if (velMag > 2500.0) {
             BOOL towardLeft = (lastVelocity.x < -1800 && self.center.x < 150);
@@ -2129,6 +2467,7 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
 }
 
 - (void)restoreFromStash {
+    [self dismissMultitaskingMenu];
     // 恢复为普通 App 之上的浮窗层级，保留系统通知栏/控制中心在上方
     self.windowLevel = CV3Style.floatingApp; 
     [self makeKeyAndVisible];
@@ -2280,9 +2619,17 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     // 1. 深度优化：由于 App 渲染视图往往具备极高的触控优先级（尤其是带滚动的视图），
     // 我们必须在 hitTest 阶段显式干预，优先判定装饰性交互组件。
 
+    if (self.multitaskingMenuView && !self.multitaskingMenuView.hidden) {
+        CGPoint pInMenu = [self convertPoint:point toView:self.multitaskingMenuView];
+        if ([self.multitaskingMenuView pointInside:pInMenu withEvent:event]) {
+            UIView *menuHit = [self.multitaskingMenuView hitTest:pInMenu withEvent:event];
+            return menuHit ?: self.multitaskingMenuView;
+        }
+    }
+
     CGPoint pInChrome = [self convertPoint:point toView:self.windowChromeView];
     if ([self.windowChromeView pointInside:pInChrome withEvent:event]) {
-        CGRect handleHitFrame = CGRectInset(self.chromeDragHandle.frame, -22.0, -12.0);
+        CGRect handleHitFrame = CGRectInset(self.chromeDragHandle.frame, -8.0, -8.0);
         if (CGRectContainsPoint(handleHitFrame, pInChrome)) {
             UIView *chromeHit = [self.windowChromeView hitTest:pInChrome withEvent:event];
             return chromeHit ?: self.windowChromeView;
@@ -2335,6 +2682,9 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     static BOOL hasTriggeredSideHaptic = NO;
 
     if (gesture.state == UIGestureRecognizerStateBegan) {
+        [self dismissMultitaskingMenu];
+        self.isFullscreenMode = NO;
+        self.isCompactMode = NO;
         self.initialResizeFrame = self.frame;
         hasTriggeredTopHaptic = NO;
         hasTriggeredBottomHaptic = NO;
