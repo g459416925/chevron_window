@@ -937,6 +937,8 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (void)handleCompactMenuAction:(id)sender;
 - (void)handleCloseMenuAction:(id)sender;
 - (UIButton *)multitaskingMenuButtonWithTitle:(NSString *)title symbol:(NSString *)symbol action:(SEL)action;
+- (void)ensureLaunchSplashVisible;
+- (void)dismissLaunchSplashAnimated;
 - (void)enforcePortraitWindowGeometry;
 - (void)applyInterfaceOrientation:(UIInterfaceOrientation)orientation force:(BOOL)force;
 - (void)applyTrustedOrientationNow;
@@ -1818,6 +1820,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
         self.hostContainerProxy.layer.minificationFilter = kCAFilterTrilinear;
         
         [self.clippingContainer addSubview:self.hostContainerProxy];
+        [self ensureLaunchSplashVisible];
         
         // 右下角缩放与移动把手 (Home Bar 样式)
         self.resizeHandle = [[CV3ResizeHandleView alloc] initWithFrame:CGRectMake(0, 0, 44, 22)];
@@ -1978,6 +1981,72 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
     }
 }
 
+- (void)ensureLaunchSplashVisible {
+    if (!self.hostContainerProxy) return;
+
+    if (!self.splashView) {
+        UIBlurEffectStyle blurStyle = UIBlurEffectStyleSystemThinMaterial;
+        if (@available(iOS 13.0, *)) {
+            blurStyle = UIBlurEffectStyleSystemMaterial;
+        }
+
+        UIVisualEffectView *splash = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:blurStyle]];
+        splash.frame = self.hostContainerProxy.bounds;
+        splash.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        splash.userInteractionEnabled = NO;
+        splash.alpha = 1.0;
+
+        UIView *tintView = [[UIView alloc] initWithFrame:splash.contentView.bounds];
+        tintView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        UIColor *tintColor = self.adaptiveAppColor ?: [UIColor colorWithWhite:0.12 alpha:1.0];
+        tintView.backgroundColor = [tintColor colorWithAlphaComponent:0.24];
+        [splash.contentView addSubview:tintView];
+
+        UIImageView *iconView = [[UIImageView alloc] initWithFrame:CGRectMake(0, 0, 76, 76)];
+        iconView.center = CGPointMake(CGRectGetMidX(splash.contentView.bounds), CGRectGetMidY(splash.contentView.bounds));
+        iconView.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
+        iconView.layer.cornerRadius = 17.0;
+        iconView.layer.masksToBounds = YES;
+        iconView.contentMode = UIViewContentModeScaleAspectFill;
+        iconView.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.18];
+        if (self.appIconMiniView.image) {
+            iconView.image = self.appIconMiniView.image;
+        }
+        [splash.contentView addSubview:iconView];
+
+        self.splashView = splash;
+        self.largeSplashIcon = iconView;
+        [self.hostContainerProxy addSubview:self.splashView];
+    }
+
+    self.splashView.hidden = NO;
+    self.splashView.alpha = 1.0;
+    self.splashView.frame = self.hostContainerProxy.bounds;
+    [self.hostContainerProxy bringSubviewToFront:self.splashView];
+    if (self.largeSplashIcon && self.appIconMiniView.image) {
+        self.largeSplashIcon.image = self.appIconMiniView.image;
+    }
+}
+
+- (void)dismissLaunchSplashAnimated {
+    if (!self.splashView) return;
+
+    UIView *splash = self.splashView;
+    UIImageView *icon = self.largeSplashIcon;
+    self.splashView = nil;
+    self.largeSplashIcon = nil;
+
+    [UIView animateWithDuration:0.35
+                          delay:0.05
+                        options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{
+        splash.alpha = 0;
+        icon.transform = CGAffineTransformMakeScale(1.08, 1.08);
+    } completion:^(BOOL finished) {
+        [splash removeFromSuperview];
+    }];
+}
+
 - (void)enforceSceneForegroundState {
     if (!self.targetScene) return;
     
@@ -1987,6 +2056,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
         
         if (!sceneValid) {
             CV3LogToFile(@"[Recovery] 场景失效，触发重连机制: %@", self.bundleID);
+            [self ensureLaunchSplashVisible];
             if (self.hostView) {
                 [self.hostView removeFromSuperview];
                 self.hostView = nil;
@@ -2000,6 +2070,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
             // 通过检查渲染层级是否还具备 Presentation Context 来判断冻结
             if ([self.hostView respondsToSelector:@selector(presentationContext)] && ![self.hostView performSelector:@selector(presentationContext)]) {
                 CV3LogToFile(@"[Recovery] 检测到 HostView 渲染层断连，强制修复: %@", self.bundleID);
+                [self ensureLaunchSplashVisible];
                 [self.hostView removeFromSuperview];
                 [self attemptToHostSceneWithRetries:1 delay:0]; // 快速尝试重建
                 return;
@@ -2483,17 +2554,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
                         CV3LogToFile(@"[Debug] 成功通过 _UISceneLayerHostContainerView 创建渲染视图");
                         
                         [self syncWindowBoundsToClient];
-
-                        // --- Transition: Splash to Real Content ---
-                        if (self.splashView) {
-                            [UIView animateWithDuration:0.8 delay:0.2 options:UIViewAnimationOptionCurveEaseInOut animations:^{
-                                self.splashView.alpha = 0;
-                                self.largeSplashIcon.transform = CGAffineTransformMakeScale(1.5, 1.5);
-                            } completion:^(BOOL finished) {
-                                [self.splashView removeFromSuperview];
-                                self.splashView = nil;
-                            }];
-                        }
+                        [self dismissLaunchSplashAnimated];
                     } else {
                         CV3LogToFile(@"[Error] _UISceneLayerHostContainerView 创建失败");
                     }
@@ -2506,11 +2567,6 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
                     [self attemptToHostSceneWithRetries:retries - 1 delay:delay * 1.2];
                 } else {
                     CV3LogToFile(@"[Error] targetScene not found after launch for %@", self.bundleID);
-                    // 核心修复：重试失败后，也要尝试清理 Splash 状态，允许用户看到可能的错误状态或尝试手动恢复
-                    if (self.splashView) {
-                        [self.splashView removeFromSuperview];
-                        self.splashView = nil;
-                    }
                 }
             }
         } @catch (NSException *e) {
@@ -2522,6 +2578,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
 - (void)loadAppScene {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
+            [self ensureLaunchSplashVisible];
             [[UIApplication sharedApplication] launchApplicationWithIdentifier:self.bundleID suspended:YES];
             
             // [Foreground Sovereignty] Inject RunningBoard assertion to prevent process suspension
@@ -2558,14 +2615,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (self.splashView) {
                     CV3LogToFile(@"[Safety] 触发启动超时强制恢复: %@", self.bundleID);
-                    [UIView animateWithDuration:0.5 animations:^{
-                        self.splashView.alpha = 0;
-                    } completion:^(BOOL finished) {
-                        if (self.splashView) {
-                            [self.splashView removeFromSuperview];
-                            self.splashView = nil;
-                        }
-                    }];
+                    [self dismissLaunchSplashAnimated];
                 }
             });
         } @catch (NSException *e) {
