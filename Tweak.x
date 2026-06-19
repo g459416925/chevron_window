@@ -866,6 +866,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (void)normalizeStashedGrabberLayout;
 - (void)updateResizeHandleAppearance;
 - (void)updateFloatingChromeAppearance;
+- (void)layoutFloatingChromeForSize:(CGSize)size;
 - (void)setChromeControlsExpanded:(BOOL)expanded animated:(BOOL)animated;
 - (void)scheduleChromeControlsCollapse;
 - (void)handleChromeControlTouchDown:(id)sender;
@@ -1166,7 +1167,6 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     button.layer.masksToBounds = YES;
     button.layer.borderWidth = 0.5 / [UIScreen mainScreen].scale;
     button.layer.borderColor = [[UIColor blackColor] colorWithAlphaComponent:0.18].CGColor;
-    [button addTarget:self action:@selector(handleChromeControlTouchDown:) forControlEvents:UIControlEventTouchDown | UIControlEventTouchDragEnter];
     [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
     return button;
 }
@@ -1178,12 +1178,12 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     self.chromeMinimizeButton.hidden = NO;
     self.chromeCloseButton.hidden = NO;
 
-    self.chromeDragHandle.backgroundColor = self.chromeControlsExpanded ? [[UIColor systemBackgroundColor] colorWithAlphaComponent:0.36] : [UIColor clearColor];
-    self.chromeDragHandle.layer.cornerRadius = CV3Style.windowHandleH / 2.0;
+    self.chromeDragHandle.backgroundColor = self.chromeControlsExpanded ? [[UIColor systemBackgroundColor] colorWithAlphaComponent:0.28] : [[UIColor systemBackgroundColor] colorWithAlphaComponent:0.16];
+    self.chromeDragHandle.layer.cornerRadius = self.chromeDragHandle.bounds.size.height / 2.0;
     self.chromeDragHandle.layer.shadowColor = [UIColor blackColor].CGColor;
     self.chromeDragHandle.layer.shadowOffset = CGSizeMake(0, 1.0);
-    self.chromeDragHandle.layer.shadowOpacity = self.chromeControlsExpanded ? 0.20 : 0.0;
-    self.chromeDragHandle.layer.shadowRadius = self.chromeControlsExpanded ? 4.0 : 0.0;
+    self.chromeDragHandle.layer.shadowOpacity = self.chromeControlsExpanded ? 0.20 : 0.08;
+    self.chromeDragHandle.layer.shadowRadius = self.chromeControlsExpanded ? 4.0 : 2.0;
 
     if (self.chromeControlsExpanded) {
         self.chromeCloseButton.layer.borderWidth = 0.5 / [UIScreen mainScreen].scale;
@@ -1211,14 +1211,37 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     self.chromeCloseButton.alpha = self.chromeControlsExpanded ? 1.0 : 0.64;
     self.chromeMinimizeButton.alpha = self.chromeControlsExpanded ? 1.0 : 0.64;
     self.chromeModeButton.alpha = self.chromeControlsExpanded ? 1.0 : 0.64;
+    [self.windowChromeView sendSubviewToBack:self.chromeDragHandle];
     [self.windowChromeView bringSubviewToFront:self.chromeCloseButton];
     [self.windowChromeView bringSubviewToFront:self.chromeMinimizeButton];
     [self.windowChromeView bringSubviewToFront:self.chromeModeButton];
 }
 
+- (void)layoutFloatingChromeForSize:(CGSize)size {
+    CGFloat chromeScale = MIN(1.25, MAX(0.72, MIN(size.width, size.height) / 390.0));
+    CGFloat chromeH = MIN(44.0 * chromeScale, MAX(0.0, size.height));
+    self.windowChromeView.frame = CGRectMake(0, 0, size.width, chromeH);
+
+    CGFloat capsuleX = (self.chromeControlsExpanded ? 9.0 : 15.0) * chromeScale;
+    CGFloat capsuleY = (self.chromeControlsExpanded ? 6.0 : 10.0) * chromeScale;
+    CGFloat capsuleW = (self.chromeControlsExpanded ? CV3Style.windowHandleW : 46.0) * chromeScale;
+    CGFloat capsuleH = (self.chromeControlsExpanded ? CV3Style.windowHandleH : 12.0) * chromeScale;
+    CGFloat dot = (self.chromeControlsExpanded ? CV3Style.floatingChromeControlSize : 5.5) * chromeScale;
+    CGFloat dotGap = (self.chromeControlsExpanded ? 6.0 : 8.5) * chromeScale;
+
+    self.chromeDragHandle.frame = CGRectMake(capsuleX, capsuleY, capsuleW, capsuleH);
+    CGFloat dotY = capsuleY + (capsuleH - dot) / 2.0;
+    CGFloat firstDotX = capsuleX + (self.chromeControlsExpanded ? 7.0 * chromeScale : 7.0 * chromeScale);
+    self.chromeCloseButton.frame = CGRectMake(firstDotX, dotY, dot, dot);
+    self.chromeMinimizeButton.frame = CGRectMake(CGRectGetMaxX(self.chromeCloseButton.frame) + dotGap, dotY, dot, dot);
+    self.chromeModeButton.frame = CGRectMake(CGRectGetMaxX(self.chromeMinimizeButton.frame) + dotGap, dotY, dot, dot);
+    [self updateFloatingChromeAppearance];
+}
+
 - (void)setChromeControlsExpanded:(BOOL)expanded animated:(BOOL)animated {
     self.chromeControlsExpanded = expanded;
     void (^changes)(void) = ^{
+        [self layoutFloatingChromeForSize:self.bounds.size];
         [self updateFloatingChromeAppearance];
     };
     if (animated) {
@@ -1242,7 +1265,6 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
 - (void)handleChromeControlTouchDown:(id)sender {
     [self.chromeCollapseTimer invalidate];
     self.chromeCollapseTimer = nil;
-    [self setChromeControlsExpanded:YES animated:YES];
 }
 
 - (void)handleChromeControlTap:(id)sender {
@@ -1251,31 +1273,16 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
 }
 
 - (void)handleChromeCloseAction:(id)sender {
-    if (!self.chromeControlsExpanded) {
-        [self setChromeControlsExpanded:YES animated:YES];
-        [self scheduleChromeControlsCollapse];
-        return;
-    }
     [self setChromeControlsExpanded:YES animated:YES];
     [self closeWindow];
 }
 
 - (void)handleChromeMinimizeAction:(id)sender {
-    if (!self.chromeControlsExpanded) {
-        [self setChromeControlsExpanded:YES animated:YES];
-        [self scheduleChromeControlsCollapse];
-        return;
-    }
     [self setChromeControlsExpanded:YES animated:YES];
     [self handleHideAction];
 }
 
 - (void)handleChromeModeAction:(id)sender {
-    if (!self.chromeControlsExpanded) {
-        [self setChromeControlsExpanded:YES animated:YES];
-        [self scheduleChromeControlsCollapse];
-        return;
-    }
     [self setChromeControlsExpanded:YES animated:YES];
     [self scheduleChromeControlsCollapse];
     [self handleFullscreenMenuAction:sender];
@@ -1531,8 +1538,8 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
         handleTap.delegate = self;
         [self.chromeDragHandle addGestureRecognizer:handleTap];
         [handleTap requireGestureRecognizerToFail:handleMoveLongPress];
-        [self setChromeControlsExpanded:NO animated:NO];
-        [self updateFloatingChromeAppearance];
+        self.chromeControlsExpanded = NO;
+        [self layoutFloatingChromeForSize:self.bounds.size];
 
         // 核心修复：引入非缩放裁剪层 (Clipping Container)
         // 该层的大小始终等于窗口大小，负责强制执行圆角裁剪，不受内部缩放影响
@@ -2015,21 +2022,7 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     self.appContentWrapper.bounds = self.rootTransformContainer.bounds;
     self.appContentWrapper.center = CGPointMake(fullW / 2.0, fullH / 2.0);
 
-    CGFloat chromeH = MIN(CV3Style.floatingChromeH, MAX(0.0, fullH));
-    self.windowChromeView.frame = CGRectMake(0, 0, fullW, chromeH);
-    CGFloat capsuleX = self.chromeControlsExpanded ? 9.0 : 15.0;
-    CGFloat capsuleY = self.chromeControlsExpanded ? 6.0 : 10.0;
-    CGFloat capsuleW = self.chromeControlsExpanded ? CV3Style.windowHandleW : 46.0;
-    CGFloat capsuleH = self.chromeControlsExpanded ? CV3Style.windowHandleH : 12.0;
-    CGFloat dot = self.chromeControlsExpanded ? CV3Style.floatingChromeControlSize : 5.5;
-    CGFloat dotGap = self.chromeControlsExpanded ? 6.0 : 8.5;
-    self.chromeDragHandle.frame = CGRectMake(capsuleX - 8.0, capsuleY - 6.0, capsuleW + 16.0, capsuleH + 12.0);
-    CGFloat dotY = capsuleY + (capsuleH - dot) / 2.0;
-    CGFloat firstDotX = capsuleX + (self.chromeControlsExpanded ? 7.0 : 0.0);
-    self.chromeCloseButton.frame = CGRectMake(firstDotX, dotY, dot, dot);
-    self.chromeMinimizeButton.frame = CGRectMake(CGRectGetMaxX(self.chromeCloseButton.frame) + dotGap, dotY, dot, dot);
-    self.chromeModeButton.frame = CGRectMake(CGRectGetMaxX(self.chromeMinimizeButton.frame) + dotGap, dotY, dot, dot);
-    [self updateFloatingChromeAppearance];
+    [self layoutFloatingChromeForSize:CGSizeMake(fullW, fullH)];
     if (self.multitaskingMenuView && !self.multitaskingMenuView.hidden) {
         CGFloat menuW = MIN(250.0, MAX(210.0, fullW - 32.0));
         CGFloat menuH = 54.0;
@@ -2629,10 +2622,24 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
 
     CGPoint pInChrome = [self convertPoint:point toView:self.windowChromeView];
     if ([self.windowChromeView pointInside:pInChrome withEvent:event]) {
-        CGRect handleHitFrame = CGRectInset(self.chromeDragHandle.frame, -8.0, -8.0);
-        if (CGRectContainsPoint(handleHitFrame, pInChrome)) {
-            UIView *chromeHit = [self.windowChromeView hitTest:pInChrome withEvent:event];
-            return chromeHit ?: self.windowChromeView;
+        CGRect handleHitFrame = CGRectInset(self.chromeDragHandle.frame, -14.0, -12.0);
+        if (!self.chromeControlsExpanded) {
+            if (CGRectContainsPoint(handleHitFrame, pInChrome)) {
+                return self.chromeDragHandle ?: self.windowChromeView;
+            }
+        } else {
+            NSArray<UIButton *> *chromeButtons = @[self.chromeCloseButton, self.chromeMinimizeButton, self.chromeModeButton];
+            for (UIButton *button in chromeButtons) {
+                if (button.hidden) continue;
+                CGRect buttonHitFrame = CGRectInset(button.frame, -6.0, -6.0);
+                if (CGRectContainsPoint(buttonHitFrame, pInChrome)) {
+                    return button;
+                }
+            }
+
+            if (CGRectContainsPoint(handleHitFrame, pInChrome)) {
+                return self.chromeDragHandle ?: self.windowChromeView;
+            }
         }
     }
     
