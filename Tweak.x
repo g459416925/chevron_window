@@ -1707,6 +1707,21 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
     return CGRectInset(visualFrame, -8.0, -8.0);
 }
 
+- (CGRect)expandedResizeHandleHitFrameInWindow {
+    if (self.isClosing || self.isStashed) return CGRectZero;
+
+    CGRect visualFrame = [self resizeHandleVisualFrameInWindow];
+    if (CGRectIsEmpty(visualFrame)) return CGRectZero;
+
+    CGFloat expansion = MAX(CV3Style.resizeHandleWindowExpansion, 12.0);
+    CGRect expandedFrame = CGRectInset(visualFrame, -expansion, -expansion);
+    CGRect trailingCornerFrame = CGRectMake(CGRectGetWidth(self.bounds) - expansion,
+                                            CGRectGetHeight(self.bounds) - expansion,
+                                            expansion * 2.0,
+                                            expansion * 2.0);
+    return CGRectUnion(expandedFrame, trailingCornerFrame);
+}
+
 - (BOOL)isPointInResizeHandleVisualZone:(CGPoint)point {
     return CGRectContainsPoint([self resizeHandleVisualFrameInWindow], point);
 }
@@ -2970,8 +2985,8 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
     }
     
     // 检查右下角缩放/移动热区 (最高优先级)
-    CGPoint pInResize = [self convertPoint:point toView:self.resizeHandle];
-    if ([self.resizeHandle pointInside:pInResize withEvent:event]) {
+    CGRect expandedResizeFrame = [self expandedResizeHandleHitFrameInWindow];
+    if (CGRectContainsPoint(expandedResizeFrame, point)) {
         return self.resizeHandle;
     }
 
