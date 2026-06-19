@@ -927,6 +927,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (void)scheduleChromeControlsCollapse;
 - (void)handleChromeControlTouchDown:(id)sender;
 - (void)handleChromeControlTap:(id)sender;
+- (void)attachMoveLongPressToChromeButton:(UIButton *)button;
 - (UIButton *)chromeButtonWithTitle:(NSString *)title action:(SEL)action;
 - (void)handleChromeCloseAction:(id)sender;
 - (void)handleChromeMinimizeAction:(id)sender;
@@ -1422,9 +1423,9 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
 
     self.chromeDragHandle.frame = CGRectMake(capsuleX, capsuleY, capsuleW, capsuleH);
     
-    // 物理热区极其强韧地扩充：按钮高度 44pt 垂直居中，宽度平分胶囊宽度 (capsuleW / 3)
+    // 物理热区进一步放大：按钮高度提升到 54pt，宽度平分胶囊宽度 (capsuleW / 3)
     CGFloat btnW = capsuleW / 3.0;
-    CGFloat btnH = 44.0;
+    CGFloat btnH = 54.0;
     CGFloat btnY = capsuleY + (capsuleH - btnH) / 2.0;
     
     self.chromeCloseButton.frame = CGRectMake(capsuleX + 0 * btnW, btnY, btnW, btnH);
@@ -1475,6 +1476,15 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
     // 恒定展开，无需操作
 }
 
+- (void)attachMoveLongPressToChromeButton:(UIButton *)button {
+    if (!button) return;
+
+    UILongPressGestureRecognizer *moveLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleMoveLongPress:)];
+    moveLongPress.minimumPressDuration = 0.12;
+    moveLongPress.delegate = self;
+    [button addGestureRecognizer:moveLongPress];
+}
+
 - (void)handleChromeCloseAction:(id)sender {
     // 隐藏窗口：触发中等关闭震动
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
@@ -1488,7 +1498,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
 }
 
 - (void)handleChromeModeAction:(id)sender {
-    // 最大化/分屏切换菜单：触发轻型震动
+    // 绿色按钮直接切换全屏/退出全屏
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
     [self handleFullscreenMenuAction:sender];
 }
@@ -1788,22 +1798,20 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
         self.chromeModeButton = [self chromeButtonWithTitle:@"" action:@selector(handleChromeModeAction:)];
         [self.chromeModeButton addTarget:self action:@selector(chromeBtnTouchDown:) forControlEvents:UIControlEventTouchDown | UIControlEventTouchDragEnter];
         [self.chromeModeButton addTarget:self action:@selector(chromeBtnTouchUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel | UIControlEventTouchDragExit];
-        
-        UILongPressGestureRecognizer *modeBtnMoveLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleMoveLongPress:)];
-        modeBtnMoveLongPress.minimumPressDuration = 0.12;
-        modeBtnMoveLongPress.delegate = self;
-        [self.chromeModeButton addGestureRecognizer:modeBtnMoveLongPress];
+        [self attachMoveLongPressToChromeButton:self.chromeModeButton];
         
         [self.windowChromeView addSubview:self.chromeModeButton];
 
         self.chromeMinimizeButton = [self chromeButtonWithTitle:@"" action:@selector(handleChromeMinimizeAction:)];
         [self.chromeMinimizeButton addTarget:self action:@selector(chromeBtnTouchDown:) forControlEvents:UIControlEventTouchDown | UIControlEventTouchDragEnter];
         [self.chromeMinimizeButton addTarget:self action:@selector(chromeBtnTouchUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel | UIControlEventTouchDragExit];
+        [self attachMoveLongPressToChromeButton:self.chromeMinimizeButton];
         [self.windowChromeView addSubview:self.chromeMinimizeButton];
 
         self.chromeCloseButton = [self chromeButtonWithTitle:@"" action:@selector(handleChromeCloseAction:)];
         [self.chromeCloseButton addTarget:self action:@selector(chromeBtnTouchDown:) forControlEvents:UIControlEventTouchDown | UIControlEventTouchDragEnter];
         [self.chromeCloseButton addTarget:self action:@selector(chromeBtnTouchUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel | UIControlEventTouchDragExit];
+        [self attachMoveLongPressToChromeButton:self.chromeCloseButton];
         [self.windowChromeView addSubview:self.chromeCloseButton];
 
         self.chromeDragHandle = [[UIView alloc] initWithFrame:CGRectZero];
@@ -2969,7 +2977,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
     }
 
     CGRect dragHandleFrameInSelf = [self.windowChromeView convertRect:self.chromeDragHandle.frame toView:self];
-    CGRect expandedHandleFrame = CGRectInset(dragHandleFrameInSelf, -24.0, -24.0);
+    CGRect expandedHandleFrame = CGRectInset(dragHandleFrameInSelf, -36.0, -30.0);
     
     if (CGRectContainsPoint(expandedHandleFrame, point)) {
         CGFloat minX = dragHandleFrameInSelf.origin.x;
@@ -3115,7 +3123,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
         CGFloat aspect = longSide / MAX(shortSide, 1.0);
         
         CGFloat minAllowedWidth = shortSide * 0.4;
-        CGFloat maxAllowedWidth = shortSide * 0.9;
+        CGFloat maxAllowedWidth = shortSide * 0.75;
         
         CGPoint initialCenter = CGPointMake(CGRectGetMidX(self.initialResizeFrame), CGRectGetMidY(self.initialResizeFrame));
         CGPoint initialHandlePos = CGPointMake(CGRectGetMaxX(self.initialResizeFrame), CGRectGetMaxY(self.initialResizeFrame));
@@ -3286,7 +3294,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
 
             // 限制惯性后的宽度范围，避免拉伸越界
             CGFloat minAllowedWidth = shortSide * 0.4;
-            CGFloat maxAllowedWidth = shortSide * 0.9;
+            CGFloat maxAllowedWidth = shortSide * 0.75;
             if (finalWidth < minAllowedWidth) finalWidth = minAllowedWidth;
             if (finalWidth > maxAllowedWidth) finalWidth = maxAllowedWidth;
 
@@ -3303,7 +3311,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
             // Ratio Snapping
             CGFloat currentRatio = finalWidth / shortSide;
             if (fabs(currentRatio - 0.5) < 0.03) finalWidth = shortSide * 0.5;
-            else if (fabs(currentRatio - 0.8) < 0.03) finalWidth = shortSide * 0.8;
+            else if (fabs(currentRatio - 0.75) < 0.03) finalWidth = shortSide * 0.75;
 
             CGFloat finalHeight = finalWidth * aspect;
             CGFloat outerWidth = finalWidth;
