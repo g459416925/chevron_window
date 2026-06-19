@@ -3,6 +3,8 @@
 #import <QuartzCore/QuartzCore.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <objc/runtime.h>
+#import "CV3PrivateAPI.h"
+#import "CV3CoreSupport.h"
 #include <sys/stat.h>
 #include <signal.h>
 
@@ -201,98 +203,6 @@
     }
 }
 @end
-
-// --- 新增：跨进程共享内存结构定义 ---
-#include <sys/mman.h>
-#include <fcntl.h>
-#include <sys/stat.h>
-
-typedef struct {
-    uint32_t magic;      // 验证标识 0x43563353 ("CV3S")
-    uint32_t isHosted;   // 1 表示开启，0 表示隐藏
-    float width;         // 窗口宽度
-    float height;        // 窗口高度
-} CV3SharedGeometry;
-
-static NSMutableDictionary<NSString *, NSMutableDictionary *> *CV3SharedGeometryRegistry(void) {
-    static NSMutableDictionary<NSString *, NSMutableDictionary *> *registry = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        registry = [NSMutableDictionary dictionary];
-    });
-    return registry;
-}
-
-static NSString *CV3SanitizedGeometryIdentifier(NSString *bundleID) {
-    if (bundleID.length == 0) return @"default";
-
-    NSMutableCharacterSet *allowed = [NSMutableCharacterSet alphanumericCharacterSet];
-    [allowed addCharactersInString:@"._-"];
-
-    NSMutableString *sanitized = [NSMutableString stringWithCapacity:bundleID.length];
-    for (NSUInteger i = 0; i < bundleID.length; i++) {
-        unichar ch = [bundleID characterAtIndex:i];
-        if ([allowed characterIsMember:ch]) {
-            [sanitized appendFormat:@"%C", ch];
-        } else {
-            [sanitized appendString:@"_"];
-        }
-    }
-    return sanitized.length > 0 ? sanitized : @"default";
-}
-
-static CV3SharedGeometry *CV3SharedGeometryForBundleID(NSString *bundleID) {
-    if (bundleID.length == 0) return NULL;
-
-    NSMutableDictionary *registry = CV3SharedGeometryRegistry();
-    NSMutableDictionary *existingEntry = registry[bundleID];
-    if (existingEntry) {
-        return [existingEntry[@"pointer"] pointerValue];
-    }
-
-    NSString *sanitizedBundleID = CV3SanitizedGeometryIdentifier(bundleID);
-    NSString *path = [@"/var/mobile/Library/Preferences" stringByAppendingPathComponent:
-                      [NSString stringWithFormat:@"com.xu.chevronv3.%@.shm", sanitizedBundleID]];
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *parentDir = [path stringByDeletingLastPathComponent];
-
-    @try {
-        if (![fm fileExistsAtPath:parentDir]) {
-            [fm createDirectoryAtPath:parentDir withIntermediateDirectories:YES attributes:nil error:nil];
-        }
-
-        int fd = open([path UTF8String], O_RDWR | O_CREAT, 0644);
-        if (fd < 0) {
-            return NULL;
-        }
-
-        if (ftruncate(fd, sizeof(CV3SharedGeometry)) != 0) {
-            close(fd);
-            return NULL;
-        }
-        chmod([path UTF8String], 0644);
-
-        void *addr = mmap(NULL, sizeof(CV3SharedGeometry), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-        if (addr == MAP_FAILED) {
-            close(fd);
-            return NULL;
-        }
-
-        CV3SharedGeometry *geometry = (CV3SharedGeometry *)addr;
-        geometry->magic = 0x43563353;
-
-        registry[bundleID] = [@{
-            @"pointer": [NSValue valueWithPointer:geometry],
-            @"fd": @(fd),
-            @"path": path
-        } mutableCopy];
-
-        NSLog(@"[ChevronV3] [SHM] %@ geometry initialized at %p", bundleID, geometry);
-        return geometry;
-    } @catch (NSException *e) {
-        return NULL;
-    }
-}
 
 // --- 新增：集中化样式配置 ---
 struct {
@@ -533,24 +443,6 @@ struct {
 
 @interface CV3RootViewController : UIViewController
 @end
-
-static dispatch_queue_t CV3LogQueue(void) {
-    static dispatch_queue_t queue;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        queue = dispatch_queue_create("com.xu.chevronv3.log", DISPATCH_QUEUE_SERIAL);
-    });
-    return queue;
-}
-
-static dispatch_queue_t CV3AppLoadQueue(void) {
-    static dispatch_queue_t queue;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        queue = dispatch_queue_create("com.xu.chevronv3.appload", DISPATCH_QUEUE_SERIAL);
-    });
-    return queue;
-}
 
 static void CV3LogToFile(NSString *format, ...) {
     va_list args;
@@ -1980,9 +1872,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
         UIWindowScene *targetScene = nil;
         
         // 1. 终极优先：获取 SpringBoard 核心主场景 (SBWindowSceneSessionRoleMain)
-        if ([NSClassFromString(@"SBWindowScene") respondsToSelector:@selector(mainDisplayWindowScene)]) {
-            targetScene = [NSClassFromString(@"SBWindowScene") performSelector:@selector(mainDisplayWindowScene)];
-        }
+        targetScene = CV3InvokeObject(CV3ClassNamed(@"SBWindowScene"), @selector(mainDisplayWindowScene));
         
         // 2. 备选方案：遍历场景并严格过滤非显示角色
         if (!targetScene) {
@@ -2049,9 +1939,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
             [context setClipsToBounds:YES];
         }
         
-        if ([self.hostView respondsToSelector:@selector(_setPresentationContext:)]) {
-            [self.hostView performSelector:@selector(_setPresentationContext:) withObject:context];
-        }
+        CV3InvokeObject1(self.hostView, @selector(_setPresentationContext:), context);
         
         self.hostView.alpha = 1.0;
         self.hostView.hidden = NO;
@@ -2132,7 +2020,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
     
     @try {
         // 核心增强：除了检查 isValid，还检查是否还在连接状态
-        BOOL sceneValid = [self.targetScene respondsToSelector:@selector(isValid)] ? [(id)self.targetScene isValid] : YES;
+        BOOL sceneValid = CV3InvokeBool(self.targetScene, @selector(isValid), YES);
         
         if (!sceneValid) {
             CV3LogToFile(@"[Recovery] 场景失效，触发重连机制: %@", self.bundleID);
@@ -2148,7 +2036,8 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
         // 预防性重置：如果检测到 HostView 存在但可能已“冻结”，强制触发层级重新同步
         if (self.hostView && self.hostView.superview) {
             // 通过检查渲染层级是否还具备 Presentation Context 来判断冻结
-            if ([self.hostView respondsToSelector:@selector(presentationContext)] && ![self.hostView performSelector:@selector(presentationContext)]) {
+            if (CV3TargetRespondsToSelector(self.hostView, @selector(presentationContext)) &&
+                !CV3InvokeObject(self.hostView, @selector(presentationContext))) {
                 CV3LogToFile(@"[Recovery] 检测到 HostView 渲染层断连，强制修复: %@", self.bundleID);
                 [self ensureLaunchSplashVisible];
                 [self.hostView removeFromSuperview];
@@ -2526,7 +2415,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
         if ([app respondsToSelector:@selector(mainScene)]) {
             FBScene *scene = [app mainScene];
             // 核心修复：严禁返回已失效或正在销毁的场景，强制触发重试逻辑等待新场景创建
-            if (scene && [scene respondsToSelector:@selector(isValid)] && ![(id)scene isValid]) {
+            if (scene && !CV3InvokeBool(scene, @selector(isValid), YES)) {
                 CV3LogToFile(@"[Debug] 忽略无效的旧场景: %@", bundleID);
             } else if (scene) {
                 return scene;
@@ -2541,7 +2430,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
             if ([scenesSet isKindOfClass:[NSSet class]]) {
                 for (FBScene *scene in scenesSet) {
                     if ([scene.identifier containsString:bundleID]) {
-                        if ([scene respondsToSelector:@selector(isValid)] && ![(id)scene isValid]) continue;
+                        if (!CV3InvokeBool(scene, @selector(isValid), YES)) continue;
                         return scene;
                     }
                 }
@@ -2568,7 +2457,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
         for (NSString *key in scenes.allKeys) {
             if ([key containsString:bundleID]) {
                 FBScene *scene = scenes[key];
-                if ([scene respondsToSelector:@selector(isValid)] && ![(id)scene isValid]) continue;
+                if (!CV3InvokeBool(scene, @selector(isValid), YES)) continue;
                 return scene;
             }
         }
@@ -2612,9 +2501,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
                         [context setClipsToBounds:YES];
                     }
                     
-                    if ([hostedView respondsToSelector:@selector(_setPresentationContext:)]) {
-                        [hostedView _setPresentationContext:context];
-                    }
+                    CV3InvokeObject1(hostedView, @selector(_setPresentationContext:), context);
                     
                     if (hostedView) {
                         hostedView.layer.cornerRadius = 0;
@@ -3441,10 +3328,10 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
         // [Geek Advice] Explicitly disable hosting for the requester to release FBScene resources
         @try {
             if (self.targetScene && [self.targetScene respondsToSelector:@selector(hostManager)]) {
-                id hm = [self.targetScene performSelector:@selector(hostManager)];
+                id hm = CV3InvokeObject(self.targetScene, @selector(hostManager));
                 if ([hm respondsToSelector:@selector(enableHostingForRequester:priority:)]) {
                     // 禁用托管，释放资源
-                    [hm performSelector:@selector(enableHostingForRequester:priority:) withObject:nil withObject:(id)0];
+                    CV3InvokeObject2(hm, @selector(enableHostingForRequester:priority:), nil, (id)0);
                 }
             }
         } @catch (NSException *e) {
@@ -3466,7 +3353,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
 
         // [Geek Advice] Use explicit invalidate to release backboardd resources
         if ([self.hostView respondsToSelector:@selector(invalidate)]) {
-            [self.hostView performSelector:@selector(invalidate)];
+            CV3InvokeObject(self.hostView, @selector(invalidate));
         }
         [self.hostView removeFromSuperview];
         self.hostView = nil;
@@ -3490,7 +3377,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
         self.rbsAssertion = nil;
     }
     if ([self.hostView respondsToSelector:@selector(invalidate)]) {
-        [self.hostView performSelector:@selector(invalidate)];
+        CV3InvokeObject(self.hostView, @selector(invalidate));
     }
 }@end
 
@@ -4124,14 +4011,10 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
 
 - (NSString *)currentActiveBundleID {
     @try {
-        id workspace = [NSClassFromString(@"SBMainWorkspace") sharedInstance];
-        id activeItem = nil;
-        if ([workspace respondsToSelector:@selector(activeDisplayItem)]) {
-            activeItem = [workspace performSelector:@selector(activeDisplayItem)];
-        }
-        if (activeItem && [activeItem respondsToSelector:@selector(bundleIdentifier)]) {
-            return [activeItem performSelector:@selector(bundleIdentifier)];
-        }
+        id workspace = [CV3ClassNamed(@"SBMainWorkspace") sharedInstance];
+        id activeItem = CV3InvokeObject(workspace, @selector(activeDisplayItem));
+        NSString *bundleID = CV3InvokeObject(activeItem, @selector(bundleIdentifier));
+        if (bundleID.length > 0) return bundleID;
     } @catch (NSException *e) {}
     return nil;
 }
@@ -4236,10 +4119,8 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
         [self setupUI];
         
         // 注册应用安装/卸载观察者
-        id ws = [NSClassFromString(@"LSApplicationWorkspace") defaultWorkspace];
-        if ([ws respondsToSelector:@selector(addObserver:)]) {
-            [ws performSelector:@selector(addObserver:) withObject:[CV3AppObserver sharedObserver]];
-        }
+        id ws = [CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace];
+        CV3InvokeObject1(ws, @selector(addObserver:), [CV3AppObserver sharedObserver]);
     }
     return self;
 }
@@ -6037,12 +5918,12 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
 - (BOOL)shouldIncludeApp:(id)appProxy {
     // 1. 必须是用户应用
-    if ([appProxy respondsToSelector:@selector(isUserApplication)] && ![appProxy performSelector:@selector(isUserApplication)]) {
+    if (!CV3InvokeBool(appProxy, @selector(isUserApplication), YES)) {
         return NO;
     }
     
     // 2. 必须有图标
-    NSString *bundleId = [appProxy performSelector:@selector(bundleIdentifier)];
+    NSString *bundleId = CV3InvokeObject(appProxy, @selector(bundleIdentifier));
     UIImage *icon = [UIImage _applicationIconImageForBundleIdentifier:bundleId format:10 scale:[UIScreen mainScreen].scale];
     if (!icon) return NO;
 
@@ -6079,36 +5960,23 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
                 [cv3IconCache removeAllObjects];
 
                 NSMutableArray *temp = [NSMutableArray array];
-                id iconController = [NSClassFromString(@"SBIconController") sharedInstance];
+                id iconController = [CV3ClassNamed(@"SBIconController") sharedInstance];
                 id iconModel = nil;
-                if ([iconController respondsToSelector:@selector(iconManager)]) {
-                    id iconManager = [iconController performSelector:@selector(iconManager)];
-                    if ([iconManager respondsToSelector:@selector(model)]) {
-                        iconModel = [iconManager performSelector:@selector(model)];
-                    }
-                }
-                if (!iconModel && [iconController respondsToSelector:@selector(model)]) {
-                    iconModel = [iconController performSelector:@selector(model)];
-                }
+                id iconManager = CV3InvokeObject(iconController, @selector(iconManager));
+                if (iconManager) iconModel = CV3InvokeObject(iconManager, @selector(model));
+                if (!iconModel) iconModel = CV3InvokeObject(iconController, @selector(model));
                 
-                if (iconModel && [iconModel respondsToSelector:@selector(leafIcons)]) {
-                    id leafIcons = [iconModel performSelector:@selector(leafIcons)];
+                if (iconModel) {
+                    id leafIcons = CV3InvokeObject(iconModel, @selector(leafIcons));
                     for (id icon in leafIcons) {
-                        if ([icon respondsToSelector:@selector(isApplicationIcon)] && [icon performSelector:@selector(isApplicationIcon)]) {
+                        if (CV3InvokeBool(icon, @selector(isApplicationIcon), NO)) {
                             NSString *bundleId = nil;
-                            if ([icon respondsToSelector:@selector(applicationBundleID)]) {
-                                bundleId = [icon performSelector:@selector(applicationBundleID)];
-                            } else if ([icon respondsToSelector:@selector(leafIdentifier)]) {
-                                bundleId = [icon performSelector:@selector(leafIdentifier)];
-                            }
+                            bundleId = CV3InvokeObject(icon, @selector(applicationBundleID));
+                            if (bundleId.length == 0) bundleId = CV3InvokeObject(icon, @selector(leafIdentifier));
                             
                             NSString *name = nil;
-                            if ([icon respondsToSelector:@selector(displayNameForLocation:)]) {
-                                name = [icon performSelector:@selector(displayNameForLocation:) withObject:nil];
-                            }
-                            if (!name && [icon respondsToSelector:@selector(displayName)]) {
-                                name = [icon performSelector:@selector(displayName)];
-                            }
+                            name = CV3InvokeObject1(icon, @selector(displayNameForLocation:), nil);
+                            if (name.length == 0) name = CV3InvokeObject(icon, @selector(displayName));
                             
                             if (!bundleId || !name) continue;
                             
@@ -6119,16 +5987,11 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
                             [info generatePinyin];
                             
                             @try {
-                                Class LSAP = NSClassFromString(@"LSApplicationProxy");
+                                Class LSAP = CV3ClassNamed(@"LSApplicationProxy");
                                 id proxy = nil;
-                                if ([LSAP respondsToSelector:@selector(applicationProxyForIdentifier:)]) {
-                                    proxy = [LSAP performSelector:@selector(applicationProxyForIdentifier:) withObject:bundleId];
-                                } else if ([LSAP respondsToSelector:@selector(applicationProxyForBundleIdentifier:)]) {
-                                    proxy = [LSAP performSelector:@selector(applicationProxyForBundleIdentifier:) withObject:bundleId];
-                                }
-                                if (proxy && [proxy respondsToSelector:@selector(genre)]) {
-                                    info.category = [proxy performSelector:@selector(genre)];
-                                }
+                                proxy = CV3InvokeObject1(LSAP, @selector(applicationProxyForIdentifier:), bundleId);
+                                if (!proxy) proxy = CV3InvokeObject1(LSAP, @selector(applicationProxyForBundleIdentifier:), bundleId);
+                                if (proxy) info.category = CV3InvokeObject(proxy, @selector(genre));
                             } @catch (NSException *e) {}
                             if (!info.category) info.category = @"其他";
                             
@@ -6142,11 +6005,11 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
                 }
                 
                 if (temp.count == 0) {
-                    id ws = [NSClassFromString(@"LSApplicationWorkspace") defaultWorkspace];
-                    for (id p in [ws performSelector:@selector(allInstalledApplications)]) {
+                    id ws = [CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace];
+                    for (id p in CV3InvokeObject(ws, @selector(allInstalledApplications))) {
                         if (![self shouldIncludeApp:p]) continue;
-                        NSString *bundleId = [p performSelector:@selector(bundleIdentifier)];
-                        NSString *name = [p performSelector:@selector(localizedName)];
+                        NSString *bundleId = CV3InvokeObject(p, @selector(bundleIdentifier));
+                        NSString *name = CV3InvokeObject(p, @selector(localizedName));
                         CV3AppInfo *info = [[CV3AppInfo alloc] init];
                         info.name = name;
                         info.bundleId = bundleId;
@@ -6365,22 +6228,14 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
 - (BOOL)isSystemUIActive {
     @try {
-        // 检查控制中心 (使用类查找并转换类型)
-        Class ccClass = NSClassFromString(@"SBControlCenterController");
-        if (ccClass && [ccClass respondsToSelector:@selector(sharedInstance)]) {
-            id cc = [ccClass performSelector:@selector(sharedInstance)];
-            if (cc && [cc respondsToSelector:@selector(isPresented)] && [cc isPresented]) {
-                return YES;
-            }
+        id cc = CV3InvokeObject(CV3ClassNamed(@"SBControlCenterController"), @selector(sharedInstance));
+        if (cc && CV3InvokeBool(cc, @selector(isPresented), NO)) {
+            return YES;
         }
         
-        // 检查通知栏/锁屏 (Cover Sheet)
-        Class csClass = NSClassFromString(@"SBCoverSheetPresentationManager");
-        if (csClass && [csClass respondsToSelector:@selector(sharedInstance)]) {
-            id cs = [csClass performSelector:@selector(sharedInstance)];
-            if (cs && [cs respondsToSelector:@selector(isAnyCoverSheetVisible)] && [cs isAnyCoverSheetVisible]) {
-                return YES;
-            }
+        id cs = CV3InvokeObject(CV3ClassNamed(@"SBCoverSheetPresentationManager"), @selector(sharedInstance));
+        if (cs && CV3InvokeBool(cs, @selector(isAnyCoverSheetVisible), NO)) {
+            return YES;
         }
     } @catch (NSException *e) {
         CV3LogToFile(@"[Error] isSystemUIActive 检查失败: %@", e);
@@ -6397,16 +6252,14 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
         @try {
             UIWindowScene *targetScene = nil;
-            if ([NSClassFromString(@"SBWindowScene") respondsToSelector:@selector(mainDisplayWindowScene)]) {
-                targetScene = [NSClassFromString(@"SBWindowScene") performSelector:@selector(mainDisplayWindowScene)];
-                if (targetScene) {
-                    NSString *role = targetScene.session.role;
-                    if ([role isEqualToString:@"SBWindowSceneSessionRoleSystemAperture"] ||
-                        [role isEqualToString:@"SBWindowSceneSessionRoleSystemApertureCurtain"] ||
-                        [role isEqualToString:@"UISceneSessionRolePlaceholder"] ||
-                        [[role lowercaseString] containsString:@"siri"]) {
-                        targetScene = nil;
-                    }
+            targetScene = CV3InvokeObject(CV3ClassNamed(@"SBWindowScene"), @selector(mainDisplayWindowScene));
+            if (targetScene) {
+                NSString *role = targetScene.session.role;
+                if ([role isEqualToString:@"SBWindowSceneSessionRoleSystemAperture"] ||
+                    [role isEqualToString:@"SBWindowSceneSessionRoleSystemApertureCurtain"] ||
+                    [role isEqualToString:@"UISceneSessionRolePlaceholder"] ||
+                    [[role lowercaseString] containsString:@"siri"]) {
+                    targetScene = nil;
                 }
             }
             
@@ -6649,91 +6502,7 @@ static NSTimeInterval lastLogTime = 0;
 }
 %end
 
-
-
-@interface SBWorkspaceEntity : NSObject
-- (id)applicationSceneEntity;
-@end
-
-static NSString *CV3BundleIdentifierFromWorkspaceObject(id object) {
-    if (!object) return nil;
-
-    NSArray *selectors = @[
-        @"bundleIdentifier",
-        @"applicationBundleIdentifier",
-        @"bundleID",
-        @"identifier"
-    ];
-
-    for (NSString *selectorName in selectors) {
-        SEL selector = NSSelectorFromString(selectorName);
-        if (![object respondsToSelector:selector]) continue;
-
-        @try {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            id value = [object performSelector:selector];
-#pragma clang diagnostic pop
-            if ([value isKindOfClass:[NSString class]] && [(NSString *)value length] > 0) {
-                return (NSString *)value;
-            }
-        } @catch (NSException *e) {}
-    }
-
-    NSArray *nestedSelectors = @[
-        @"applicationSceneEntity",
-        @"displayItem",
-        @"sceneHandle",
-        @"application",
-        @"entity"
-    ];
-
-    for (NSString *selectorName in nestedSelectors) {
-        SEL selector = NSSelectorFromString(selectorName);
-        if (![object respondsToSelector:selector]) continue;
-
-        @try {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            id nestedObject = [object performSelector:selector];
-#pragma clang diagnostic pop
-            if (nestedObject && nestedObject != object) {
-                NSString *bundleID = CV3BundleIdentifierFromWorkspaceObject(nestedObject);
-                if (bundleID.length > 0) return bundleID;
-            }
-        } @catch (NSException *e) {}
-    }
-
-    return nil;
-}
-
-static BOOL CV3WorkspaceEntityMatchesFloatingWindow(id entity, NSString **matchedBundleID) {
-    if (!entity || !floatingWindows || floatingWindows.count == 0) return NO;
-
-    NSString *entityBundleID = CV3BundleIdentifierFromWorkspaceObject(entity);
-    NSString *entityDescription = nil;
-    if (!entityBundleID) {
-        @try {
-            entityDescription = [entity description];
-        } @catch (NSException *e) {}
-    }
-
-    for (CV3FloatingAppWindow *win in floatingWindows) {
-        if (![win isKindOfClass:[CV3FloatingAppWindow class]] || win.isClosing || win.isStashed) continue;
-
-        BOOL matches = [entityBundleID isEqualToString:win.bundleID];
-        if (!matches && entityDescription.length > 0) {
-            matches = [entityDescription containsString:win.bundleID];
-        }
-
-        if (matches) {
-            if (matchedBundleID) *matchedBundleID = win.bundleID;
-            return YES;
-        }
-    }
-
-    return NO;
-}
+#import "CV3WorkspaceSupport.h"
 
 @interface SBWorkspaceTransitionRequest : NSObject
 @property (nonatomic, copy) NSSet *entities;
@@ -7046,10 +6815,10 @@ static BOOL CV3WorkspaceEntityMatchesFloatingWindow(id entity, NSString **matche
             if (!alreadyPresent) {
                 // [Fix] 动态构造 SBDisplayItem 并注入，确保系统在 TCC 和渲染管道中承认其活跃地位
                 @try {
-                    id item = nil;
-                    if ([NSClassFromString(@"SBDisplayItem") respondsToSelector:@selector(displayItemWithType:bundleIdentifier:)]) {
-                        item = [NSClassFromString(@"SBDisplayItem") performSelector:@selector(displayItemWithType:bundleIdentifier:) withObject:@"main" withObject:win.bundleID];
-                    }
+                    id item = CV3InvokeObject2(CV3ClassNamed(@"SBDisplayItem"),
+                                               @selector(displayItemWithType:bundleIdentifier:),
+                                               @"main",
+                                               win.bundleID);
                     if (item) {
                         [mutableItems addObject:item];
                         modified = YES;
@@ -7111,14 +6880,9 @@ static BOOL CV3WorkspaceEntityMatchesFloatingWindow(id entity, NSString **matche
     if (sharedWindow) {
         [sharedWindow attachToCurrentActiveScene];
         @try {
-            id activeItem = nil;
-            if ([self respondsToSelector:@selector(activeDisplayItem)]) {
-                activeItem = [self performSelector:@selector(activeDisplayItem)];
-            }
-            if (activeItem && [activeItem respondsToSelector:@selector(bundleIdentifier)]) {
-                NSString *bid = [activeItem performSelector:@selector(bundleIdentifier)];
-                CV3UpdateAdaptiveTint(bid);
-            }
+            id activeItem = CV3InvokeObject(self, @selector(activeDisplayItem));
+            NSString *bid = CV3InvokeObject(activeItem, @selector(bundleIdentifier));
+            if (bid.length > 0) CV3UpdateAdaptiveTint(bid);
         } @catch (NSException *e) {}
     }
 }
