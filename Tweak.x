@@ -524,6 +524,8 @@ static UIColor *CV3AverageColorFromImage(UIImage *image) {
 static NSMutableArray *floatingWindows = nil;
 static UIInterfaceOrientation CV3LastTrustedInterfaceOrientation = UIInterfaceOrientationPortrait;
 static BOOL CV3SuppressPresentationContextFanout = NO;
+static BOOL CV3WorkspaceTransitionActive = NO;
+static NSUInteger CV3WorkspaceTransitionProtectionToken = 0;
 
 static BOOL CV3IsValidInterfaceOrientation(UIInterfaceOrientation orientation) {
     return orientation != UIInterfaceOrientationUnknown && orientation != 0;
@@ -852,6 +854,8 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (CGRect)currentHostedSceneBounds;
 - (BOOL)applyHostedSceneLayoutToSettings:(id)settings force:(BOOL)force;
 - (BOOL)syncHostedSceneLayoutForce:(BOOL)force;
+- (BOOL)applyForegroundSovereigntyToSettings:(id)settings clearDeactivation:(BOOL)clearDeactivation forceLayout:(BOOL)forceLayout;
+- (void)stabilizeForegroundForWorkspaceTransition:(NSString *)reason;
 @end
 
 // --- Custom Resize Handle with Expanded Hit Area ---
@@ -1050,7 +1054,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
     BOOL didUpdate = NO;
     @try {
         FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
-        didUpdate = [self applyHostedSceneLayoutToSettings:settings force:force];
+        didUpdate = [self applyForegroundSovereigntyToSettings:settings clearDeactivation:YES forceLayout:force];
         if (didUpdate) {
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
@@ -1063,6 +1067,56 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
     }
 
     return didUpdate;
+}
+
+- (BOOL)applyForegroundSovereigntyToSettings:(id)settings clearDeactivation:(BOOL)clearDeactivation forceLayout:(BOOL)forceLayout {
+    if (!settings) return NO;
+
+    BOOL modified = NO;
+    modified |= CV3SetBoolSettingIfNeeded(settings, @selector(setForeground:), @"foreground", YES);
+    modified |= CV3SetBoolSettingIfNeeded(settings, @selector(setBackgrounded:), @"backgrounded", NO);
+    modified |= CV3SetBoolSettingIfNeeded(settings, NSSelectorFromString(@"setOccluded:"), @"occluded", NO);
+    modified |= CV3SetIntegerSettingIfNeeded(settings, NSSelectorFromString(@"setVisibility:"), @"visibility", 2);
+    modified |= CV3SetBoolSettingIfNeeded(settings, NSSelectorFromString(@"setIdleTimerDisabled:"), @"idleTimerDisabled", YES);
+    modified |= CV3SetIntegerSettingIfNeeded(settings,
+                                             @selector(setInterruptionPolicy:),
+                                             @"interruptionPolicy",
+                                             1);
+
+    if (clearDeactivation) {
+        modified |= CV3SetIntegerSettingIfNeeded(settings,
+                                                 @selector(setDeactivationReasons:),
+                                                 @"deactivationReasons",
+                                                 0);
+    }
+
+    modified |= [self applyHostedSceneLayoutToSettings:settings force:forceLayout];
+    return modified;
+}
+
+- (void)stabilizeForegroundForWorkspaceTransition:(NSString *)reason {
+    if (!self.targetScene || self.isClosing || self.isStashed) return;
+
+    @try {
+        FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
+        BOOL modified = [self applyForegroundSovereigntyToSettings:settings clearDeactivation:YES forceLayout:NO];
+        if (modified) {
+            [self.targetScene updateSettings:settings withTransitionContext:nil];
+            CV3LogToFile(@"[Continuity] 已稳定分屏前台状态(%@): %@", reason ?: @"Unknown", self.bundleID);
+        }
+
+        if ([self.targetScene respondsToSelector:@selector(_setContentState:)]) {
+            [self.targetScene _setContentState:2];
+        }
+
+        self.hostView.hidden = NO;
+        self.hostView.alpha = 1.0;
+        if (!self.rbsAssertion) {
+            [self updateSovereigntyAssertion];
+        }
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Error] stabilizeForegroundForWorkspaceTransition 异常: %@", e);
+    }
 }
 
 - (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene {
@@ -1336,44 +1390,10 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
             }
         }
 
-	        FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
-	        BOOL needsUpdate = NO;
-	        needsUpdate |= [self applyHostedSceneLayoutToSettings:settings force:NO];
-
-		        // 兼容性检查：优先通过 KVC 获取
-        BOOL currentBackgrounded = YES;
-        @try {
-            currentBackgrounded = [[settings valueForKey:@"backgrounded"] boolValue];
-        } @catch (NSException *e) {}
-
-        if (currentBackgrounded) {
-            CV3LogToFile(@"[Lifecycle] 检测到 App 被设为 Backgrounded，强制拉回: %@", self.bundleID);
-            [settings setBackgrounded:NO];
-            needsUpdate = YES;
-        }
-
-        @try {
-            BOOL currentForeground = [[settings valueForKey:@"foreground"] boolValue];
-            if (!currentForeground) {
-                CV3LogToFile(@"[Lifecycle] 检测到 App 被设为非 Foreground，强制拉回: %@", self.bundleID);
-                [settings setForeground:YES];
-                needsUpdate = YES;
-            }
-        } @catch (NSException *e) {}
+        FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
+        BOOL needsUpdate = [self applyForegroundSovereigntyToSettings:settings clearDeactivation:YES forceLayout:NO];
         
         if (needsUpdate) {
-            // [Foreground Sovereignty] Final Hardening: Force occluded=NO and visibility=2 to ensure hardware access (Camera/Mic)
-            @try {
-                // 强制修正 Settings 关键属性以维持前台表现
-                [settings setValue:@NO forKey:@"occluded"];
-                [settings setValue:@2 forKey:@"visibility"];
-                [settings setValue:@YES forKey:@"idleTimerDisabled"];
-                [settings setInterruptionPolicy:1]; // Suppress
-                [settings setValue:@0 forKey:@"deactivationReasons"];
-            } @catch (NSException *e) {
-                CV3LogToFile(@"[Error] 设置强制 Scene 参数失败: %@", e);
-            }
-
             [self.targetScene updateSettings:settings withTransitionContext:nil];
             
             // 确保内容状态强制为前台
@@ -1720,21 +1740,8 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
                 
                 // Step 1: 确保 Scene 已准备好被托管
                 FBSMutableSceneSettings *settings = [[targetScene settings] mutableCopy];
-                [settings setBackgrounded:NO];
-                [settings setForeground:YES];
-                
-                // [Foreground Sovereignty] Force occluded=NO and visibility=2 to ensure hardware access and rendering
-                @try {
-                    if ([settings respondsToSelector:@selector(setOccluded:)]) {
-                        [settings setValue:@NO forKey:@"occluded"];
-                    }
-                    if ([settings respondsToSelector:@selector(setVisibility:)]) {
-                        [settings setValue:@2 forKey:@"visibility"];
-                    }
-                } @catch (NSException *e) {}
-                
-                [self applyHostedSceneLayoutToSettings:settings force:YES];
-                
+                [self applyForegroundSovereigntyToSettings:settings clearDeactivation:YES forceLayout:YES];
+
                 [targetScene updateSettings:settings withTransitionContext:nil];
                 
                 if ([targetScene respondsToSelector:@selector(_setContentState:)]) {
@@ -2589,6 +2596,50 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
     }
 }@end
 
+static void CV3StabilizeFloatingWindowsForWorkspaceTransition(NSString *reason) {
+    if (!floatingWindows || floatingWindows.count == 0) return;
+
+    NSArray *windowsSnapshot = [floatingWindows copy];
+    for (CV3FloatingAppWindow *win in windowsSnapshot) {
+        if (![win isKindOfClass:[CV3FloatingAppWindow class]] || win.isClosing || win.isStashed) continue;
+        [win stabilizeForegroundForWorkspaceTransition:reason];
+    }
+}
+
+static void CV3BeginWorkspaceTransitionProtection(NSString *reason) {
+    if (!floatingWindows || floatingWindows.count == 0) return;
+
+    CV3WorkspaceTransitionActive = YES;
+    CV3WorkspaceTransitionProtectionToken++;
+    NSUInteger token = CV3WorkspaceTransitionProtectionToken;
+
+    CV3LogToFile(@"[Continuity] 开启 Workspace 转场保护: %@", reason ?: @"Unknown");
+    CV3StabilizeFloatingWindowsForWorkspaceTransition(reason ?: @"Begin");
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (token != CV3WorkspaceTransitionProtectionToken) return;
+        CV3WorkspaceTransitionActive = NO;
+        CV3StabilizeFloatingWindowsForWorkspaceTransition(@"ProtectionTimeout");
+        CV3LogToFile(@"[Continuity] Workspace 转场保护超时收尾");
+    });
+}
+
+static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
+    if (!floatingWindows || floatingWindows.count == 0) return;
+
+    CV3WorkspaceTransitionProtectionToken++;
+    NSUInteger token = CV3WorkspaceTransitionProtectionToken;
+
+    CV3StabilizeFloatingWindowsForWorkspaceTransition(reason ?: @"End");
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (token != CV3WorkspaceTransitionProtectionToken) return;
+        CV3WorkspaceTransitionActive = NO;
+        CV3StabilizeFloatingWindowsForWorkspaceTransition(@"ProtectionEnd");
+        CV3LogToFile(@"[Continuity] 结束 Workspace 转场保护: %@", reason ?: @"Unknown");
+    });
+}
+
 #pragma mark - Main Window
 @interface CV3Window : UIWindow <UIGestureRecognizerDelegate, UICollectionViewDataSource, UICollectionViewDelegate, UITextFieldDelegate>
 @property (nonatomic, strong) UIView *panelContainer; 
@@ -2872,6 +2923,7 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
 
         [self.searchField resignFirstResponder];
         [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
+        CV3BeginWorkspaceTransitionProtection([NSString stringWithFormat:@"LauncherOpen:%@", bid]);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
             [[NSClassFromString(@"LSApplicationWorkspace") defaultWorkspace] openApplicationWithBundleID:bid];
         });
@@ -5659,6 +5711,86 @@ static NSTimeInterval lastLogTime = 0;
 - (id)applicationSceneEntity;
 @end
 
+static NSString *CV3BundleIdentifierFromWorkspaceObject(id object) {
+    if (!object) return nil;
+
+    NSArray *selectors = @[
+        @"bundleIdentifier",
+        @"applicationBundleIdentifier",
+        @"bundleID",
+        @"identifier"
+    ];
+
+    for (NSString *selectorName in selectors) {
+        SEL selector = NSSelectorFromString(selectorName);
+        if (![object respondsToSelector:selector]) continue;
+
+        @try {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id value = [object performSelector:selector];
+#pragma clang diagnostic pop
+            if ([value isKindOfClass:[NSString class]] && [(NSString *)value length] > 0) {
+                return (NSString *)value;
+            }
+        } @catch (NSException *e) {}
+    }
+
+    NSArray *nestedSelectors = @[
+        @"applicationSceneEntity",
+        @"displayItem",
+        @"sceneHandle",
+        @"application",
+        @"entity"
+    ];
+
+    for (NSString *selectorName in nestedSelectors) {
+        SEL selector = NSSelectorFromString(selectorName);
+        if (![object respondsToSelector:selector]) continue;
+
+        @try {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id nestedObject = [object performSelector:selector];
+#pragma clang diagnostic pop
+            if (nestedObject && nestedObject != object) {
+                NSString *bundleID = CV3BundleIdentifierFromWorkspaceObject(nestedObject);
+                if (bundleID.length > 0) return bundleID;
+            }
+        } @catch (NSException *e) {}
+    }
+
+    return nil;
+}
+
+static BOOL CV3WorkspaceEntityMatchesFloatingWindow(id entity, NSString **matchedBundleID) {
+    if (!entity || !floatingWindows || floatingWindows.count == 0) return NO;
+
+    NSString *entityBundleID = CV3BundleIdentifierFromWorkspaceObject(entity);
+    NSString *entityDescription = nil;
+    if (!entityBundleID) {
+        @try {
+            entityDescription = [entity description];
+        } @catch (NSException *e) {}
+    }
+
+    for (CV3FloatingAppWindow *win in floatingWindows) {
+        if (![win isKindOfClass:[CV3FloatingAppWindow class]] || win.isClosing || win.isStashed) continue;
+
+        BOOL matches = [entityBundleID isEqualToString:win.bundleID];
+        if (!matches && entityDescription.length > 0) {
+            matches = [entityDescription containsString:win.bundleID];
+        }
+
+        if (matches) {
+            if (matchedBundleID) *matchedBundleID = win.bundleID;
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
 @interface SBWorkspaceTransitionRequest : NSObject
 @property (nonatomic, copy) NSSet *entities;
 @end
@@ -5692,25 +5824,12 @@ static NSTimeInterval lastLogTime = 0;
         BOOL modified = NO;
 
         for (id entity in orig) {
-            @try {
-                NSString *bid = nil;
-                if ([entity respondsToSelector:@selector(applicationSceneEntity)]) {
-                    id appEntity = [entity performSelector:@selector(applicationSceneEntity)];
-                    if ([appEntity respondsToSelector:@selector(bundleIdentifier)]) {
-                        bid = [appEntity performSelector:@selector(bundleIdentifier)];
-                    }
-                }
-
-                if (bid) {
-                    for (CV3FloatingAppWindow *win in floatingWindows) {
-                        if ([bid isEqualToString:win.bundleID] && !win.isClosing) {
-                            [mutableDeactivated removeObject:entity];
-                            modified = YES;
-                            CV3LogToFile(@"[Immortality] 成功从停用列表中剔除分屏应用: %@", bid);
-                        }
-                    }
-                }
-            } @catch (NSException *e) {}
+            NSString *bid = nil;
+            if (CV3WorkspaceEntityMatchesFloatingWindow(entity, &bid)) {
+                [mutableDeactivated removeObject:entity];
+                modified = YES;
+                CV3LogToFile(@"[Immortality] 成功从停用列表中剔除分屏应用: %@", bid);
+            }
         }
 
         if (modified) return [mutableDeactivated copy];
@@ -5725,25 +5844,12 @@ static NSTimeInterval lastLogTime = 0;
         BOOL modified = NO;
 
         for (id entity in orig) {
-            @try {
-                NSString *bid = nil;
-                if ([entity respondsToSelector:@selector(applicationSceneEntity)]) {
-                    id appEntity = [entity performSelector:@selector(applicationSceneEntity)];
-                    if ([appEntity respondsToSelector:@selector(bundleIdentifier)]) {
-                        bid = [appEntity performSelector:@selector(bundleIdentifier)];
-                    }
-                }
-
-                if (bid) {
-                    for (CV3FloatingAppWindow *win in floatingWindows) {
-                        if ([bid isEqualToString:win.bundleID] && !win.isClosing) {
-                            [mutableResigning removeObject:entity];
-                            modified = YES;
-                            CV3LogToFile(@"[Immortality] 成功从辞职(Resign)列表中剔除分屏应用: %@", bid);
-                        }
-                    }
-                }
-            } @catch (NSException *e) {}
+            NSString *bid = nil;
+            if (CV3WorkspaceEntityMatchesFloatingWindow(entity, &bid)) {
+                [mutableResigning removeObject:entity];
+                modified = YES;
+                CV3LogToFile(@"[Immortality] 成功从辞职(Resign)列表中剔除分屏应用: %@", bid);
+            }
         }
 
         if (modified) return [mutableResigning copy];
@@ -6018,6 +6124,7 @@ static NSTimeInterval lastLogTime = 0;
 
 - (void)transaction:(id)arg1 willBeginLayoutTransitionWithContext:(id)arg2 {
     CV3LogToFile(@"[Workspace] Layout 转换即将开始...");
+    CV3BeginWorkspaceTransitionProtection(@"LayoutWillBegin");
     %orig;
     // 核心：在转换全周期高频维持分屏 App 的活跃度
     if (floatingWindows) {
@@ -6035,19 +6142,21 @@ static NSTimeInterval lastLogTime = 0;
     if ([arg1 respondsToSelector:@selector(source)]) {
         CV3LogToFile(@"[Workspace] 执行转换请求, Source: %ld", (long)[(SBMainWorkspaceTransitionRequest *)arg1 source]);
     }
+    CV3BeginWorkspaceTransitionProtection(@"ExecuteTransitionRequest");
     %orig(arg1);
 }
 
 - (void)workspace:(id)arg1 didExecuteTransitionRequest:(id)arg2 {
     %orig;
     CV3LogToFile(@"[Workspace] 转换请求已执行完毕，执行最终渲染对齐");
+    CV3EndWorkspaceTransitionProtection(@"DidExecuteTransitionRequest");
     if (floatingWindows) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if ([win isKindOfClass:[CV3FloatingAppWindow class]] && !win.isClosing) {
                 // 转换后稍微延迟执行，确保系统状态稳定
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     [win attachToCurrentActiveScene];
-                    [win refreshHostViewPresentation];
+                    [win stabilizeForegroundForWorkspaceTransition:@"DidExecuteDelayedAlign"];
                     CV3LogToFile(@"[Workspace] 转换后延迟对齐完成: %@", win.bundleID);
                 });
             }
@@ -6276,6 +6385,9 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
 
 %hook SBMainSwitcherViewController
 - (void)setSwitcherWindowVisible:(BOOL)arg1 {
+    if (arg1) {
+        CV3BeginWorkspaceTransitionProtection(@"SwitcherWindowVisible");
+    }
     %orig;
     // 核心：当 Switcher 窗口状态改变时，强制刷新所有分屏窗口的显示状态
     if (floatingWindows) {
@@ -6284,19 +6396,30 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                 [win setHidden:NO];
                 [win makeKeyAndVisible];
                 win.windowLevel = CV3Style.floatingApp;
-                [win refreshHostViewPresentation];
+                if (CV3WorkspaceTransitionActive || arg1) {
+                    [win stabilizeForegroundForWorkspaceTransition:@"SwitcherWindowVisible"];
+                } else {
+                    [win refreshHostViewPresentation];
+                }
             }
         }
     }
 }
 
 - (void)_setMainSwitcherVisible:(BOOL)arg1 {
+    if (arg1) {
+        CV3BeginWorkspaceTransitionProtection(@"MainSwitcherVisible");
+    }
     %orig;
     if (floatingWindows) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if ([win isKindOfClass:[CV3FloatingAppWindow class]] && !win.isClosing) {
                 [win setHidden:NO];
-                [win refreshHostViewPresentation];
+                if (CV3WorkspaceTransitionActive || arg1) {
+                    [win stabilizeForegroundForWorkspaceTransition:@"MainSwitcherVisible"];
+                } else {
+                    [win refreshHostViewPresentation];
+                }
             }
         }
     }
@@ -6316,45 +6439,11 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                 }
 
                 id mutableSettings = [arg1 mutableCopy];
-                BOOL modified = NO;
-
-                modified |= CV3SetBoolSettingIfNeeded(mutableSettings, @selector(setForeground:), @"foreground", YES);
-                modified |= CV3SetBoolSettingIfNeeded(mutableSettings, @selector(setBackgrounded:), @"backgrounded", NO);
-                
-                // [Foreground Sovereignty] Extra Hardening in global hook
-                @try {
-                    modified |= CV3SetBoolSettingIfNeeded(mutableSettings, NSSelectorFromString(@"setOccluded:"), @"occluded", NO);
-                    modified |= CV3SetIntegerSettingIfNeeded(mutableSettings, NSSelectorFromString(@"setVisibility:"), @"visibility", 2);
-                    modified |= CV3SetBoolSettingIfNeeded(mutableSettings, NSSelectorFromString(@"setIdleTimerDisabled:"), @"idleTimerDisabled", YES);
-
-                    // [Foreground Sovereignty] Force interruptionPolicy to 1 (Suppress)
-                    modified |= CV3SetIntegerSettingIfNeeded(mutableSettings,
-                                                             @selector(setInterruptionPolicy:),
-                                                             @"interruptionPolicy",
-                                                             1);
-
-                    // [Layout Sovereignty] 弹性布局约束
-                    // [Geek Advice] 停止强制注入 UIEdgeInsetsZero。允许 App 保留其内部安全区域，防止全屏查看图片时触发布局计算死锁。
-                    if ([mutableSettings isKindOfClass:[%c(UIMutableApplicationSceneSettings) class]]) {
-                        UIMutableApplicationSceneSettings *uim = (UIMutableApplicationSceneSettings *)mutableSettings;
-                        
-                        // [Deadlock Prevention] 如果正在进行 UI 转场（如查看大图），减少干预以避免破坏系统 Fencing 同步
-                        BOOL isTransitioning = (arg2 != nil);
-                        
-                        if (!isTransitioning) {
-                            // 仅在非转场态下清除失活原因，确保视频等内容在分屏下持续播放
-                            if ([uim respondsToSelector:@selector(setDeactivationReasons:)] && uim.deactivationReasons != 0) {
-                                uim.deactivationReasons = 0;
-                                modified = YES;
-                            }
-                            
-                            // 移除原有的 UIEdgeInsetsZero 强制注入和 interfaceOrientation 强制覆盖。
-                            // 方向同步已收拢至 layoutSubviews 中的主动下发逻辑。
-                        }
-
-                    }
-                    modified |= [win applyHostedSceneLayoutToSettings:mutableSettings force:NO];
-                } @catch (NSException *e) {}
+                BOOL isTransitioning = (arg2 != nil);
+                BOOL clearDeactivation = (!isTransitioning || CV3WorkspaceTransitionActive);
+                BOOL modified = [win applyForegroundSovereigntyToSettings:mutableSettings
+                                                         clearDeactivation:clearDeactivation
+                                                               forceLayout:NO];
 
                 if (modified) {
                     CV3LogToFile(@"[FBScene] 捕捉到 Settings 更新请求: %@", win.bundleID);
@@ -6364,7 +6453,7 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                 }
                 
                 // [Anti-Ghosting] Detect transition and clear stale frames
-                if (arg2 != nil) {
+                if (arg2 != nil && !CV3WorkspaceTransitionActive) {
                     [win performSelectorOnMainThread:@selector(handleTransitionGhosting) withObject:nil waitUntilDone:NO];
                 }
                 // [Optimization] 移除此处的 refreshHostViewPresentation。
@@ -6387,37 +6476,11 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                 }
 
                 id mutableSettings = [arg1 mutableCopy];
-                BOOL modified = NO;
-
-                modified |= CV3SetBoolSettingIfNeeded(mutableSettings, @selector(setForeground:), @"foreground", YES);
-                modified |= CV3SetBoolSettingIfNeeded(mutableSettings, @selector(setBackgrounded:), @"backgrounded", NO);
-                
-                @try {
-                    modified |= CV3SetBoolSettingIfNeeded(mutableSettings, NSSelectorFromString(@"setOccluded:"), @"occluded", NO);
-                    modified |= CV3SetIntegerSettingIfNeeded(mutableSettings, NSSelectorFromString(@"setVisibility:"), @"visibility", 2);
-                    modified |= CV3SetBoolSettingIfNeeded(mutableSettings, NSSelectorFromString(@"setIdleTimerDisabled:"), @"idleTimerDisabled", YES);
-
-                    // [Foreground Sovereignty] Force interruptionPolicy to 1 (Suppress)
-                    modified |= CV3SetIntegerSettingIfNeeded(mutableSettings,
-                                                             @selector(setInterruptionPolicy:),
-                                                             @"interruptionPolicy",
-                                                             1);
-
-                    // [Layout Sovereignty] 弹性布局约束
-                    if ([mutableSettings isKindOfClass:[%c(UIMutableApplicationSceneSettings) class]]) {
-                        UIMutableApplicationSceneSettings *uim = (UIMutableApplicationSceneSettings *)mutableSettings;
-                        
-                        BOOL isTransitioning = (arg2 != nil);
-                        if (!isTransitioning) {
-                            if ([uim respondsToSelector:@selector(setDeactivationReasons:)] && uim.deactivationReasons != 0) {
-                                uim.deactivationReasons = 0;
-                                modified = YES;
-                            }
-                        }
-
-                    }
-                    modified |= [win applyHostedSceneLayoutToSettings:mutableSettings force:NO];
-                } @catch (NSException *e) {}
+                BOOL isTransitioning = (arg2 != nil);
+                BOOL clearDeactivation = (!isTransitioning || CV3WorkspaceTransitionActive);
+                BOOL modified = [win applyForegroundSovereigntyToSettings:mutableSettings
+                                                         clearDeactivation:clearDeactivation
+                                                               forceLayout:NO];
 
                 if (modified) {
                     CV3LogToFile(@"[FBScene] 捕捉到 Settings 更新请求 (带 completion): %@", win.bundleID);
@@ -6427,7 +6490,7 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
                 }
                 
                 // [Anti-Ghosting] Detect transition and clear stale frames
-                if (arg2 != nil) {
+                if (arg2 != nil && !CV3WorkspaceTransitionActive) {
                     [win performSelectorOnMainThread:@selector(handleTransitionGhosting) withObject:nil waitUntilDone:NO];
                 }
                 // [Optimization] 移除此处的 refreshHostViewPresentation，理由同上。
@@ -6499,7 +6562,7 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
 %hook UIScenePresentationContext
 - (void)setAppearanceStyle:(NSUInteger)arg1 {
     %orig(arg1);
-    if (arg1 == 2 && !CV3SuppressPresentationContextFanout) { // 2 = Interactive/Real-time
+    if (arg1 == 2 && !CV3SuppressPresentationContextFanout && !CV3WorkspaceTransitionActive) { // 2 = Interactive/Real-time
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if (!win.isClosing) [win performSelectorOnMainThread:@selector(refreshHostViewPresentation) withObject:nil waitUntilDone:NO];
         }
