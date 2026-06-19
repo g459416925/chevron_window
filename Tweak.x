@@ -202,6 +202,52 @@
 }
 @end
 
+// --- 新增：跨进程共享内存结构定义 ---
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+
+typedef struct {
+    uint32_t magic;      // 验证标识 0x43563353 ("CV3S")
+    uint32_t isHosted;   // 1 表示开启，0 表示隐藏
+    float width;         // 窗口宽度
+    float height;        // 窗口高度
+} CV3SharedGeometry;
+
+static CV3SharedGeometry *sharedGeometry = NULL;
+static int sharedGeometryFD = -1;
+
+static void CV3InitSharedGeometry(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *path = @"/var/mobile/Library/Preferences/com.xu.chevronv3.shm";
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSString *parentDir = [path stringByDeletingLastPathComponent];
+        
+        @try {
+            if (![fm fileExistsAtPath:parentDir]) {
+                [fm createDirectoryAtPath:parentDir withIntermediateDirectories:YES attributes:nil error:nil];
+            }
+            
+            int fd = open([path UTF8String], O_RDWR | O_CREAT, 0666);
+            if (fd >= 0) {
+                ftruncate(fd, sizeof(CV3SharedGeometry));
+                chmod([path UTF8String], 0666); // 赋予全局读写权限，供沙盒 App 映射
+                
+                void *addr = mmap(NULL, sizeof(CV3SharedGeometry), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+                if (addr != MAP_FAILED) {
+                    sharedGeometry = (CV3SharedGeometry *)addr;
+                    sharedGeometryFD = fd;
+                    sharedGeometry->magic = 0x43563353;
+                    NSLog(@"[ChevronV3] [SHM] 跨进程 mmap 共享内存初始化成功：%p", sharedGeometry);
+                } else {
+                    close(fd);
+                }
+            }
+        } @catch (NSException *e) {}
+    });
+}
+
 // --- 新增：集中化样式配置 ---
 struct {
     // UI 样式
@@ -537,7 +583,7 @@ static BOOL CV3IsValidInterfaceOrientation(UIInterfaceOrientation orientation) {
     return orientation != UIInterfaceOrientationUnknown && orientation != 0;
 }
 
-static UIInterfaceOrientation CV3InterfaceOrientationFromDevice(void) {
+__attribute__((unused)) static UIInterfaceOrientation CV3InterfaceOrientationFromDevice(void) {
     UIDeviceOrientation deviceOrientation = [UIDevice currentDevice].orientation;
     switch (deviceOrientation) {
         case UIDeviceOrientationPortrait:
@@ -553,7 +599,7 @@ static UIInterfaceOrientation CV3InterfaceOrientationFromDevice(void) {
     }
 }
 
-static UIDeviceOrientation CV3DeviceOrientationFromInterface(UIInterfaceOrientation orientation) {
+__attribute__((unused)) static UIDeviceOrientation CV3DeviceOrientationFromInterface(UIInterfaceOrientation orientation) {
     switch (orientation) {
         case UIInterfaceOrientationPortrait:
             return UIDeviceOrientationPortrait;
@@ -587,12 +633,6 @@ static UIInterfaceOrientation CV3TrustedInterfaceOrientation(UIWindowScene *pref
         }
     }
 
-    UIInterfaceOrientation deviceOrientation = CV3InterfaceOrientationFromDevice();
-    if (CV3IsValidInterfaceOrientation(deviceOrientation)) {
-        CV3LastTrustedInterfaceOrientation = deviceOrientation;
-        return deviceOrientation;
-    }
-
     if (CV3IsValidInterfaceOrientation(CV3LastTrustedInterfaceOrientation)) {
         return CV3LastTrustedInterfaceOrientation;
     }
@@ -602,6 +642,20 @@ static UIInterfaceOrientation CV3TrustedInterfaceOrientation(UIWindowScene *pref
     }
 
     return UIInterfaceOrientationPortrait;
+}
+
+static CGAffineTransform CV3RotationTransformForInterfaceOrientation(UIInterfaceOrientation orientation) {
+    switch (orientation) {
+        case UIInterfaceOrientationLandscapeLeft:
+            return CGAffineTransformMakeRotation(-M_PI_2);
+        case UIInterfaceOrientationLandscapeRight:
+            return CGAffineTransformMakeRotation(M_PI_2);
+        case UIInterfaceOrientationPortraitUpsideDown:
+            return CGAffineTransformMakeRotation(M_PI);
+        case UIInterfaceOrientationPortrait:
+        default:
+            return CGAffineTransformIdentity;
+    }
 }
 
 static BOOL CV3SetIntegerSetting(id settings, SEL getter, SEL setter, NSString *key, NSInteger value, BOOL force) {
@@ -820,6 +874,8 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 @property (nonatomic, strong) NSTimer *chromeCollapseTimer;
 @property (nonatomic, strong) UIView *resizeHandle;
 @property (nonatomic, strong) CAShapeLayer *resizeHandleLayer;
+@property (nonatomic, assign) CGSize resizeHandleVisualSize;
+@property (nonatomic, strong) UIPanGestureRecognizer *windowResizePan;
 @property (nonatomic, strong) FBScene *targetScene;
 @property (nonatomic, assign) CGRect initialResizeFrame;
 @property (nonatomic, assign) BOOL isStashed;
@@ -906,6 +962,65 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 }
 @end
 
+// --- Custom iPadOS Multitasking Capsule with Touch Redirection ---
+@interface CV3TrafficCapsule : UIView
+@property (nonatomic, strong) UIVisualEffectView *blurView;
+@end
+
+@implementation CV3TrafficCapsule
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.backgroundColor = [UIColor clearColor];
+        self.clipsToBounds = NO; // 不裁切超出的物理按钮热区
+        
+        UIBlurEffect *blurEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial];
+        self.blurView = [[UIVisualEffectView alloc] initWithEffect:blurEffect];
+        self.blurView.frame = self.bounds;
+        self.blurView.layer.cornerRadius = frame.size.height / 2.0;
+        self.blurView.layer.masksToBounds = YES;
+        self.blurView.layer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.08].CGColor;
+        self.blurView.layer.borderWidth = 0.5;
+        self.blurView.userInteractionEnabled = NO; // 极其重要：不阻拦子按钮的事件流
+        [self addSubview:self.blurView];
+    }
+    return self;
+}
+
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    // 隐形判定盾牌：判定范围向外扩充 15.0 pt，提升边缘盲按响应率
+    CGRect hitFrame = CGRectInset(self.bounds, -15.0, -15.0);
+    return CGRectContainsPoint(hitFrame, point);
+}
+
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    if (self.hidden || !self.userInteractionEnabled || self.alpha < 0.01) return nil;
+    
+    // 如果在扩大的判定区域内，但点偏了没直接命中按钮，则根据横坐标区间，智能转发给对应的子按钮
+    if ([self pointInside:point withEvent:event]) {
+        UIView *hit = [super hitTest:point withEvent:event];
+        if (hit && [hit isKindOfClass:[UIButton class]]) {
+            return hit;
+        }
+        
+        // 坐标重映射：根据局部的 X 坐标分配到 3 等分区间 (0 = 左, 1 = 中, 2 = 右)
+        CGFloat x = point.x;
+        x = MIN(MAX(0.0, x), self.bounds.size.width);
+        NSInteger index = (NSInteger)(x / (self.bounds.size.width / 3.0));
+        index = MIN(2, MAX(0, index));
+        
+        // 查找 tag 匹配 of 子按钮并重定向触控
+        for (UIView *sub in self.subviews) {
+            if ([sub isKindOfClass:[UIButton class]] && sub.tag == index) {
+                return sub;
+            }
+        }
+    }
+    return [super hitTest:point withEvent:event];
+}
+@end
+
+
 static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     (void)preferredScene;
 }
@@ -943,26 +1058,47 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     %orig(alpha);
 }
 
-// 核心增强：允许触控溢出窗口边界 (针对缩放把手)
-- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
-    if (![self isKindOfClass:[CV3FloatingAppWindow class]]) return %orig;
+static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent *event) {
+    if (![selfWindow isKindOfClass:[CV3FloatingAppWindow class]]) return NO;
     
-    if (CGRectContainsPoint(self.bounds, point)) return YES;
-    CV3FloatingAppWindow *floatingWindow = (CV3FloatingAppWindow *)self;
+    if (CGRectContainsPoint(selfWindow.bounds, point)) return YES;
+    
+    CV3FloatingAppWindow *floatingWindow = (CV3FloatingAppWindow *)selfWindow;
     if (floatingWindow.rootTransformContainer &&
         CGRectContainsPoint(floatingWindow.rootTransformContainer.frame, point)) {
         return YES;
     }
     
-    // 专门为右下角缩放把手留出外部“吸附热区”
-    // 使用 CV3Style.resizeHandleWindowExpansion 确保与把手热区同步
-    // 我们将捕捉范围扩大到以右下角为顶点的正方形区域，确保手指即便在窗口外很远也能“吸住”
-    CGRect bounds = self.bounds;
+    CGRect bounds = selfWindow.bounds;
     CGFloat expansion = CV3Style.resizeHandleWindowExpansion;
     CGRect resizeExtraHitBox = CGRectMake(bounds.size.width - expansion, bounds.size.height - expansion, expansion * 2, expansion * 2);
     if (CGRectContainsPoint(resizeExtraHitBox, point)) return YES;
     
     return NO;
+}
+
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    if (![self isKindOfClass:[CV3FloatingAppWindow class]]) return %orig;
+    
+    // Z-order 点击透传退避算法：如果点击落在更顶层窗口的有效判定区内，则下层主动退避，交由上层响应
+    if (floatingWindows && floatingWindows.count > 1) {
+        NSInteger myIndex = [floatingWindows indexOfObject:self];
+        if (myIndex != NSNotFound) {
+            CGPoint screenPoint = [self convertPoint:point toView:nil];
+            
+            for (NSInteger i = myIndex + 1; i < floatingWindows.count; i++) {
+                CV3FloatingAppWindow *upperWin = floatingWindows[i];
+                if ([upperWin isKindOfClass:[CV3FloatingAppWindow class]] && !upperWin.hidden && !upperWin.isClosing) {
+                    CGPoint localPoint = [upperWin convertPoint:screenPoint fromView:nil];
+                    if (CV3PhysicalPointInside(upperWin, localPoint, event)) {
+                        return NO;
+                    }
+                }
+            }
+        }
+    }
+    
+    return CV3PhysicalPointInside(self, point, event);
 }
 %end
 
@@ -971,18 +1107,20 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     if (self.isStashed || self.isClosing) return;
 
     self.transform = CGAffineTransformIdentity;
-    self.targetOrientation = CV3TrustedInterfaceOrientation(self.windowScene);
-    self.baseRotationTransform = CGAffineTransformIdentity;
-    self.rootTransformContainer.transform = CGAffineTransformIdentity;
+    UIInterfaceOrientation orientation = CV3TrustedInterfaceOrientation(self.windowScene);
+    self.targetOrientation = orientation;
+    CGAffineTransform targetRotation = CV3RotationTransformForInterfaceOrientation(orientation);
+    self.baseRotationTransform = targetRotation;
+    self.rootTransformContainer.transform = targetRotation;
 }
 
 - (void)applyInterfaceOrientation:(UIInterfaceOrientation)orientation force:(BOOL)force {
     if (!CV3IsValidInterfaceOrientation(orientation) || self.isClosing) return;
 
+    CGAffineTransform targetRotation = CV3RotationTransformForInterfaceOrientation(orientation);
     BOOL orientationChanged = (self.lastLayoutOrientation != orientation);
+    BOOL rotationChanged = !CGAffineTransformEqualToTransform(self.baseRotationTransform, targetRotation);
     BOOL targetIsLandscape = UIInterfaceOrientationIsLandscape(orientation);
-    BOOL windowIsLandscape = self.bounds.size.width > self.bounds.size.height;
-    BOOL geometryChanged = (targetIsLandscape != windowIsLandscape);
 
     CV3LastTrustedInterfaceOrientation = orientation;
     self.targetOrientation = orientation;
@@ -992,22 +1130,70 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
         return;
     }
 
-    if (!force && !orientationChanged && !geometryChanged) {
+    if (!force && !orientationChanged && !rotationChanged) {
         return;
     }
 
-    if (geometryChanged) {
-        CGPoint oldCenter = self.center;
-        CGSize oldSize = self.bounds.size;
-        CGSize newSize = CGSizeMake(oldSize.height, oldSize.width);
+    CGPoint oldCenter = self.center;
+    CGSize newSize;
+    
+    CGRect screenBounds = [UIScreen mainScreen].bounds;
+    CGFloat portraitW = MIN(screenBounds.size.width, screenBounds.size.height);
+    CGFloat portraitH = MAX(screenBounds.size.width, screenBounds.size.height);
+    CGFloat screenScale = portraitH / portraitW; // 真机物理分辨率长宽比例
 
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        self.transform = CGAffineTransformIdentity;
-        self.bounds = CGRectMake(0, 0, MAX(1.0, newSize.width), MAX(1.0, newSize.height));
-        self.center = oldCenter;
-        self.rootTransformContainer.transform = CGAffineTransformIdentity;
-        [CATransaction commit];
+    if (targetIsLandscape) {
+        // 横屏状态下：仍维持竖直窗口，仅以可用高度为上限做等比缩放。
+        UIWindow *keyWindow = nil;
+        if (@available(iOS 15.0, *)) {
+            keyWindow = self.windowScene.keyWindow;
+        } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            keyWindow = [UIApplication sharedApplication].keyWindow;
+#pragma clang diagnostic pop
+        }
+        UIEdgeInsets safeArea = keyWindow ? keyWindow.safeAreaInsets : UIEdgeInsetsMake(47, 0, 34, 0);
+        CGFloat breath = CV3Style.safeAreaBreath;
+        CGFloat maxH = portraitW - safeArea.top - safeArea.bottom - breath * 2.0;
+        CGFloat targetH = MAX(1.0, maxH);
+        CGFloat targetW = targetH / MAX(screenScale, 1.0);
+        newSize = CGSizeMake(targetW, targetH);
+    } else {
+        // 竖屏状态下：默认占屏幕宽度的 45%，高度按物理分辨率比例缩放
+        CGFloat targetW = portraitW * 0.45;
+        newSize = CGSizeMake(targetW, targetW * screenScale);
+    }
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.transform = CGAffineTransformIdentity;
+    self.bounds = CGRectMake(0, 0, MAX(1.0, newSize.width), MAX(1.0, newSize.height));
+    
+    self.center = oldCenter;
+
+    self.baseRotationTransform = targetRotation;
+    self.rootTransformContainer.transform = targetRotation;
+    
+    [CATransaction commit];
+
+    // 转屏时将窗口像果冻一样平滑弹跳居中，加入级联偏移防止多窗口重叠，并保证安全区域避让
+    if (orientationChanged) {
+        NSInteger index = 0;
+        if (floatingWindows) {
+            index = [floatingWindows indexOfObject:self];
+            if (index == NSNotFound) index = 0;
+        }
+        CGFloat cascade = index * 20.0;
+        [UIView animateWithDuration:0.55
+                              delay:0
+             usingSpringWithDamping:0.48 // 果冻物理阻尼系数
+              initialSpringVelocity:0.6
+                            options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionBeginFromCurrentState
+                         animations:^{
+            self.center = CGPointMake([UIScreen mainScreen].bounds.size.width / 2.0 + cascade, [UIScreen mainScreen].bounds.size.height / 2.0 + cascade);
+            [self clampToScreenBounds];
+        } completion:nil];
     }
 
     self.lastLayoutOrientation = orientation;
@@ -1023,25 +1209,17 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
 }
 
 - (CGRect)visiblePortraitContentFrame {
+    if (self.rootTransformContainer && !CGRectIsEmpty(self.rootTransformContainer.bounds)) {
+        return self.rootTransformContainer.bounds;
+    }
     return self.bounds;
 }
 
 - (CGRect)currentHostedSceneBounds {
-    CGRect visibleFrame = [self visiblePortraitContentFrame];
-    CGFloat logicalW = MAX(1.0, visibleFrame.size.width);
-    CGFloat logicalH = MAX(1.0, visibleFrame.size.height);
     CGRect rawScreenBounds = [UIScreen mainScreen].bounds;
-    CGFloat screenLongSide = MAX(rawScreenBounds.size.width, rawScreenBounds.size.height);
-
-    if (logicalW >= logicalH) {
-        CGFloat virtualW = screenLongSide;
-        CGFloat virtualH = virtualW * (logicalH / logicalW);
-        return CGRectMake(0, 0, virtualW, virtualH);
-    }
-
-    CGFloat virtualH = screenLongSide;
-    CGFloat virtualW = virtualH * (logicalW / logicalH);
-    return CGRectMake(0, 0, virtualW, virtualH);
+    CGFloat portraitW = MIN(rawScreenBounds.size.width, rawScreenBounds.size.height);
+    CGFloat portraitH = MAX(rawScreenBounds.size.width, rawScreenBounds.size.height);
+    return CGRectMake(0, 0, portraitW, portraitH);
 }
 
 - (BOOL)applyHostedSceneLayoutToSettings:(id)settings force:(BOOL)force {
@@ -1049,8 +1227,8 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
 
     BOOL modified = NO;
     CGRect targetFrame = [self currentHostedSceneBounds];
-    UIInterfaceOrientation targetOrientation = CV3TrustedInterfaceOrientation(self.windowScene);
-    self.targetOrientation = targetOrientation;
+    // 宿主 App 始终按手机竖屏物理分辨率渲染，外层分屏窗口再统一负责视觉旋转。
+    UIInterfaceOrientation targetOrientation = UIInterfaceOrientationPortrait;
 
     @try {
         if (force ||
@@ -1071,7 +1249,7 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
                                      orientationValue,
                                      force);
 
-    UIDeviceOrientation deviceOrientation = CV3DeviceOrientationFromInterface(targetOrientation);
+    UIDeviceOrientation deviceOrientation = UIDeviceOrientationPortrait;
     if (deviceOrientation != UIDeviceOrientationUnknown) {
         modified |= CV3SetIntegerSetting(settings,
                                          @selector(deviceOrientation),
@@ -1158,15 +1336,24 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
 }
 
 - (UIButton *)chromeButtonWithTitle:(NSString *)title action:(SEL)action {
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
     (void)title;
     button.tintColor = [UIColor clearColor];
     [button setTitle:nil forState:UIControlStateNormal];
     [button setImage:nil forState:UIControlStateNormal];
-    button.layer.cornerRadius = CV3Style.floatingChromeControlSize / 2.0;
-    button.layer.masksToBounds = YES;
-    button.layer.borderWidth = 0.5 / [UIScreen mainScreen].scale;
-    button.layer.borderColor = [[UIColor blackColor] colorWithAlphaComponent:0.18].CGColor;
+    button.clipsToBounds = NO;
+    
+    // 视觉圆点作为子视图居中
+    UIView *visualDot = [[UIView alloc] initWithFrame:CGRectZero];
+    visualDot.tag = 999;
+    visualDot.backgroundColor = [UIColor secondaryLabelColor];
+    visualDot.layer.cornerRadius = CV3Style.floatingChromeControlSize / 2.0;
+    visualDot.layer.masksToBounds = YES;
+    visualDot.layer.borderWidth = 0.5 / [UIScreen mainScreen].scale;
+    visualDot.layer.borderColor = [[UIColor blackColor] colorWithAlphaComponent:0.18].CGColor;
+    visualDot.userInteractionEnabled = NO;
+    [button addSubview:visualDot];
+    
     [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
     return button;
 }
@@ -1178,39 +1365,41 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     self.chromeMinimizeButton.hidden = NO;
     self.chromeCloseButton.hidden = NO;
 
-    self.chromeDragHandle.backgroundColor = self.chromeControlsExpanded ? [[UIColor systemBackgroundColor] colorWithAlphaComponent:0.28] : [[UIColor systemBackgroundColor] colorWithAlphaComponent:0.16];
+    // 去掉药丸把手的视觉背景和描边（使其透明，仅保留手势物理拦截区）
+    self.chromeDragHandle.backgroundColor = [UIColor clearColor];
+    self.chromeDragHandle.layer.borderColor = [UIColor clearColor].CGColor;
+    self.chromeDragHandle.layer.borderWidth = 0.0;
     self.chromeDragHandle.layer.cornerRadius = self.chromeDragHandle.bounds.size.height / 2.0;
-    self.chromeDragHandle.layer.shadowColor = [UIColor blackColor].CGColor;
-    self.chromeDragHandle.layer.shadowOffset = CGSizeMake(0, 1.0);
-    self.chromeDragHandle.layer.shadowOpacity = self.chromeControlsExpanded ? 0.20 : 0.08;
-    self.chromeDragHandle.layer.shadowRadius = self.chromeControlsExpanded ? 4.0 : 2.0;
+    self.chromeDragHandle.clipsToBounds = NO; // 不裁切子圆点的物理缩放交互边界
+    
+    // 取消生硬投影
+    self.chromeDragHandle.layer.shadowColor = [UIColor clearColor].CGColor;
+    self.chromeDragHandle.layer.shadowOpacity = 0.0;
 
-    if (self.chromeControlsExpanded) {
-        self.chromeCloseButton.layer.borderWidth = 0.5 / [UIScreen mainScreen].scale;
-        self.chromeMinimizeButton.layer.borderWidth = 0.5 / [UIScreen mainScreen].scale;
-        self.chromeModeButton.layer.borderWidth = 0.5 / [UIScreen mainScreen].scale;
-        self.chromeCloseButton.backgroundColor = [UIColor colorWithRed:1.00 green:0.36 blue:0.32 alpha:0.96];
-        self.chromeMinimizeButton.backgroundColor = [UIColor colorWithRed:1.00 green:0.78 blue:0.28 alpha:0.96];
-        self.chromeModeButton.backgroundColor = [UIColor colorWithRed:0.22 green:0.82 blue:0.37 alpha:0.96];
-    } else {
-        self.chromeCloseButton.layer.borderWidth = 0;
-        self.chromeMinimizeButton.layer.borderWidth = 0;
-        self.chromeModeButton.layer.borderWidth = 0;
-        UIColor *dotColor = [[UIColor systemGrayColor] colorWithAlphaComponent:0.46];
-        self.chromeCloseButton.backgroundColor = dotColor;
-        self.chromeMinimizeButton.backgroundColor = dotColor;
-        self.chromeModeButton.backgroundColor = dotColor;
+    // 默认常态显示经典的交通灯配色
+    NSArray<UIButton *> *buttons = @[self.chromeCloseButton, self.chromeMinimizeButton, self.chromeModeButton];
+    for (UIButton *btn in buttons) {
+        btn.backgroundColor = [UIColor clearColor]; // 物理按钮自身透明
+        btn.layer.borderWidth = 0;
+        btn.alpha = 1.0;
+        
+        UIView *vDot = [btn viewWithTag:999];
+        if (vDot) {
+            vDot.transform = CGAffineTransformIdentity;
+            vDot.layer.borderWidth = 0.5 / [UIScreen mainScreen].scale;
+            vDot.layer.borderColor = [[UIColor blackColor] colorWithAlphaComponent:0.12].CGColor;
+            
+            // 经典交通灯配色
+            if (btn == self.chromeCloseButton) {
+                vDot.backgroundColor = [UIColor colorWithRed:1.00 green:0.37 blue:0.33 alpha:1.0]; // macOS 红
+            } else if (btn == self.chromeMinimizeButton) {
+                vDot.backgroundColor = [UIColor colorWithRed:1.00 green:0.75 blue:0.18 alpha:1.0]; // macOS 黄
+            } else if (btn == self.chromeModeButton) {
+                vDot.backgroundColor = [UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:1.0]; // macOS 绿
+            }
+        }
     }
 
-    self.chromeCloseButton.transform = CGAffineTransformIdentity;
-    self.chromeMinimizeButton.transform = CGAffineTransformIdentity;
-    self.chromeModeButton.transform = CGAffineTransformIdentity;
-    self.chromeCloseButton.layer.cornerRadius = self.chromeCloseButton.bounds.size.height / 2.0;
-    self.chromeMinimizeButton.layer.cornerRadius = self.chromeMinimizeButton.bounds.size.height / 2.0;
-    self.chromeModeButton.layer.cornerRadius = self.chromeModeButton.bounds.size.height / 2.0;
-    self.chromeCloseButton.alpha = self.chromeControlsExpanded ? 1.0 : 0.64;
-    self.chromeMinimizeButton.alpha = self.chromeControlsExpanded ? 1.0 : 0.64;
-    self.chromeModeButton.alpha = self.chromeControlsExpanded ? 1.0 : 0.64;
     [self.windowChromeView sendSubviewToBack:self.chromeDragHandle];
     [self.windowChromeView bringSubviewToFront:self.chromeCloseButton];
     [self.windowChromeView bringSubviewToFront:self.chromeMinimizeButton];
@@ -1222,19 +1411,36 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     CGFloat chromeH = MIN(44.0 * chromeScale, MAX(0.0, size.height));
     self.windowChromeView.frame = CGRectMake(0, 0, size.width, chromeH);
 
-    CGFloat capsuleX = (self.chromeControlsExpanded ? 9.0 : 15.0) * chromeScale;
-    CGFloat capsuleY = (self.chromeControlsExpanded ? 6.0 : 10.0) * chromeScale;
-    CGFloat capsuleW = (self.chromeControlsExpanded ? CV3Style.windowHandleW : 46.0) * chromeScale;
-    CGFloat capsuleH = (self.chromeControlsExpanded ? CV3Style.windowHandleH : 12.0) * chromeScale;
-    CGFloat dot = (self.chromeControlsExpanded ? CV3Style.floatingChromeControlSize : 5.5) * chromeScale;
-    CGFloat dotGap = (self.chromeControlsExpanded ? 6.0 : 8.5) * chromeScale;
+    // 恒定使用完美的展开比例，取消折叠尺寸
+    CGFloat capsuleX = 9.0 * chromeScale;
+    CGFloat capsuleY = 6.0 * chromeScale;
+    CGFloat capsuleW = CV3Style.windowHandleW * chromeScale;
+    CGFloat capsuleH = CV3Style.windowHandleH * chromeScale;
+    CGFloat dot = CV3Style.floatingChromeControlSize * chromeScale;
 
     self.chromeDragHandle.frame = CGRectMake(capsuleX, capsuleY, capsuleW, capsuleH);
-    CGFloat dotY = capsuleY + (capsuleH - dot) / 2.0;
-    CGFloat firstDotX = capsuleX + (self.chromeControlsExpanded ? 7.0 * chromeScale : 7.0 * chromeScale);
-    self.chromeCloseButton.frame = CGRectMake(firstDotX, dotY, dot, dot);
-    self.chromeMinimizeButton.frame = CGRectMake(CGRectGetMaxX(self.chromeCloseButton.frame) + dotGap, dotY, dot, dot);
-    self.chromeModeButton.frame = CGRectMake(CGRectGetMaxX(self.chromeMinimizeButton.frame) + dotGap, dotY, dot, dot);
+    
+    // 物理热区极其强韧地扩充：按钮高度 44pt 垂直居中，宽度平分胶囊宽度 (capsuleW / 3)
+    CGFloat btnW = capsuleW / 3.0;
+    CGFloat btnH = 44.0;
+    CGFloat btnY = capsuleY + (capsuleH - btnH) / 2.0;
+    
+    self.chromeCloseButton.frame = CGRectMake(capsuleX + 0 * btnW, btnY, btnW, btnH);
+    self.chromeMinimizeButton.frame = CGRectMake(capsuleX + 1 * btnW, btnY, btnW, btnH);
+    self.chromeModeButton.frame = CGRectMake(capsuleX + 2 * btnW, btnY, btnW, btnH);
+    
+    // 重新排列内部的视觉圆点
+    NSArray<UIButton *> *buttons = @[self.chromeCloseButton, self.chromeMinimizeButton, self.chromeModeButton];
+    for (UIButton *btn in buttons) {
+        UIView *vDot = [btn viewWithTag:999];
+        if (vDot) {
+            // 采用 bounds 和 center 安全定位，规避 transform 状态下赋值 frame 的未定义错乱
+            vDot.bounds = CGRectMake(0, 0, dot, dot);
+            vDot.center = CGPointMake(btnW / 2.0, btnH / 2.0);
+            vDot.layer.cornerRadius = dot / 2.0;
+        }
+    }
+    
     [self updateFloatingChromeAppearance];
 }
 
@@ -1252,40 +1458,71 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
 }
 
 - (void)scheduleChromeControlsCollapse {
-    [self.chromeCollapseTimer invalidate];
-    self.chromeCollapseTimer = [NSTimer scheduledTimerWithTimeInterval:1.8 target:self selector:@selector(collapseChromeControlsTimerFired:) userInfo:nil repeats:NO];
-    [[NSRunLoop mainRunLoop] addTimer:self.chromeCollapseTimer forMode:NSRunLoopCommonModes];
+    // 长驻无需折叠
 }
 
 - (void)collapseChromeControlsTimerFired:(NSTimer *)timer {
-    self.chromeCollapseTimer = nil;
-    [self setChromeControlsExpanded:NO animated:YES];
+    // 长驻无需折叠
 }
 
 - (void)handleChromeControlTouchDown:(id)sender {
-    [self.chromeCollapseTimer invalidate];
-    self.chromeCollapseTimer = nil;
+    // 长驻无需折叠
 }
 
 - (void)handleChromeControlTap:(id)sender {
-    [self setChromeControlsExpanded:YES animated:YES];
-    [self scheduleChromeControlsCollapse];
+    // 恒定展开，无需操作
 }
 
 - (void)handleChromeCloseAction:(id)sender {
-    [self setChromeControlsExpanded:YES animated:YES];
+    // 隐藏窗口：触发中等关闭震动
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
     [self closeWindow];
 }
 
 - (void)handleChromeMinimizeAction:(id)sender {
-    [self setChromeControlsExpanded:YES animated:YES];
+    // 隐藏窗口：触发中等关闭震动
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
     [self handleHideAction];
 }
 
 - (void)handleChromeModeAction:(id)sender {
-    [self setChromeControlsExpanded:YES animated:YES];
-    [self scheduleChromeControlsCollapse];
+    // 最大化/分屏切换菜单：触发轻型震动
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
     [self handleFullscreenMenuAction:sender];
+}
+
+- (void)chromeBtnTouchDown:(UIButton *)sender {
+    // 触发微弱选择震动
+    [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
+    [UIView animateWithDuration:0.2 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+        UIView *dot = [sender viewWithTag:999];
+        if (dot) {
+            dot.transform = CGAffineTransformMakeScale(0.82, 0.82);
+            if (sender == self.chromeCloseButton) {
+                dot.backgroundColor = [UIColor colorWithRed:1.00 green:0.37 blue:0.33 alpha:1.0];
+            } else if (sender == self.chromeMinimizeButton) {
+                dot.backgroundColor = [UIColor colorWithRed:1.00 green:0.75 blue:0.18 alpha:1.0];
+            } else if (sender == self.chromeModeButton) {
+                dot.backgroundColor = [UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:1.0];
+            }
+        }
+    } completion:nil];
+}
+
+- (void)chromeBtnTouchUp:(UIButton *)sender {
+    [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.6 initialSpringVelocity:0.5 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+        UIView *dot = [sender viewWithTag:999];
+        if (dot) {
+            dot.transform = CGAffineTransformIdentity;
+            if (sender == self.chromeCloseButton) {
+                dot.backgroundColor = [UIColor colorWithRed:1.00 green:0.37 blue:0.33 alpha:1.0];
+            } else if (sender == self.chromeMinimizeButton) {
+                dot.backgroundColor = [UIColor colorWithRed:1.00 green:0.75 blue:0.18 alpha:1.0];
+            } else if (sender == self.chromeModeButton) {
+                dot.backgroundColor = [UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:1.0];
+            }
+        }
+    } completion:nil];
 }
 
 - (UIButton *)multitaskingMenuButtonWithTitle:(NSString *)title symbol:(NSString *)symbol action:(SEL)action {
@@ -1450,6 +1687,28 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     [self closeWindow];
 }
 
+- (CGRect)resizeHandleVisualFrameInWindow {
+    if (self.isClosing || self.isStashed || !self.resizeHandle || !self.resizeHandle.superview) return CGRectZero;
+
+    CGSize visualSize = self.resizeHandleVisualSize;
+    if (visualSize.width <= 0.0 || visualSize.height <= 0.0) {
+        visualSize = CGSizeMake(MIN(26.0, CGRectGetWidth(self.resizeHandle.bounds)),
+                                MIN(26.0, CGRectGetHeight(self.resizeHandle.bounds)));
+    }
+
+    CGRect handleBounds = self.resizeHandle.bounds;
+    CGRect visualRect = CGRectMake(CGRectGetWidth(handleBounds) - visualSize.width,
+                                   CGRectGetHeight(handleBounds) - visualSize.height,
+                                   visualSize.width,
+                                   visualSize.height);
+    CGRect visualFrame = [self.resizeHandle convertRect:visualRect toView:self];
+    return CGRectInset(visualFrame, -8.0, -8.0);
+}
+
+- (BOOL)isPointInResizeHandleVisualZone:(CGPoint)point {
+    return CGRectContainsPoint([self resizeHandleVisualFrameInWindow], point);
+}
+
 - (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene {
     if (windowScene) {
         self = [super initWithWindowScene:windowScene];
@@ -1469,10 +1728,9 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
         
         UIInterfaceOrientation currentOrientation = CV3TrustedInterfaceOrientation(windowScene);
         
-        BOOL sceneIsLandscape = UIInterfaceOrientationIsLandscape(currentOrientation);
         // 外层 UIWindow 使用当前可信方向坐标；横屏创建时直接使用宽屏窗口，不再退回竖屏尺寸。
-        CGFloat physicalW = sceneIsLandscape ? logicalH : logicalW;
-        CGFloat physicalH = sceneIsLandscape ? logicalW : logicalH;
+        CGFloat physicalW = logicalW;
+        CGFloat physicalH = logicalH;
         
         self.frame = CGRectMake(0, 0, physicalW, physicalH);
         self.lastLayoutOrientation = currentOrientation;
@@ -1511,12 +1769,24 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
         [self.appContentWrapper addSubview:self.windowChromeView];
 
         self.chromeModeButton = [self chromeButtonWithTitle:@"" action:@selector(handleChromeModeAction:)];
+        [self.chromeModeButton addTarget:self action:@selector(chromeBtnTouchDown:) forControlEvents:UIControlEventTouchDown | UIControlEventTouchDragEnter];
+        [self.chromeModeButton addTarget:self action:@selector(chromeBtnTouchUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel | UIControlEventTouchDragExit];
+        
+        UILongPressGestureRecognizer *modeBtnMoveLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleMoveLongPress:)];
+        modeBtnMoveLongPress.minimumPressDuration = 0.12;
+        modeBtnMoveLongPress.delegate = self;
+        [self.chromeModeButton addGestureRecognizer:modeBtnMoveLongPress];
+        
         [self.windowChromeView addSubview:self.chromeModeButton];
 
         self.chromeMinimizeButton = [self chromeButtonWithTitle:@"" action:@selector(handleChromeMinimizeAction:)];
+        [self.chromeMinimizeButton addTarget:self action:@selector(chromeBtnTouchDown:) forControlEvents:UIControlEventTouchDown | UIControlEventTouchDragEnter];
+        [self.chromeMinimizeButton addTarget:self action:@selector(chromeBtnTouchUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel | UIControlEventTouchDragExit];
         [self.windowChromeView addSubview:self.chromeMinimizeButton];
 
         self.chromeCloseButton = [self chromeButtonWithTitle:@"" action:@selector(handleChromeCloseAction:)];
+        [self.chromeCloseButton addTarget:self action:@selector(chromeBtnTouchDown:) forControlEvents:UIControlEventTouchDown | UIControlEventTouchDragEnter];
+        [self.chromeCloseButton addTarget:self action:@selector(chromeBtnTouchUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel | UIControlEventTouchDragExit];
         [self.windowChromeView addSubview:self.chromeCloseButton];
 
         self.chromeDragHandle = [[UIView alloc] initWithFrame:CGRectZero];
@@ -1524,21 +1794,7 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
         self.chromeDragHandle.userInteractionEnabled = YES;
         [self.windowChromeView addSubview:self.chromeDragHandle];
 
-        UILongPressGestureRecognizer *chromeMoveLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleMoveLongPress:)];
-        chromeMoveLongPress.minimumPressDuration = 0.18;
-        chromeMoveLongPress.delegate = self;
-        [self.windowChromeView addGestureRecognizer:chromeMoveLongPress];
-
-        UILongPressGestureRecognizer *handleMoveLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleMoveLongPress:)];
-        handleMoveLongPress.minimumPressDuration = 0.12;
-        handleMoveLongPress.delegate = self;
-        [self.chromeDragHandle addGestureRecognizer:handleMoveLongPress];
-
-        UITapGestureRecognizer *handleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleChromeControlTap:)];
-        handleTap.delegate = self;
-        [self.chromeDragHandle addGestureRecognizer:handleTap];
-        [handleTap requireGestureRecognizerToFail:handleMoveLongPress];
-        self.chromeControlsExpanded = NO;
+        self.chromeControlsExpanded = YES;
         [self layoutFloatingChromeForSize:self.bounds.size];
 
         // 核心修复：引入非缩放裁剪层 (Clipping Container)
@@ -1575,20 +1831,11 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
         // 1. 缩放手势 (Pan) - 保持不变
         UIPanGestureRecognizer *resizePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleResizePan:)];
         resizePan.delegate = self;
+        resizePan.cancelsTouchesInView = YES;
+        resizePan.delaysTouchesBegan = NO;
+        self.windowResizePan = resizePan;
         [self.resizeHandle addGestureRecognizer:resizePan];
 
-        // 2. 移动手势 (Long Press) - 保持不变
-        UILongPressGestureRecognizer *moveLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleMoveLongPress:)];
-        moveLongPress.minimumPressDuration = 0.45;
-        moveLongPress.delegate = self;
-        [self.resizeHandle addGestureRecognizer:moveLongPress];
-
-        // 3. 隐藏手势 (Tap) - 保持不变
-        UITapGestureRecognizer *resizeTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleHideAction)];
-        resizeTap.delegate = self;
-        [self.resizeHandle addGestureRecognizer:resizeTap];
-        
-        [resizePan requireGestureRecognizerToFail:moveLongPress];
         self.resizeHandle.userInteractionEnabled = YES;
         
         // 侧边隐藏拉手 (Grabber -> Prism Switcher)
@@ -1628,8 +1875,6 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
         // 核心修复：监听 Scene 变更与系统通知，确保窗口持久存在
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(attachToCurrentActiveScene) name:UISceneDidActivateNotification object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(enforceSceneForegroundState) name:UISceneDidEnterBackgroundNotification object:nil];
-        [[UIDevice currentDevice] beginGeneratingDeviceOrientationNotifications];
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(applyTrustedOrientationNow) name:UIDeviceOrientationDidChangeNotification object:nil];
     }
     return self;
 }
@@ -1829,6 +2074,13 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     if (focused) {
         [self makeKeyAndVisible];
         self.windowLevel = CV3Style.floatingApp;
+        
+        // Z-order 层级重排：将聚焦窗口移至 floatingWindows 数组末尾，以提升其层级与转屏级联偏移优先级
+        if (floatingWindows && [floatingWindows containsObject:self]) {
+            [floatingWindows removeObject:self];
+            [floatingWindows addObject:self];
+        }
+        
         // Dim other windows
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if (win != self && [win isKindOfClass:[CV3FloatingAppWindow class]]) [win setWindowFocused:NO];
@@ -1856,14 +2108,23 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     self.resizeHandle.layer.borderWidth = 0;
     self.resizeHandle.layer.shadowOpacity = 0;
 
-    CGRect b = self.resizeHandle.bounds;
+    CGSize visualSize = self.resizeHandleVisualSize;
+    if (visualSize.width <= 0 || visualSize.height <= 0) {
+        visualSize = CGSizeMake(MIN(26.0, CGRectGetWidth(self.resizeHandle.bounds)),
+                                MIN(26.0, CGRectGetHeight(self.resizeHandle.bounds)));
+    }
+    CGRect b = CGRectMake(CGRectGetWidth(self.resizeHandle.bounds) - visualSize.width,
+                          CGRectGetHeight(self.resizeHandle.bounds) - visualSize.height,
+                          visualSize.width,
+                          visualSize.height);
     if (!CGRectIsEmpty(b)) {
         self.resizeHandleLayer.frame = b;
         UIBezierPath *path = [UIBezierPath bezierPath];
 
-        CGPoint cornerCenter = CGPointMake(CGRectGetMinX(b), CGRectGetMinY(b));
+        CGRect localBounds = self.resizeHandleLayer.bounds;
+        CGPoint cornerCenter = CGPointMake(CGRectGetMinX(localBounds), CGRectGetMinY(localBounds));
         CGFloat windowScale = MIN(1.35, MAX(0.78, MIN(self.bounds.size.width, self.bounds.size.height) / 390.0));
-        CGFloat arcRadius = MAX(10.0, MIN(b.size.width - 4.0, (CV3Style.floatingChromeCornerRadius + 4.0) * windowScale));
+        CGFloat arcRadius = MAX(10.0, MIN(localBounds.size.width - 4.0, (CV3Style.floatingChromeCornerRadius + 4.0) * windowScale));
         CGFloat startAngle = (CGFloat)(M_PI_4 * 0.18);
         CGFloat endAngle = (CGFloat)(M_PI_4 * 1.52);
         [path addArcWithCenter:cornerCenter radius:arcRadius startAngle:startAngle endAngle:endAngle clockwise:YES];
@@ -1879,7 +2140,7 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
         self.resizeHandleLayer.path = path.CGPath;
         self.resizeHandleLayer.strokeColor = [strokeColor colorWithAlphaComponent:(darkStyle ? 0.72 : 0.58)].CGColor;
         self.resizeHandleLayer.fillColor = [UIColor clearColor].CGColor;
-        self.resizeHandleLayer.lineWidth = MAX(1.5, MIN(2.2, 1.75 * windowScale));
+        self.resizeHandleLayer.lineWidth = MAX(2.0, MIN(3.0, 2.35 * windowScale));
         self.resizeHandleLayer.lineCap = kCALineCapRound;
     }
 
@@ -2004,29 +2265,29 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     CGRect physicalFrame = self.bounds;
     CGFloat fullW = physicalFrame.size.width;
     CGFloat fullH = physicalFrame.size.height;
-    CGRect contentFrame = [self visiblePortraitContentFrame];
-    CGFloat contentW = contentFrame.size.width;
-    CGFloat contentH = contentFrame.size.height;
-
-    CGAffineTransform targetRotation = CGAffineTransformIdentity;
-    self.baseRotationTransform = targetRotation;
     
-    // 3. 同步根旋转容器
-    self.rootTransformContainer.transform = CGAffineTransformIdentity;
-    self.rootTransformContainer.frame = physicalFrame;
-    self.rootTransformContainer.bounds = CGRectMake(0, 0, fullW, fullH);
-    self.rootTransformContainer.center = CGPointMake(CGRectGetMidX(physicalFrame), CGRectGetMidY(physicalFrame));
+    BOOL isLandscape = UIInterfaceOrientationIsLandscape(activeOrientation);
+    CGFloat logicalW, logicalH;
+    if (isLandscape) {
+        logicalW = MIN(fullW, fullH);
+        logicalH = MAX(fullW, fullH);
+    } else {
+        logicalW = fullW;
+        logicalH = fullH;
+    }
+
+    self.rootTransformContainer.bounds = CGRectMake(0, 0, logicalW, logicalH);
+    self.rootTransformContainer.center = CGPointMake(fullW / 2.0, fullH / 2.0);
     [self applyCurrentTransformWithScale:1.0];
 
-    // 同步内容包装层
-    self.appContentWrapper.bounds = self.rootTransformContainer.bounds;
-    self.appContentWrapper.center = CGPointMake(fullW / 2.0, fullH / 2.0);
+    self.appContentWrapper.bounds = CGRectMake(0, 0, logicalW, logicalH);
+    self.appContentWrapper.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
 
-    [self layoutFloatingChromeForSize:CGSizeMake(fullW, fullH)];
+    [self layoutFloatingChromeForSize:CGSizeMake(logicalW, logicalH)];
     if (self.multitaskingMenuView && !self.multitaskingMenuView.hidden) {
-        CGFloat menuW = MIN(250.0, MAX(210.0, fullW - 32.0));
+        CGFloat menuW = MIN(250.0, MAX(210.0, logicalW - 32.0));
         CGFloat menuH = 54.0;
-        self.multitaskingMenuView.frame = CGRectMake((fullW - menuW) / 2.0, 24.0, menuW, menuH);
+        self.multitaskingMenuView.frame = CGRectMake((logicalW - menuW) / 2.0, 24.0, menuW, menuH);
         CGFloat itemW = menuW / 3.0;
         for (UIButton *button in self.multitaskingMenuView.contentView.subviews) {
             if (![button isKindOfClass:[UIButton class]]) continue;
@@ -2035,27 +2296,32 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
         }
     }
 
-    // 4. 更新子组件布局 (基于逻辑坐标系)
-    self.clippingContainer.bounds = CGRectMake(0, 0, contentW, contentH);
-    self.clippingContainer.center = CGPointMake(contentW / 2.0, contentH / 2.0);
+    // 4. 更新子组件布局 (基于直立的逻辑坐标系)
+    self.clippingContainer.bounds = CGRectMake(0, 0, logicalW, logicalH);
+    self.clippingContainer.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
     self.clippingContainer.layer.cornerRadius = CV3Style.floatingChromeCornerRadius;
     self.clippingContainer.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;
     [self updateResizeHandleAppearance];
     
-    CGFloat handleScale = MIN(1.35, MAX(0.78, MIN(contentW, contentH) / 390.0));
-    CGFloat barW = 26.0 * handleScale;
-    CGFloat barH = 26.0 * handleScale;
-    self.resizeHandle.frame = CGRectMake(contentW - barW, contentH - barH, barW, barH);
+    CGFloat handleScale = MIN(1.35, MAX(0.78, MIN(logicalW, logicalH) / 390.0));
+    CGFloat visualW = 26.0 * handleScale;
+    CGFloat visualH = 26.0 * handleScale;
+    
+    // 智能限制把手热区占比：不超过当前窗口最小边长的 35%，防止小窗口下误触
+    CGFloat maxAllowedHitSize = MIN(logicalW, logicalH) * 0.35;
+    CGFloat hitSize = MAX(60.0, MIN(maxAllowedHitSize, CV3Style.resizeHandleHitArea * handleScale));
+    
+    self.resizeHandleVisualSize = CGSizeMake(visualW, visualH);
+    self.resizeHandle.frame = CGRectMake(logicalW - hitSize, logicalH - hitSize, hitSize, hitSize);
     self.resizeHandle.layer.cornerRadius = 0;
     [self updateResizeHandleAppearance];
 
-    // 5. 更新内部 App 场景 (等比铺满算法：基于窗口比例动态映射虚拟画布)
+    // 5. 更新内部 App 场景 (等比铺满算法：基于直立窗口比例动态映射虚拟画布)
     if (self.hostContainerProxy) {
         CGRect virtualBounds = [self currentHostedSceneBounds];
-        
-        // 普通 App 按窗口宽度等比映射；强制竖屏承载的 App 也以窗口宽度铺满，
-        // 溢出的竖屏高度由 clippingContainer 裁剪，避免横屏下画面缩成中间小块。
-        CGFloat uniformScale = contentW / MAX(virtualBounds.size.width, 1.0);
+        CGFloat scaleX = logicalW / MAX(virtualBounds.size.width, 1.0);
+        CGFloat scaleY = logicalH / MAX(virtualBounds.size.height, 1.0);
+        CGFloat uniformScale = MIN(scaleX, scaleY);
         
         if (!self.liveResizeSnapshotView) {
             [self syncHostedSceneLayoutForce:NO];
@@ -2068,7 +2334,7 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
             self.hostView.frame = virtualBounds;
         }
         self.hostContainerProxy.layer.anchorPoint = CGPointMake(0.5, 0.5);
-        self.hostContainerProxy.center = CGPointMake(contentW / 2.0, contentH / 2.0);
+        self.hostContainerProxy.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
         self.hostContainerProxy.transform = CGAffineTransformMakeScale(uniformScale, uniformScale);
     }
     [self.appContentWrapper bringSubviewToFront:self.windowChromeView];
@@ -2092,10 +2358,11 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     CGRect screenBounds = [UIScreen mainScreen].bounds;
     
     CGRect frame = self.frame;
-    if (frame.origin.x < safeArea.left) frame.origin.x = safeArea.left;
-    if (frame.origin.y < safeArea.top) frame.origin.y = safeArea.top;
-    if (CGRectGetMaxX(frame) > screenBounds.size.width - safeArea.right) frame.origin.x = screenBounds.size.width - safeArea.right - frame.size.width;
-    if (CGRectGetMaxY(frame) > screenBounds.size.height - safeArea.bottom) frame.origin.y = screenBounds.size.height - safeArea.bottom - frame.size.height;
+    CGFloat breath = CV3Style.safeAreaBreath;
+    if (frame.origin.x < safeArea.left + breath) frame.origin.x = safeArea.left + breath;
+    if (frame.origin.y < safeArea.top + breath) frame.origin.y = safeArea.top + breath;
+    if (CGRectGetMaxX(frame) > screenBounds.size.width - safeArea.right - breath) frame.origin.x = screenBounds.size.width - safeArea.right - breath - frame.size.width;
+    if (CGRectGetMaxY(frame) > screenBounds.size.height - safeArea.bottom - breath) frame.origin.y = screenBounds.size.height - safeArea.bottom - breath - frame.size.height;
     
     // 核心修复：严禁在有 Transform (如缩放/旋转) 的情况下直接设置 frame。
     // 使用 center 进行平移钳位，确保不会触发无限抖动。
@@ -2307,7 +2574,7 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
     });
 }
 
-- (void)handleMoveLongPress:(UILongPressGestureRecognizer *)gesture {
+- (void)handleMoveLongPress:(UIGestureRecognizer *)gesture {
     static CGPoint initialTouchOffset;
     static CGPoint lastVelocity;
     static NSTimeInterval lastTime;
@@ -2586,23 +2853,39 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
 }
 
 - (void)syncWindowBoundsToClient {
+    [self syncWindowBoundsToClientAndNotify:YES];
+}
+
+- (void)syncWindowBoundsToClientAndNotify:(BOOL)notify {
     if (self.bundleID) {
-        NSString *path = @"/var/mobile/Library/Preferences/com.xu.chevronv3.plist";
-        NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithContentsOfFile:path] ?: [NSMutableDictionary dictionary];
         CGRect contentFrame = [self visiblePortraitContentFrame];
         
-        dict[[NSString stringWithFormat:@"isHosted_%@", self.bundleID]] = @(!self.hidden);
-        dict[[NSString stringWithFormat:@"currentWidth_%@", self.bundleID]] = @(contentFrame.size.width);
-        dict[[NSString stringWithFormat:@"currentHeight_%@", self.bundleID]] = @(contentFrame.size.height);
+        // 1. 高频写入 mmap 共享内存（零磁盘 IO，跨进程物理共享）
+        CV3InitSharedGeometry();
+        if (sharedGeometry) {
+            sharedGeometry->isHosted = self.hidden ? 0 : 1;
+            sharedGeometry->width = (float)contentFrame.size.width;
+            sharedGeometry->height = (float)contentFrame.size.height;
+        }
         
-        [dict writeToFile:path atomically:YES];
-        
-        // 赋予全局可读权限，确保沙盒内的 App 能读取到尺寸数据
-        chmod([path UTF8String], 0644);
-        
-        CV3LogToFile(@"宿主窗口 (%@) 内容尺寸已同步: 宽度=%.1f, 高度=%.1f", self.bundleID, contentFrame.size.width, contentFrame.size.height);
-        
-        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (CFStringRef)@"com.xu.chevronv3/SizeChanged", NULL, NULL, YES);
+        // 2. 仅在需要通知的静态时刻，才落盘 Plist 提供持久化记录和兼容性
+        if (notify) {
+            NSString *path = @"/var/mobile/Library/Preferences/com.xu.chevronv3.plist";
+            NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithContentsOfFile:path] ?: [NSMutableDictionary dictionary];
+            
+            dict[[NSString stringWithFormat:@"isHosted_%@", self.bundleID]] = @(!self.hidden);
+            dict[[NSString stringWithFormat:@"currentWidth_%@", self.bundleID]] = @(contentFrame.size.width);
+            dict[[NSString stringWithFormat:@"currentHeight_%@", self.bundleID]] = @(contentFrame.size.height);
+            
+            [dict writeToFile:path atomically:YES];
+            chmod([path UTF8String], 0644);
+            
+            CV3LogToFile(@"宿主窗口 (%@) 最终尺寸已同步并发送 Darwin 通知: 宽度=%.1f, 高度=%.1f", self.bundleID, contentFrame.size.width, contentFrame.size.height);
+            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (CFStringRef)@"com.xu.chevronv3/SizeChanged", NULL, NULL, YES);
+        } else {
+            // 节流状态下，由于共享内存已更新，在此处我们完全省去 Plist 磁盘操作
+            CV3LogToFile(@"[Throttled] 仅共享内存同步（零磁盘 IO）: %@ -> 宽度=%.1f, 高度=%.1f", self.bundleID, contentFrame.size.width, contentFrame.size.height);
+        }
     }
 }
 
@@ -2620,27 +2903,20 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
         }
     }
 
-    CGPoint pInChrome = [self convertPoint:point toView:self.windowChromeView];
-    if ([self.windowChromeView pointInside:pInChrome withEvent:event]) {
-        CGRect handleHitFrame = CGRectInset(self.chromeDragHandle.frame, -14.0, -12.0);
-        if (!self.chromeControlsExpanded) {
-            if (CGRectContainsPoint(handleHitFrame, pInChrome)) {
-                return self.chromeDragHandle ?: self.windowChromeView;
-            }
-        } else {
-            NSArray<UIButton *> *chromeButtons = @[self.chromeCloseButton, self.chromeMinimizeButton, self.chromeModeButton];
-            for (UIButton *button in chromeButtons) {
-                if (button.hidden) continue;
-                CGRect buttonHitFrame = CGRectInset(button.frame, -6.0, -6.0);
-                if (CGRectContainsPoint(buttonHitFrame, pInChrome)) {
-                    return button;
-                }
-            }
-
-            if (CGRectContainsPoint(handleHitFrame, pInChrome)) {
-                return self.chromeDragHandle ?: self.windowChromeView;
-            }
-        }
+    CGRect dragHandleFrameInSelf = [self.windowChromeView convertRect:self.chromeDragHandle.frame toView:self];
+    CGRect expandedHandleFrame = CGRectInset(dragHandleFrameInSelf, -24.0, -24.0);
+    
+    if (CGRectContainsPoint(expandedHandleFrame, point)) {
+        CGFloat minX = dragHandleFrameInSelf.origin.x;
+        CGFloat width = dragHandleFrameInSelf.size.width;
+        CGPoint pInChrome = [self convertPoint:point toView:self.windowChromeView];
+        CGFloat relX = MIN(MAX(0.0, pInChrome.x - minX), width);
+        NSInteger index = (NSInteger)(relX / (width / 3.0));
+        index = MIN(2, MAX(0, index));
+        
+        if (index == 0) return self.chromeCloseButton;
+        if (index == 1) return self.chromeMinimizeButton;
+        if (index == 2) return self.chromeModeButton;
     }
     
     // 检查右下角缩放/移动热区 (最高优先级)
@@ -2669,15 +2945,55 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
 }
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
+    if (gesture == self.windowResizePan) {
+        return YES;
+    }
+    if (gesture.view == self.resizeHandle) {
+        return YES;
+    }
+    return YES;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    if (gestureRecognizer == self.windowResizePan) {
+        return YES;
+    }
+    if (gestureRecognizer.view == self.resizeHandle) {
+        return YES;
+    }
     return YES;
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     // 强制要求其他手势（即来自宿主 App 内部的手势）在我们自己的控制手势面前失败
     // 这可以防止拖拽或缩放/位移窗口时，底下的 App 还在疯狂滚动
-    if (gestureRecognizer.view == self.resizeHandle ||
+    if (gestureRecognizer == self.windowResizePan ||
+        gestureRecognizer.view == self.resizeHandle ||
         gestureRecognizer.view == self.windowChromeView ||
         gestureRecognizer.view == self.chromeDragHandle) {
+        return YES;
+    }
+    return NO;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    if (gestureRecognizer == self.windowResizePan ||
+        gestureRecognizer.view == self.resizeHandle) {
+        return NO;
+    }
+    if (otherGestureRecognizer == self.windowResizePan ||
+        otherGestureRecognizer.view == self.resizeHandle) {
+        return YES;
+    }
+    return NO;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    if (gestureRecognizer == self.windowResizePan || otherGestureRecognizer == self.windowResizePan) {
+        // 禁止缩放手势与 resizeHandle 上的其它控制手势（如 moveLongPress）同时识别，确保先判定缩放
+        if (gestureRecognizer.view == self.resizeHandle && otherGestureRecognizer.view == self.resizeHandle) {
+            return NO;
+        }
         return YES;
     }
     return NO;
@@ -2693,6 +3009,7 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
         self.isFullscreenMode = NO;
         self.isCompactMode = NO;
         self.initialResizeFrame = self.frame;
+        [gesture setTranslation:CGPointZero inView:nil];
         hasTriggeredTopHaptic = NO;
         hasTriggeredBottomHaptic = NO;
         hasTriggeredSideHaptic = NO;
@@ -2745,9 +3062,7 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
         CGFloat rawScaleFactor = initialDist > 0 ? (currentDist / initialDist) : 1.0;
         CGFloat scaleFactor = 1.0 + (rawScaleFactor - 1.0) * 1.25; 
         
-        UIInterfaceOrientation activeOrientation = CV3TrustedInterfaceOrientation(self.windowScene);
-        BOOL sceneIsLandscape = UIInterfaceOrientationIsLandscape(activeOrientation);
-        CGFloat initialLogicalWidth = sceneIsLandscape ? self.initialResizeFrame.size.height : self.initialResizeFrame.size.width;
+        CGFloat initialLogicalWidth = self.initialResizeFrame.size.width;
         CGFloat targetWidth = initialLogicalWidth * scaleFactor;
         
         // --- [Geek Advice] Haptic Gradient Implementation ---
@@ -2785,8 +3100,8 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
         }
         
         CGFloat finalHeight = finalWidth * aspect;
-        CGFloat outerWidth = sceneIsLandscape ? finalHeight : finalWidth;
-        CGFloat outerHeight = sceneIsLandscape ? finalWidth : finalHeight;
+        CGFloat outerWidth = finalWidth;
+        CGFloat outerHeight = finalHeight;
         
         CGRect newFrame;
         newFrame.size = CGSizeMake(outerWidth, outerHeight);
@@ -2831,6 +3146,9 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
         self.bounds = CGRectMake(0, 0, outerWidth, outerHeight);
         self.center = CGPointMake(CGRectGetMidX(newFrame), CGRectGetMidY(newFrame));
         [CATransaction commit];
+        
+        // 拖动期间：仅同步 Plist 数据，节流静默 Darwin 广播通知
+        [self syncWindowBoundsToClientAndNotify:NO];
     }
     
     if (gesture.state == UIGestureRecognizerStateEnded || 
@@ -2887,9 +3205,26 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
 
         // Snapping and constraints for Ended state
         if (gesture.state == UIGestureRecognizerStateEnded) {
-            UIInterfaceOrientation activeOrientation = CV3TrustedInterfaceOrientation(self.windowScene);
-            BOOL sceneIsLandscape = UIInterfaceOrientationIsLandscape(activeOrientation);
-            CGFloat finalWidth = sceneIsLandscape ? self.bounds.size.height : self.bounds.size.width;
+            CGFloat finalWidth = self.bounds.size.width;
+            
+            // 惯性滑行动量优化
+            CGPoint gestureVel = [gesture velocityInView:nil];
+            CGFloat speed = sqrt(gestureVel.x * gestureVel.x + gestureVel.y * gestureVel.y);
+            CGFloat widthMomentum = 0;
+            if (speed > 300.0) {
+                // 计算对角线上的滑动速度分量
+                CGFloat diagVelocity = (gestureVel.x + gestureVel.y) / sqrt(2.0);
+                // 3000px/s 的速度映射为 45pt 的尺寸滑行动量
+                widthMomentum = diagVelocity * 0.015;
+            }
+            finalWidth += widthMomentum;
+
+            // 限制惯性后的宽度范围，避免拉伸越界
+            CGFloat minAllowedWidth = shortSide * 0.4;
+            CGFloat maxAllowedWidth = shortSide * 0.9;
+            if (finalWidth < minAllowedWidth) finalWidth = minAllowedWidth;
+            if (finalWidth > maxAllowedWidth) finalWidth = maxAllowedWidth;
+
             CGFloat previousLogicalWidth = finalWidth;
             
             // Island Snapping
@@ -2906,8 +3241,8 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
             else if (fabs(currentRatio - 0.8) < 0.03) finalWidth = shortSide * 0.8;
 
             CGFloat finalHeight = finalWidth * aspect;
-            CGFloat outerWidth = sceneIsLandscape ? finalHeight : finalWidth;
-            CGFloat outerHeight = sceneIsLandscape ? finalWidth : finalHeight;
+            CGFloat outerWidth = finalWidth;
+            CGFloat outerHeight = finalHeight;
             snapFrame.size = CGSizeMake(outerWidth, outerHeight);
             
             // Re-center if ratio snapped
@@ -2925,11 +3260,15 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
             if (CGRectGetMaxY(snapFrame) > screenBounds.size.height - safeArea.bottom) 
                 snapFrame.origin.y = screenBounds.size.height - safeArea.bottom - outerHeight;
 
-            // Final bounce animation
-            [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
+            // Final bounce animation with dynamic spring velocity matching gesture release speed
+            CGFloat springVelocity = MIN(4.0, MAX(0.5, speed / 800.0));
+            [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.75 initialSpringVelocity:springVelocity options:0 animations:^{
                 self.bounds = CGRectMake(0, 0, snapFrame.size.width, snapFrame.size.height);
                 self.center = CGPointMake(CGRectGetMidX(snapFrame), CGRectGetMidY(snapFrame));
-            } completion:nil];
+            } completion:^(BOOL finished) {
+                // 动画静止后，发出一次最终的 Darwin 通知，通知客户端刷新其 UI
+                [self syncWindowBoundsToClientAndNotify:YES];
+            }];
         }
     }
 }
@@ -4917,13 +5256,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
     CGRect panelBounds = CGRectMake(0, 0, targetW, targetH);    
     // 计算目标旋转
-    CGAffineTransform targetRotation = CGAffineTransformIdentity;
-    switch (orientation) {
-        case UIInterfaceOrientationLandscapeLeft: targetRotation = CGAffineTransformMakeRotation(-M_PI_2); break;
-        case UIInterfaceOrientationLandscapeRight: targetRotation = CGAffineTransformMakeRotation(M_PI_2); break;
-        case UIInterfaceOrientationPortraitUpsideDown: targetRotation = CGAffineTransformMakeRotation(M_PI); break;
-        default: targetRotation = CGAffineTransformIdentity; break;
-    }
+    CGAffineTransform targetRotation = CV3RotationTransformForInterfaceOrientation(orientation);
 
     // 更新基础变换属性
     self.baseRotationTransform = targetRotation;
@@ -6124,10 +6457,11 @@ static NSTimeInterval lastLogTime = 0;
         if (shouldLog) {
             lastLogTime = currentTime;
 
-            CV3LogToFile(@"[Debug] 采信并应用方向改变: %ld, 来源 Role: %@", (long)currentOrientation, role);
+            CV3LogToFile(@"[Orientation] 采信并应用方向改变: %ld, 来源 Role: %@", (long)currentOrientation, role);
         }
 
         BOOL isLandscape = UIInterfaceOrientationIsLandscape(currentOrientation);
+        CGAffineTransform targetRotation = CV3RotationTransformForInterfaceOrientation(currentOrientation);
         BOOL needsDispatch = NO;
         if (sharedWindow) {
             BOOL sharedIsLandscape = sharedWindow.bounds.size.width > sharedWindow.bounds.size.height;
@@ -6136,8 +6470,8 @@ static NSTimeInterval lastLogTime = 0;
         if (!needsDispatch && floatingWindows) {
             for (CV3FloatingAppWindow *win in floatingWindows) {
                 if (![win isKindOfClass:[CV3FloatingAppWindow class]] || win.isClosing) continue;
-                BOOL winIsLandscape = win.bounds.size.width > win.bounds.size.height;
-                if (win.lastLayoutOrientation != currentOrientation || winIsLandscape != isLandscape) {
+                BOOL winRotationChanged = !CGAffineTransformEqualToTransform(win.baseRotationTransform, targetRotation);
+                if (win.lastLayoutOrientation != currentOrientation || winRotationChanged) {
                     needsDispatch = YES;
                     break;
                 }
@@ -6167,9 +6501,10 @@ static NSTimeInterval lastLogTime = 0;
                     for (CV3FloatingAppWindow *win in floatingWindows) {
                         if ([win isKindOfClass:[CV3FloatingAppWindow class]] && !win.isClosing) {
                             UIInterfaceOrientation previousOrientation = win.lastLayoutOrientation;
-                            BOOL previousLandscape = win.bounds.size.width > win.bounds.size.height;
+                            CGAffineTransform previousRotation = win.baseRotationTransform;
                             [win applyInterfaceOrientation:currentOrientation force:NO];
-                            if (previousOrientation != currentOrientation || previousLandscape != isLandscape) {
+                            if (previousOrientation != currentOrientation ||
+                                !CGAffineTransformEqualToTransform(previousRotation, win.baseRotationTransform)) {
                                 [win attachToCurrentActiveScene];
                             }
                         }
@@ -6782,8 +7117,12 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
     for (UIView *subview in self.subviews) {
         BOOL isKeyboardLayer = [NSStringFromClass([subview class]) containsString:@"Keyboard"];
         if ([self.accessibilityIdentifier isEqualToString:@"ChevronV3Host"] && !isKeyboardLayer) {
-            subview.transform = CGAffineTransformIdentity;
-            subview.frame = self.bounds;
+            if (CGAffineTransformIsIdentity(subview.transform)) {
+                subview.frame = self.bounds;
+            } else {
+                subview.bounds = CGRectMake(0, 0, self.bounds.size.width, self.bounds.size.height);
+                subview.center = CGPointMake(self.bounds.size.width / 2.0, self.bounds.size.height / 2.0);
+            }
             continue;
         }
 
