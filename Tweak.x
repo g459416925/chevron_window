@@ -1018,6 +1018,8 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (void)promoteFloatingWindowInZOrder;
 - (void)animateFocusShadow:(BOOL)focused;
 - (void)restoreFromStash;
+- (void)enforceSceneForegroundState;
+- (void)attemptToHostSceneWithRetries:(int)retries delay:(double)delay;
 - (void)setTargetOrientation:(UIInterfaceOrientation)orientation;
 - (void)applyCurrentTransformWithScale:(CGFloat)scale;
 - (void)handleTransitionGhosting;

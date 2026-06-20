@@ -1,5 +1,172 @@
 static NSInteger CV3GetTimePriorityForCategory(NSString *cat);
 
+static NSString *CV3CurrentWorkspaceBundleID(void) {
+    @try {
+        id workspace = [CV3ClassNamed(@"SBMainWorkspace") sharedInstance];
+        id activeItem = CV3InvokeObject(workspace, @selector(activeDisplayItem));
+        NSString *bundleID = CV3InvokeObject(activeItem, @selector(bundleIdentifier));
+        if (bundleID.length > 0) return bundleID;
+    } @catch (NSException *e) {}
+    return nil;
+}
+
+static void CV3OpenApplicationFast(NSString *bundleID, NSString *reason) {
+    if (bundleID.length == 0) return;
+
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CV3OpenApplicationFast(bundleID, reason);
+        });
+        return;
+    }
+
+    @try {
+        id sharedApp = [UIApplication sharedApplication];
+        if ([sharedApp respondsToSelector:@selector(launchApplicationWithIdentifier:suspended:)]) {
+            [sharedApp launchApplicationWithIdentifier:bundleID suspended:NO];
+            CV3LogToFile(@"[Launcher] Fast open (launchApplicationWithIdentifier) %@ (%@)", bundleID, reason ?: @"Unknown");
+            return;
+        }
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Launcher] Fast open (launchApplicationWithIdentifier) 异常 %@: %@", bundleID, e);
+    }
+
+    @try {
+        id workspace = [CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace];
+        if (workspace && [workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
+            BOOL opened = ((BOOL (*)(id, SEL, id))objc_msgSend)(workspace, @selector(openApplicationWithBundleID:), bundleID);
+            CV3LogToFile(@"[Launcher] Fast open %@ -> %d (%@)", bundleID, opened, reason ?: @"Unknown");
+            return;
+        }
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Launcher] Fast open 异常 %@: %@", bundleID, e);
+    }
+
+    CV3LogToFile(@"[Launcher] Fast open 跳过：LSApplicationWorkspace 不可用 %@", bundleID);
+}
+
+__attribute__((unused)) static id CV3SpringBoardIconForBundleID(NSString *bundleID) {
+    if (bundleID.length == 0) return nil;
+
+    @try {
+        id iconController = [CV3ClassNamed(@"SBIconController") sharedInstance];
+        id iconModel = nil;
+        id iconManager = CV3InvokeObject(iconController, @selector(iconManager));
+        if (iconManager) iconModel = CV3InvokeObject(iconManager, @selector(model));
+        if (!iconModel) iconModel = CV3InvokeObject(iconController, @selector(model));
+
+        for (id icon in CV3InvokeObject(iconModel, @selector(leafIcons))) {
+            NSString *iconBundleID = CV3InvokeObject(icon, @selector(applicationBundleID));
+            if (iconBundleID.length == 0) iconBundleID = CV3InvokeObject(icon, @selector(leafIdentifier));
+            if ([iconBundleID isEqualToString:bundleID]) return icon;
+        }
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Launcher] 查找 SBIcon 异常 %@: %@", bundleID, e);
+    }
+
+    return nil;
+}
+
+__attribute__((unused)) static BOOL CV3LaunchSpringBoardIconFast(CV3AppInfo *info, NSString *reason) {
+    if (info.bundleId.length == 0) return NO;
+
+    id icon = info.sbIcon ?: CV3SpringBoardIconForBundleID(info.bundleId);
+    if (!icon) return NO;
+
+    NSString *location = @"ChevronLauncher";
+
+    @try {
+        SEL launchFromLocationContext = @selector(launchFromLocation:context:);
+        if ([icon respondsToSelector:launchFromLocationContext]) {
+            ((void (*)(id, SEL, id, id))objc_msgSend)(icon, launchFromLocationContext, location, nil);
+            CV3LogToFile(@"[Launcher] SBIcon launchFromLocation:context: %@ (%@)", info.bundleId, reason ?: @"Unknown");
+            return YES;
+        }
+
+        SEL privateLaunchFromLocationContext = @selector(_launchFromLocation:context:);
+        if ([icon respondsToSelector:privateLaunchFromLocationContext]) {
+            ((void (*)(id, SEL, id, id))objc_msgSend)(icon, privateLaunchFromLocationContext, location, nil);
+            CV3LogToFile(@"[Launcher] SBIcon _launchFromLocation:context: %@ (%@)", info.bundleId, reason ?: @"Unknown");
+            return YES;
+        }
+
+        SEL launchFromLocation = @selector(launchFromLocation:);
+        if ([icon respondsToSelector:launchFromLocation]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(icon, launchFromLocation, location);
+            CV3LogToFile(@"[Launcher] SBIcon launchFromLocation: %@ (%@)", info.bundleId, reason ?: @"Unknown");
+            return YES;
+        }
+
+        SEL launch = @selector(launch);
+        if ([icon respondsToSelector:launch]) {
+            ((void (*)(id, SEL))objc_msgSend)(icon, launch);
+            CV3LogToFile(@"[Launcher] SBIcon launch %@ (%@)", info.bundleId, reason ?: @"Unknown");
+            return YES;
+        }
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Launcher] SBIcon launch 异常 %@: %@", info.bundleId, e);
+    }
+
+    @try {
+        id iconController = [CV3ClassNamed(@"SBIconController") sharedInstance];
+        NSArray<NSString *> *controllerSelectors = @[
+            @"launchIcon:fromLocation:",
+            @"_launchIcon:fromLocation:",
+            @"launchIcon:"
+        ];
+
+        for (NSString *selectorName in controllerSelectors) {
+            SEL selector = NSSelectorFromString(selectorName);
+            if (![iconController respondsToSelector:selector]) continue;
+
+            if ([selectorName hasSuffix:@":fromLocation:"]) {
+                ((void (*)(id, SEL, id, id))objc_msgSend)(iconController, selector, icon, location);
+            } else {
+                ((void (*)(id, SEL, id))objc_msgSend)(iconController, selector, icon);
+            }
+            CV3LogToFile(@"[Launcher] SBIconController %@ %@ (%@)", selectorName, info.bundleId, reason ?: @"Unknown");
+            return YES;
+        }
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Launcher] SBIconController launch 异常 %@: %@", info.bundleId, e);
+    }
+
+    return NO;
+}
+
+static CV3FloatingAppWindow *CV3FloatingWindowForBundleID(NSString *bundleID) {
+    if (bundleID.length == 0 || !floatingWindows) return nil;
+
+    for (CV3FloatingAppWindow *win in [floatingWindows copy]) {
+        if (![win isKindOfClass:[CV3FloatingAppWindow class]] || win.isClosing) continue;
+        if ([win.bundleID isEqualToString:bundleID]) return win;
+    }
+
+    return nil;
+}
+
+static void CV3RestoreAndFocusFloatingWindow(CV3FloatingAppWindow *window, NSString *reason) {
+    if (!window || window.isClosing) return;
+
+    CV3LogToFile(@"[Launcher] 命中已有分屏，恢复并置顶: %@ (%@)", window.bundleID ?: @"nil", reason ?: @"Unknown");
+    [window restoreFromStash];
+    [window promoteFloatingWindowInZOrder];
+    [window setWindowFocused:YES];
+    [window enforceSceneForegroundState];
+    [window attemptToHostSceneWithRetries:6 delay:0.05];
+}
+
+static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
+    if (!launcherWindow) return;
+
+    launcherWindow.isPanelShowing = NO;
+    launcherWindow.isAnimating = NO;
+    launcherWindow.dimmingView.alpha = 0.0;
+    launcherWindow.dimmingView.userInteractionEnabled = NO;
+    launcherWindow.panelContainer.alpha = 0.0;
+    launcherWindow.panelContainer.hidden = YES;
+}
+
 @implementation CV3Window
 
 - (void)applyBackgroundTint:(UIColor *)color {
@@ -85,18 +252,11 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat);
         NSString *bid = [info.bundleId copy];
         
         // 核心修复：检测是否已有该应用的分屏窗口，如果有则直接激活而非全屏开启
-        CV3FloatingAppWindow *existingWindow = nil;
-        for (CV3FloatingAppWindow *win in floatingWindows) {
-            if ([win.bundleID isEqualToString:bid]) {
-                existingWindow = win;
-                break;
-            }
-        }
+        CV3FloatingAppWindow *existingWindow = CV3FloatingWindowForBundleID(bid);
         
         if (existingWindow) {
-            CV3LogToFile(@"[Info] Launcher 检测到已有分屏窗口: %@", bid);
             [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
-            [existingWindow restoreFromStash];
+            CV3RestoreAndFocusFloatingWindow(existingWindow, @"PanelAppClick");
             return;
         }
 
@@ -112,17 +272,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat);
             [defaults synchronize];
         });
 
-        CV3BeginWorkspaceTransitionProtection([NSString stringWithFormat:@"LauncherOpen:%@", bid]);
-        [self.searchField resignFirstResponder];
-        [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
-
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-            @try {
-                [[CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace] openApplicationWithBundleID:bid];
-            } @catch (NSException *e) {
-                CV3LogToFile(@"[Error] Launcher 打开普通应用失败 %@: %@", bid, e);
-            }
-        });
+        CV3HidePanelImmediately(self);
+        CV3OpenApplicationFast(bid, [NSString stringWithFormat:@"LauncherOpen:%@", bid]);
     }
 }
 
@@ -342,6 +493,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat);
 }
 
 - (void)collectionView:(UICollectionView *)cv didSelectItemAtIndexPath:(NSIndexPath *)indexPath {
+    [cv deselectItemAtIndexPath:indexPath animated:NO];
+
     UICollectionViewCell *cell = [cv cellForItemAtIndexPath:indexPath];
     
     // 立即提供物理点击感：微缩动画
@@ -405,13 +558,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat);
 }
 
 - (NSString *)currentActiveBundleID {
-    @try {
-        id workspace = [CV3ClassNamed(@"SBMainWorkspace") sharedInstance];
-        id activeItem = CV3InvokeObject(workspace, @selector(activeDisplayItem));
-        NSString *bundleID = CV3InvokeObject(activeItem, @selector(bundleIdentifier));
-        if (bundleID.length > 0) return bundleID;
-    } @catch (NSException *e) {}
-    return nil;
+    return CV3CurrentWorkspaceBundleID();
 }
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
