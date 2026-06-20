@@ -2280,7 +2280,8 @@ void CV3ToggleExposeMode(void) {
 }
 
 - (void)setWindowFocused:(BOOL)focused {
-    if (self.isFocused == focused) return;
+    BOOL focusChanged = (self.isFocused != focused);
+    if (!focusChanged && !focused) return;
     self.isFocused = focused;
     
     [self updateSovereigntyAssertion]; // 同步更新优先级
@@ -2293,14 +2294,7 @@ void CV3ToggleExposeMode(void) {
     [self updateFloatingHomeBarAppearance];
     
     if (focused) {
-        [self makeKeyAndVisible];
-        self.windowLevel = CV3Style.floatingApp;
-        
-        // Z-order 层级重排：将聚焦窗口移至 floatingWindows 数组末尾，以提升其层级与转屏级联偏移优先级
-        if (floatingWindows && [floatingWindows containsObject:self]) {
-            [floatingWindows removeObject:self];
-            [floatingWindows addObject:self];
-        }
+        [self promoteFloatingWindowInZOrder];
         
         // Dim other windows
         for (CV3FloatingAppWindow *win in floatingWindows) {
@@ -2309,6 +2303,19 @@ void CV3ToggleExposeMode(void) {
 
         // Z-Order 发生变化，级联刷新所有窗口前台优先级断言
         CV3CascadeUpdateSovereigntyAssertions();
+    }
+}
+
+- (void)promoteFloatingWindowInZOrder {
+    if (self.isClosing) return;
+
+    [self makeKeyAndVisible];
+    self.windowLevel = CV3Style.floatingApp;
+
+    // Z-order 层级重排：将当前窗口移至 floatingWindows 数组末尾，使命中测试优先处理它。
+    if (floatingWindows && [floatingWindows containsObject:self]) {
+        [floatingWindows removeObject:self];
+        [floatingWindows addObject:self];
     }
 }
 
@@ -2414,6 +2421,7 @@ void CV3ToggleExposeMode(void) {
     self.preStashFrame = self.frame;
     self.isStashed = YES;
     self.stashedSide = isNearLeft ? 1 : 2;
+    [self promoteFloatingWindowInZOrder];
     CV3CascadeUpdateSovereigntyAssertions(); // 级联刷新所有窗口前台优先级断言
 
     if (!genieImage) {
@@ -2423,6 +2431,9 @@ void CV3ToggleExposeMode(void) {
         self.homeBarView.alpha = 0.0;
         [self normalizeStashedGrabberLayout];
         CV3UpdateFloatingBackdrop(self.windowScene);
+        for (CV3FloatingAppWindow *win in [floatingWindows copy]) {
+            if ([win isKindOfClass:[CV3FloatingAppWindow class]] && win.isStashed) [win updateGrabberStack];
+        }
         return;
     }
 
@@ -2449,6 +2460,9 @@ void CV3ToggleExposeMode(void) {
         [self.hostView removeFromSuperview];
         [self normalizeStashedGrabberLayout];
         CV3UpdateFloatingBackdrop(self.windowScene);
+        for (CV3FloatingAppWindow *win in [floatingWindows copy]) {
+            if ([win isKindOfClass:[CV3FloatingAppWindow class]] && win.isStashed) [win updateGrabberStack];
+        }
     }];
 
     [UIView animateKeyframesWithDuration:0.28 delay:0.18 options:UIViewKeyframeAnimationOptionCalculationModeCubic | UIViewAnimationOptionBeginFromCurrentState animations:^{
@@ -3105,16 +3119,17 @@ void CV3ToggleExposeMode(void) {
         if (sub.tag == 99) [sub removeFromSuperview];
     }
     
-    int stashedCount = 0;
-    NSMutableArray *otherStashedWindows = [NSMutableArray array];
+    NSMutableArray *sameSideStashedWindows = [NSMutableArray array];
     for (CV3FloatingAppWindow *win in floatingWindows) {
-        if (win.isStashed && win.stashedSide == self.stashedSide && win != self) {
-            stashedCount++;
-            [otherStashedWindows addObject:win];
+        if ([win isKindOfClass:[CV3FloatingAppWindow class]] && win.isStashed && win.stashedSide == self.stashedSide) {
+            [sameSideStashedWindows addObject:win];
         }
     }
+
+    NSInteger stackIndex = [sameSideStashedWindows indexOfObject:self];
+    if (stackIndex == NSNotFound) stackIndex = 0;
     
-    if (stashedCount > 0) {
+    if (sameSideStashedWindows.count > 1) {
         // 建议：Prism Stacking (棱镜堆叠视觉)
         // ... (保持原有的图标堆叠视觉逻辑) ...
     }
@@ -3122,12 +3137,16 @@ void CV3ToggleExposeMode(void) {
     // 核心修复：由于窗口本身已缩小为图标，堆叠时需要移动整个窗口的位置
     CGFloat stackOffset = 48.0; // 每个图标之间的垂直间距
     CGRect currentFrame = self.frame;
-    currentFrame.origin.y = self.preStashFrame.origin.y + self.preStashFrame.size.height / 2.0 - (kCV3StashIconSize * 0.5) + (stashedCount * stackOffset);
+    currentFrame.origin.y = self.preStashFrame.origin.y + self.preStashFrame.size.height / 2.0 - (kCV3StashIconSize * 0.5) + (stackIndex * stackOffset);
+
+    CGRect screen = CV3DisplayBoundsForWindow(self);
+    UIEdgeInsets safeArea = [self currentSafeAreaInsets];
+    currentFrame.origin.y = MIN(MAX(currentFrame.origin.y, safeArea.top), screen.size.height - safeArea.bottom - currentFrame.size.height);
 
     [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0 options:0 animations:^{
         self.frame = currentFrame;
     } completion:nil];
-    }
+}
 - (void)handleRestoreTap:(UITapGestureRecognizer *)gesture {
     [self restoreFromStash];
 }
@@ -3357,7 +3376,19 @@ void CV3ToggleExposeMode(void) {
 }
 
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    if (self.isClosing || self.isStashed) return [super hitTest:point withEvent:event];
+    if (self.isClosing) return nil;
+
+    if (self.isStashed) {
+        CGPoint pInGrabber = [self convertPoint:point toView:self.stashGrabber];
+        if ([self.stashGrabber pointInside:pInGrabber withEvent:event]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self promoteFloatingWindowInZOrder];
+            });
+            UIView *grabberHit = [self.stashGrabber hitTest:pInGrabber withEvent:event];
+            return grabberHit ?: self.stashGrabber;
+        }
+        return nil;
+    }
 
     if (self.homeBarView && !self.homeBarView.hidden && self.homeBarView.alpha > 0.01) {
         CGRect homeBarFrame = CGRectInset([self convertRect:self.homeBarView.bounds fromView:self.homeBarView], -18.0, -18.0);
