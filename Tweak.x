@@ -583,23 +583,6 @@ static UIColor *CV3AverageColorFromImage(UIImage *image) {
     return color;
 }
 
-static UIColor *CV3CurrentAdaptiveTint = nil;
-
-static UIColor *CV3NormalizedGlassAccentColor(UIColor *accentColor, CGFloat intensity, BOOL selected) {
-    UIColor *tintColor = accentColor ?: [UIColor labelColor];
-    CGFloat hue = 0, saturation = 0, brightness = 0, alpha = 0;
-    if ([tintColor getHue:&hue saturation:&saturation brightness:&brightness alpha:&alpha]) {
-        CGFloat minSaturation = selected ? 0.28 : 0.18;
-        CGFloat maxSaturation = selected ? 0.68 : 0.56;
-        CGFloat minBrightness = selected ? 0.58 : 0.44;
-        CGFloat maxBrightness = selected ? 0.98 : 0.88;
-        saturation = MIN(maxSaturation, MAX(minSaturation, saturation + intensity * 0.04));
-        brightness = MIN(maxBrightness, MAX(minBrightness, brightness + intensity * 0.05));
-        tintColor = [UIColor colorWithHue:hue saturation:saturation brightness:brightness alpha:1.0];
-    }
-    return tintColor;
-}
-
 static CAGradientLayer *CV3EnsureGlassAccentLayer(UIView *hostView) {
     if (!hostView) return nil;
     NSString *layerName = @"CV3GlassAccentHighlight";
@@ -620,14 +603,13 @@ static CAGradientLayer *CV3EnsureGlassAccentLayer(UIView *hostView) {
 static void CV3ApplyGlassAccentStyle(UIView *surface,
                                      UIView *tintHost,
                                      CAGradientLayer *highlightLayer,
-                                     UIColor *accentColor,
+                                     __unused UIColor *accentColor,
                                      CGFloat cornerRadius,
                                      CGFloat intensity,
                                      BOOL selected) {
     if (!surface) return;
 
     intensity = MIN(1.0, MAX(0.0, intensity));
-    UIColor *tintColor = CV3NormalizedGlassAccentColor(accentColor ?: CV3CurrentAdaptiveTint, intensity, selected);
     CGFloat scale = [UIScreen mainScreen].scale;
 
     surface.backgroundColor = [UIColor clearColor];
@@ -636,10 +618,10 @@ static void CV3ApplyGlassAccentStyle(UIView *surface,
         surface.layer.cornerCurve = kCACornerCurveContinuous;
     }
     surface.layer.borderWidth = MAX(0.5 / scale, selected ? 1.0 / scale : 0.5 / scale);
-    surface.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:(0.16 + intensity * 0.14 + (selected ? 0.10 : 0.0))].CGColor;
+    surface.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:(0.14 + intensity * 0.12 + (selected ? 0.08 : 0.0))].CGColor;
 
     UIView *resolvedTintHost = tintHost ?: surface;
-    resolvedTintHost.backgroundColor = [tintColor colorWithAlphaComponent:(0.055 + intensity * 0.115 + (selected ? 0.035 : 0.0))];
+    resolvedTintHost.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:(0.025 + intensity * 0.055 + (selected ? 0.025 : 0.0))];
 
     CAGradientLayer *layer = highlightLayer ?: CV3EnsureGlassAccentLayer(resolvedTintHost);
     if (layer) {
@@ -650,9 +632,9 @@ static void CV3ApplyGlassAccentStyle(UIView *surface,
         layer.startPoint = CGPointMake(0.0, 0.0);
         layer.endPoint = CGPointMake(1.0, 1.0);
         layer.colors = @[
-            (id)[[UIColor whiteColor] colorWithAlphaComponent:(0.18 + intensity * 0.26 + (selected ? 0.08 : 0.0))].CGColor,
-            (id)[tintColor colorWithAlphaComponent:(0.08 + intensity * 0.18)].CGColor,
-            (id)[[UIColor blackColor] colorWithAlphaComponent:(0.04 + intensity * 0.07)].CGColor
+            (id)[[UIColor whiteColor] colorWithAlphaComponent:(0.12 + intensity * 0.18 + (selected ? 0.06 : 0.0))].CGColor,
+            (id)[[UIColor whiteColor] colorWithAlphaComponent:(0.025 + intensity * 0.055)].CGColor,
+            (id)[[UIColor blackColor] colorWithAlphaComponent:(0.035 + intensity * 0.055)].CGColor
         ];
         layer.locations = @[@0.0, @0.52, @1.0];
     }
@@ -1400,16 +1382,7 @@ static CV3AppInfo *CV3CopyAppInfo(CV3AppInfo *source) {
 
 static void CV3UpdateAdaptiveTint(NSString *bundleId) {
     if (!sharedWindow || !bundleId) return;
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        UIImage *icon = [UIImage _applicationIconImageForBundleIdentifier:bundleId format:10 scale:[UIScreen mainScreen].scale];
-        UIColor *avgColor = CV3AverageColorFromImage(icon);
-        if (avgColor) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                CV3CurrentAdaptiveTint = avgColor;
-                [sharedWindow applyBackgroundTint:avgColor];
-            });
-        }
-    });
+    [sharedWindow applyBackgroundTint:nil];
 }
 
 @protocol LSApplicationWorkspaceObserverProtocol <NSObject>
@@ -1480,7 +1453,7 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
         CV3ApplyGlassAccentStyle(blur,
                                  blur.contentView,
                                  CV3EnsureGlassAccentLayer(blur.contentView),
-                                 CV3CurrentAdaptiveTint ?: [UIColor labelColor],
+                                 nil,
                                  0.0,
                                  0.52,
                                  YES);
@@ -1499,7 +1472,7 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
             CV3ApplyGlassAccentStyle(btn,
                                      btn,
                                      CV3EnsureGlassAccentLayer(btn),
-                                     CV3CurrentAdaptiveTint ?: [UIColor labelColor],
+                                     nil,
                                      10.0,
                                      0.34,
                                      NO);

@@ -1107,20 +1107,12 @@ void CV3ToggleExposeMode(void) {
     CGFloat alpha = self.isFocused ? 1.0 : 0.84;
     self.homeBarView.alpha = (self.isStashed || self.isClosing) ? 0.0 : alpha;
 
-    UIColor *tintColor = self.adaptiveAppColor ?: [UIColor labelColor];
-    CGFloat hue = 0, saturation = 0, brightness = 0, componentAlpha = 0;
-    if ([tintColor getHue:&hue saturation:&saturation brightness:&brightness alpha:&componentAlpha]) {
-        saturation = MIN(0.58, MAX(0.16, saturation));
-        brightness = self.isFocused ? MIN(0.92, MAX(0.60, brightness)) : MIN(0.72, MAX(0.42, brightness));
-        tintColor = [UIColor colorWithHue:hue saturation:saturation brightness:brightness alpha:1.0];
-    }
-
     self.homeBarView.layer.shadowOpacity = self.isFocused ? 0.18 : 0.10;
     self.homeBarView.layer.shadowRadius = self.isFocused ? 16.0 : 10.0;
     CV3ApplyGlassAccentStyle(self.homeBarBlurView,
                              self.homeBarBlurView.contentView,
                              self.homeBarGlowLayer,
-                             tintColor,
+                             nil,
                              CGRectGetHeight(self.homeBarBlurView.bounds) / 2.0,
                              self.isFocused ? 0.74 : 0.44,
                              self.isFocused);
@@ -2531,11 +2523,10 @@ void CV3ToggleExposeMode(void) {
     if (@available(iOS 13.0, *)) {
         self.stashIconBackdropView.layer.cornerCurve = kCACornerCurveContinuous;
     }
-    UIColor *tintColor = self.adaptiveAppColor ?: [UIColor labelColor];
     CV3ApplyGlassAccentStyle(self.stashIconBackdropView,
                              self.stashIconBackdropView.contentView,
                              self.stashIconHighlightLayer,
-                             tintColor,
+                             nil,
                              cornerRadius,
                              0.88,
                              YES);
