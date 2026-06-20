@@ -123,6 +123,22 @@ void CV3ToggleExposeMode(void) {
 }
 
 @implementation CV3FloatingAppWindow
+- (UIEdgeInsets)currentSafeAreaInsets {
+    UIEdgeInsets safeArea = self.safeAreaInsets;
+    if (safeArea.top == 0 && safeArea.bottom == 0 && safeArea.left == 0 && safeArea.right == 0) {
+        UIWindow *keyWindow = nil;
+        if (@available(iOS 15.0, *)) {
+            keyWindow = self.windowScene.keyWindow;
+        } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            keyWindow = [UIApplication sharedApplication].keyWindow;
+#pragma clang diagnostic pop
+        }
+        safeArea = keyWindow ? keyWindow.safeAreaInsets : UIEdgeInsetsMake(47, 0, 34, 0);
+    }
+    return safeArea;
+}
 + (void)handleExposeBackdropTap:(UITapGestureRecognizer *)sender {
     CV3ToggleExposeMode();
 }
@@ -174,16 +190,7 @@ void CV3ToggleExposeMode(void) {
 
     if (targetIsLandscape) {
         // 横屏状态下：仍维持竖直窗口，仅以可用高度为上限做等比缩放。
-        UIWindow *keyWindow = nil;
-        if (@available(iOS 15.0, *)) {
-            keyWindow = self.windowScene.keyWindow;
-        } else {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            keyWindow = [UIApplication sharedApplication].keyWindow;
-#pragma clang diagnostic pop
-        }
-        UIEdgeInsets safeArea = keyWindow ? keyWindow.safeAreaInsets : UIEdgeInsetsMake(47, 0, 34, 0);
+        UIEdgeInsets safeArea = [self currentSafeAreaInsets];
         CGFloat breath = CV3Style.safeAreaBreath;
         CGFloat maxH = portraitW - safeArea.top - safeArea.bottom - breath * 2.0;
         CGFloat targetH = MAX(1.0, maxH);
@@ -561,7 +568,7 @@ void CV3ToggleExposeMode(void) {
 }
 
 - (void)handleChromeModeAction:(id)sender {
-    // 绿色按钮点击时弹出多任务菜单（全屏/缩小/所有浮窗/关闭）
+    // 绿色按钮点击时弹出多任务菜单（全屏/所有浮窗/关闭）
     CV3LogToFile(@"[MultitaskingMenu] handleChromeModeAction clicked!");
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
     [self toggleMultitaskingMenu];
@@ -668,6 +675,174 @@ void CV3ToggleExposeMode(void) {
     } completion:nil];
 }
 
+- (void)createFloatingHomeBarIfNeeded {
+    if (self.homeBarView) return;
+
+    UIView *bar = [[UIView alloc] initWithFrame:CGRectZero];
+    bar.userInteractionEnabled = YES;
+    bar.backgroundColor = [UIColor clearColor];
+    bar.layer.shadowColor = [UIColor blackColor].CGColor;
+    bar.layer.shadowOffset = CGSizeMake(0, 6);
+    bar.layer.shadowOpacity = 0.16;
+    bar.layer.shadowRadius = 14.0;
+
+    UIVisualEffectView *blurView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterial]];
+    blurView.userInteractionEnabled = NO;
+    blurView.clipsToBounds = YES;
+    [bar addSubview:blurView];
+
+    CAGradientLayer *glow = [CAGradientLayer layer];
+    glow.startPoint = CGPointMake(0.0, 0.5);
+    glow.endPoint = CGPointMake(1.0, 0.5);
+    [bar.layer insertSublayer:glow atIndex:0];
+
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleHomeBarTap:)];
+    UILongPressGestureRecognizer *move = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleMoveLongPress:)];
+    move.minimumPressDuration = 0.22;
+    move.delegate = self;
+    UISwipeGestureRecognizer *swipeUp = [[UISwipeGestureRecognizer alloc] initWithTarget:self action:@selector(handleHomeBarSwipeUp:)];
+    swipeUp.direction = UISwipeGestureRecognizerDirectionUp;
+    UISwipeGestureRecognizer *swipeDown = [[UISwipeGestureRecognizer alloc] initWithTarget:self action:@selector(handleHomeBarSwipeDown:)];
+    swipeDown.direction = UISwipeGestureRecognizerDirectionDown;
+
+    [tap requireGestureRecognizerToFail:move];
+    [bar addGestureRecognizer:tap];
+    [bar addGestureRecognizer:move];
+    [bar addGestureRecognizer:swipeUp];
+    [bar addGestureRecognizer:swipeDown];
+
+    self.homeBarView = bar;
+    self.homeBarBlurView = blurView;
+    self.homeBarGlowLayer = glow;
+    self.homeBarPlacement = 0;
+    [self addSubview:self.homeBarView];
+    [self updateFloatingHomeBarAppearance];
+}
+
+- (NSInteger)preferredHomeBarPlacementForScreenFrame:(CGRect)frame {
+    UIEdgeInsets safeArea = [self currentSafeAreaInsets];
+    CGRect screenBounds = [UIScreen mainScreen].bounds;
+
+    CGFloat topSpace = CGRectGetMinY(frame) - safeArea.top;
+    CGFloat bottomSpace = screenBounds.size.height - safeArea.bottom - CGRectGetMaxY(frame);
+    CGFloat leftSpace = CGRectGetMinX(frame) - safeArea.left;
+    CGFloat rightSpace = screenBounds.size.width - safeArea.right - CGRectGetMaxX(frame);
+
+    CGFloat scores[4] = {
+        bottomSpace + 24.0,
+        topSpace + 16.0,
+        rightSpace + 8.0,
+        leftSpace + 8.0
+    };
+
+    NSInteger bestPlacement = 0;
+    CGFloat bestScore = scores[0];
+    for (NSInteger i = 1; i < 4; i++) {
+        if (scores[i] > bestScore) {
+            bestScore = scores[i];
+            bestPlacement = i;
+        }
+    }
+    return bestPlacement;
+}
+
+- (void)updateFloatingHomeBarAppearance {
+    if (!self.homeBarView || !self.homeBarBlurView) return;
+
+    CGFloat alpha = self.isFocused ? 1.0 : 0.84;
+    self.homeBarView.alpha = (self.isStashed || self.isClosing) ? 0.0 : alpha;
+
+    UIColor *tintColor = self.adaptiveAppColor ?: [UIColor labelColor];
+    CGFloat hue = 0, saturation = 0, brightness = 0, componentAlpha = 0;
+    if ([tintColor getHue:&hue saturation:&saturation brightness:&brightness alpha:&componentAlpha]) {
+        saturation = MIN(0.58, MAX(0.16, saturation));
+        brightness = self.isFocused ? MIN(0.92, MAX(0.60, brightness)) : MIN(0.72, MAX(0.42, brightness));
+        tintColor = [UIColor colorWithHue:hue saturation:saturation brightness:brightness alpha:1.0];
+    }
+
+    self.homeBarView.layer.shadowOpacity = self.isFocused ? 0.18 : 0.10;
+    self.homeBarView.layer.shadowRadius = self.isFocused ? 16.0 : 10.0;
+    self.homeBarBlurView.contentView.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:self.isFocused ? 0.08 : 0.04];
+    self.homeBarGlowLayer.colors = @[
+        (id)[tintColor colorWithAlphaComponent:0.00].CGColor,
+        (id)[tintColor colorWithAlphaComponent:self.isFocused ? 0.32 : 0.18].CGColor,
+        (id)[tintColor colorWithAlphaComponent:0.00].CGColor
+    ];
+}
+
+- (void)layoutFloatingHomeBarForBounds:(CGRect)bounds {
+    [self createFloatingHomeBarIfNeeded];
+    if (!self.homeBarView) return;
+
+    CGFloat minEdge = MIN(bounds.size.width, bounds.size.height);
+    CGFloat scale = MIN(1.18, MAX(0.82, minEdge / 390.0));
+    CGFloat barLength = 56.0 * scale;
+    CGFloat barThickness = 18.0 * scale;
+    CGFloat protrusion = MAX(4.0, barThickness * 0.42);
+
+    self.homeBarPlacement = [self preferredHomeBarPlacementForScreenFrame:self.frame];
+    self.homeBarView.bounds = CGRectMake(0, 0, barLength, barThickness);
+    self.homeBarBlurView.frame = self.homeBarView.bounds;
+    self.homeBarBlurView.layer.cornerRadius = barThickness / 2.0;
+    self.homeBarGlowLayer.frame = self.homeBarView.bounds;
+    self.homeBarGlowLayer.cornerRadius = barThickness / 2.0;
+
+    CGPoint center = CGPointMake(CGRectGetMidX(bounds), CGRectGetMaxY(bounds) - barThickness * 0.5 + protrusion);
+    CGAffineTransform orientationTransform = CGAffineTransformIdentity;
+    if (self.homeBarPlacement == 1) {
+        center = CGPointMake(CGRectGetMidX(bounds), barThickness * 0.5 - protrusion);
+    } else if (self.homeBarPlacement == 2) {
+        center = CGPointMake(CGRectGetMaxX(bounds) - barThickness * 0.5 + protrusion, CGRectGetMidY(bounds));
+        orientationTransform = CGAffineTransformMakeRotation((CGFloat)(M_PI_2));
+    } else if (self.homeBarPlacement == 3) {
+        center = CGPointMake(barThickness * 0.5 - protrusion, CGRectGetMidY(bounds));
+        orientationTransform = CGAffineTransformMakeRotation((CGFloat)(M_PI_2));
+    }
+
+    self.homeBarView.center = center;
+    self.homeBarView.transform = orientationTransform;
+    [self updateFloatingHomeBarAppearance];
+    [self bringSubviewToFront:self.homeBarView];
+}
+
+- (void)handleHomeBarTap:(UITapGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateEnded || self.isClosing || self.isStashed) return;
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+    [self handleHideAction];
+}
+
+- (void)handleHomeBarSwipeUp:(UISwipeGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateEnded || self.isClosing || self.isStashed) return;
+    [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
+    CV3ToggleExposeMode();
+}
+
+- (void)activateHostedAppFullscreenAndClose {
+    if (self.isClosing || self.bundleID.length == 0) return;
+
+    NSString *bundleID = [self.bundleID copy];
+    [self closeWindow];
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        @try {
+            if ([[UIApplication sharedApplication] respondsToSelector:@selector(launchApplicationWithIdentifier:suspended:)]) {
+                [[UIApplication sharedApplication] launchApplicationWithIdentifier:bundleID suspended:NO];
+            } else {
+                [[CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace] openApplicationWithBundleID:bundleID];
+            }
+        } @catch (NSException *e) {
+            CV3LogToFile(@"[HomeBar] 打开全屏应用失败 %@: %@", bundleID, e);
+            [[CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace] openApplicationWithBundleID:bundleID];
+        }
+    });
+}
+
+- (void)handleHomeBarSwipeDown:(UISwipeGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateEnded || self.isClosing || self.isStashed) return;
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
+    [self activateHostedAppFullscreenAndClose];
+}
+
 - (UIButton *)multitaskingMenuButtonWithTitle:(NSString *)title symbol:(NSString *)symbol action:(SEL)action {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
     button.tintColor = [UIColor labelColor];
@@ -767,15 +942,12 @@ void CV3ToggleExposeMode(void) {
         [self.multitaskingMenuView.layer addSublayer:menuMagenta];
 
         UIButton *fullscreen = [self multitaskingMenuButtonWithTitle:@"全屏" symbol:@"rectangle.fill" action:@selector(handleFullscreenMenuAction:)];
-        UIButton *compact = [self multitaskingMenuButtonWithTitle:@"缩小" symbol:@"rectangle.inset.filled" action:@selector(handleCompactMenuAction:)];
         UIButton *expose = [self multitaskingMenuButtonWithTitle:@"所有浮窗" symbol:@"square.grid.2x2" action:@selector(handleExposeMenuAction:)];
         UIButton *close = [self multitaskingMenuButtonWithTitle:@"关闭" symbol:@"xmark" action:@selector(handleCloseMenuAction:)];
         fullscreen.tag = 101;
-        compact.tag = 102;
-        expose.tag = 103;
-        close.tag = 104;
+        expose.tag = 102;
+        close.tag = 103;
         [self.multitaskingMenuView.contentView addSubview:fullscreen];
-        [self.multitaskingMenuView.contentView addSubview:compact];
         [self.multitaskingMenuView.contentView addSubview:expose];
         [self.multitaskingMenuView.contentView addSubview:close];
         [self.rootTransformContainer addSubview:self.multitaskingMenuView];
@@ -799,7 +971,7 @@ void CV3ToggleExposeMode(void) {
         }
     }
     
-    CGFloat itemW = menuW / 4.0;
+    CGFloat itemW = menuW / 3.0;
     for (UIButton *button in self.multitaskingMenuView.contentView.subviews) {
         if (![button isKindOfClass:[UIButton class]]) continue;
         NSInteger idx = button.tag - 101;
@@ -945,61 +1117,6 @@ void CV3ToggleExposeMode(void) {
     }];
 }
 
-- (void)handleCompactMenuAction:(id)sender {
-    [self dismissMultitaskingMenu];
-
-    if (self.isCompactMode) {
-        CGRect restoreFrame = !CGRectIsEmpty(self.preCompactFrame) ? self.preCompactFrame : self.preFullscreenFrame;
-        if (!CGRectIsEmpty(restoreFrame)) {
-            self.isCompactMode = NO;
-            self.isFullscreenMode = NO;
-            
-            BOOL isExpanding = (restoreFrame.size.width > self.frame.size.width);
-            CGFloat initialScale = isExpanding ? CV3Style.transitionParallaxExpand : CV3Style.transitionParallaxShrink;
-            self.appContentWrapper.transform = CGAffineTransformMakeScale(initialScale, initialScale);
-            
-            [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.86 initialSpringVelocity:0.0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
-                self.frame = restoreFrame;
-                [self setNeedsLayout];
-                [self layoutIfNeeded];
-                
-                self.appContentWrapper.transform = CGAffineTransformIdentity;
-            } completion:^(BOOL finished) {
-                [self syncHostedSceneLayoutForce:YES];
-                [self syncWindowBoundsToClient];
-            }];
-        }
-        return;
-    }
-
-    self.preCompactFrame = self.frame;
-    self.isCompactMode = YES;
-    self.isFullscreenMode = NO;
-
-    CGRect screenBounds = self.windowScene ? self.windowScene.coordinateSpace.bounds : [UIScreen mainScreen].bounds;
-    CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
-    CGFloat compactW = MIN(390.0, MAX(300.0, shortSide * 0.48));
-    CGFloat compactH = MIN(screenBounds.size.height - 80.0, compactW * 1.55);
-    CGFloat targetX = CGRectGetMaxX(screenBounds) - compactW - 14.0;
-    CGFloat targetY = CGRectGetMidY(screenBounds) - compactH / 2.0;
-    CGRect targetFrame = CGRectMake(targetX, MAX(CGRectGetMinY(screenBounds) + 20.0, targetY), compactW, compactH);
-
-    BOOL isExpanding = (targetFrame.size.width > self.frame.size.width);
-    CGFloat initialScale = isExpanding ? CV3Style.transitionParallaxExpand : CV3Style.transitionParallaxShrink;
-    self.appContentWrapper.transform = CGAffineTransformMakeScale(initialScale, initialScale);
-
-    [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.86 initialSpringVelocity:0.0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
-        self.frame = targetFrame;
-        [self setNeedsLayout];
-        [self layoutIfNeeded];
-        
-        self.appContentWrapper.transform = CGAffineTransformIdentity;
-    } completion:^(BOOL finished) {
-        [self syncHostedSceneLayoutForce:YES];
-        [self syncWindowBoundsToClient];
-    }];
-}
-
 - (void)handleCloseMenuAction:(id)sender {
     [self dismissMultitaskingMenu];
     [self closeWindow];
@@ -1103,36 +1220,7 @@ void CV3ToggleExposeMode(void) {
         self.appContentWrapper.backgroundColor = [UIColor clearColor];
         [self.rootTransformContainer addSubview:self.appContentWrapper];
 
-        self.windowChromeView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.bounds.size.width, CV3Style.floatingChromeH)];
-        self.windowChromeView.userInteractionEnabled = YES;
-        [self.appContentWrapper addSubview:self.windowChromeView];
-
-        self.chromeModeButton = [self chromeButtonWithTitle:@"" action:@selector(handleChromeModeAction:)];
-        [self.chromeModeButton addTarget:self action:@selector(chromeBtnTouchDown:) forControlEvents:UIControlEventTouchDown | UIControlEventTouchDragEnter];
-        [self.chromeModeButton addTarget:self action:@selector(chromeBtnTouchUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel | UIControlEventTouchDragExit];
-        [self attachMoveLongPressToChromeButton:self.chromeModeButton];
-        
-        [self.windowChromeView addSubview:self.chromeModeButton];
-
-        self.chromeMinimizeButton = [self chromeButtonWithTitle:@"" action:@selector(handleChromeMinimizeAction:)];
-        [self.chromeMinimizeButton addTarget:self action:@selector(chromeBtnTouchDown:) forControlEvents:UIControlEventTouchDown | UIControlEventTouchDragEnter];
-        [self.chromeMinimizeButton addTarget:self action:@selector(chromeBtnTouchUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel | UIControlEventTouchDragExit];
-        [self attachMoveLongPressToChromeButton:self.chromeMinimizeButton];
-        [self.windowChromeView addSubview:self.chromeMinimizeButton];
-
-        self.chromeCloseButton = [self chromeButtonWithTitle:@"" action:@selector(handleChromeCloseAction:)];
-        [self.chromeCloseButton addTarget:self action:@selector(chromeBtnTouchDown:) forControlEvents:UIControlEventTouchDown | UIControlEventTouchDragEnter];
-        [self.chromeCloseButton addTarget:self action:@selector(chromeBtnTouchUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel | UIControlEventTouchDragExit];
-        [self attachMoveLongPressToChromeButton:self.chromeCloseButton];
-        [self.windowChromeView addSubview:self.chromeCloseButton];
-
-        self.chromeDragHandle = [[UIView alloc] initWithFrame:CGRectZero];
-        self.chromeDragHandle.layer.cornerRadius = CV3Style.windowHandleH / 2.0;
-        self.chromeDragHandle.userInteractionEnabled = YES;
-        [self.windowChromeView addSubview:self.chromeDragHandle];
-
-        self.chromeControlsExpanded = YES;
-        [self layoutFloatingChromeForSize:self.bounds.size];
+        [self createFloatingHomeBarIfNeeded];
 
         // 核心修复：引入非缩放裁剪层 (Clipping Container)
         // 该层的大小始终等于窗口大小，负责强制执行圆角裁剪，不受内部缩放影响
@@ -1243,6 +1331,7 @@ void CV3ToggleExposeMode(void) {
         self.stashGrabber.userInteractionEnabled = YES;
 
         [self clampToScreenBounds];
+        [self layoutFloatingHomeBarForBounds:self.bounds];
         [self updateAdaptiveColor];
 
         [self loadAppScene];
@@ -1592,7 +1681,7 @@ void CV3ToggleExposeMode(void) {
     
     self.hostContainerProxy.alpha = 1.0;
     
-    [self updateFloatingChromeAppearance]; // 动态改变交通灯颜色
+    [self updateFloatingHomeBarAppearance];
     
     if (focused) {
         [self makeKeyAndVisible];
@@ -1713,6 +1802,7 @@ void CV3ToggleExposeMode(void) {
         
         // 隐藏不需要的装饰 (此时 resizeHandle 已随 wrapper 缩放)
         self.resizeHandle.alpha = 0;
+        self.homeBarView.alpha = 0;
     } completion:^(BOOL finished) {
         // 真正从层级中移除画面渲染，释放资源
         [self.hostView removeFromSuperview];
@@ -1743,6 +1833,7 @@ void CV3ToggleExposeMode(void) {
                 self.largeSplashIcon.image = icon;
             }
             [self updateResizeHandleAppearance];
+            [self updateFloatingHomeBarAppearance];
         });
     });
 }
@@ -1809,18 +1900,7 @@ void CV3ToggleExposeMode(void) {
     self.appContentWrapper.bounds = CGRectMake(0, 0, logicalW, logicalH);
     self.appContentWrapper.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
 
-    [self layoutFloatingChromeForSize:CGSizeMake(logicalW, logicalH)];
-    if (self.multitaskingMenuView && !self.multitaskingMenuView.hidden) {
-        CGFloat menuW = MIN(320.0, MAX(280.0, logicalW - 24.0));
-        CGFloat menuH = 54.0;
-        self.multitaskingMenuView.frame = CGRectMake((logicalW - menuW) / 2.0, 24.0, menuW, menuH);
-        CGFloat itemW = menuW / 4.0;
-        for (UIButton *button in self.multitaskingMenuView.contentView.subviews) {
-            if (![button isKindOfClass:[UIButton class]]) continue;
-            NSInteger idx = button.tag - 101;
-            button.frame = CGRectMake(itemW * idx, 0, itemW, menuH);
-        }
-    }
+    [self layoutFloatingHomeBarForBounds:self.bounds];
 
     CGAffineTransform jellyTransform = CGAffineTransformIdentity;
     CGFloat pushFactor = 0;
@@ -1933,8 +2013,10 @@ void CV3ToggleExposeMode(void) {
         self.hostContainerProxy.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
         self.hostContainerProxy.transform = CGAffineTransformMakeScale(uniformScale, uniformScale);
     }
-    [self.appContentWrapper bringSubviewToFront:self.windowChromeView];
     [self.appContentWrapper bringSubviewToFront:self.resizeHandle];
+    if (self.homeBarView) {
+        [self bringSubviewToFront:self.homeBarView];
+    }
     
     if (!self.isLiveResizing) {
         self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.bounds cornerRadius:adaptiveRadius].CGPath;
@@ -1946,16 +2028,7 @@ void CV3ToggleExposeMode(void) {
 - (void)clampToScreenBounds {
     if (self.isStashed) return; // 隐藏状态下跳过钳位，允许 origin.x 超出屏幕
     
-    UIWindow *keyWindow = nil;
-    if (@available(iOS 15.0, *)) {
-        keyWindow = self.windowScene.keyWindow;
-    } else {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        keyWindow = [UIApplication sharedApplication].keyWindow;
-#pragma clang diagnostic pop
-    }
-    UIEdgeInsets safeArea = keyWindow ? keyWindow.safeAreaInsets : UIEdgeInsetsMake(47, 0, 34, 0);
+    UIEdgeInsets safeArea = [self currentSafeAreaInsets];
     CGRect screenBounds = [UIScreen mainScreen].bounds;
     
     CGRect frame = self.frame;
@@ -2170,9 +2243,16 @@ void CV3ToggleExposeMode(void) {
     if (gesture.state == UIGestureRecognizerStateBegan) {
         CV3LogToFile(@"[MoveGesture] handleMoveLongPress state began. Dismissing multitaskingMenu");
         [self dismissMultitaskingMenu];
+        if (!self.isStashed) {
+            self.stashGrabber.alpha = 0;
+            self.clippingContainer.alpha = 1.0;
+            self.appContentWrapper.alpha = 1.0;
+            self.appContentWrapper.transform = CGAffineTransformIdentity;
+            self.resizeHandle.alpha = 1.0;
+            self.homeBarView.alpha = 1.0;
+        }
         self.isFullscreenMode = NO;
         self.isCompactMode = NO;
-        [self setChromeControlsExpanded:YES animated:YES];
         [self setWindowFocused:YES];
         CGPoint centerInWindow = self.center;
         initialTouchOffset = CGPointMake(currentPoint.x - centerInWindow.x, currentPoint.y - centerInWindow.y);
@@ -2240,7 +2320,6 @@ void CV3ToggleExposeMode(void) {
     
     if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
         [self stopLiquidMotion];
-        [self scheduleChromeControlsCollapse];
         CGFloat velMag = sqrt(lastVelocity.x * lastVelocity.x + lastVelocity.y * lastVelocity.y);
         if (velMag > 2500.0) {
             BOOL towardLeft = (lastVelocity.x < -1800 && self.center.x < 150);
@@ -2264,39 +2343,35 @@ void CV3ToggleExposeMode(void) {
                 [self applyCurrentTransformWithScale:1.0];
                 self.windowLevel = CV3Style.floatingApp;
             
+            self.isStashed = NO;
+            self.stashedSide = 0;
+            self.stashGrabber.alpha = 0;
+            self.clippingContainer.alpha = 1.0;
+            self.appContentWrapper.alpha = 1.0;
+            self.appContentWrapper.transform = CGAffineTransformIdentity;
+            self.resizeHandle.alpha = 1.0;
+
             CGRect targetFrame = self.frame;
-            if (self.frame.origin.x < -self.frame.size.width / 2.0) {
-                self.isStashed = YES;
-                self.stashedSide = 1;
-                [self updateSovereigntyAssertion];
-                self.preStashFrame = self.frame;
-                targetFrame.origin.x = -self.frame.size.width + 44; 
-                self.stashGrabber.alpha = 1.0;
-                self.stashGrabber.frame = CGRectMake(self.frame.size.width - 44, self.frame.size.height/2 - 22, 44, 44);
-                self.clippingContainer.alpha = 0;
-            } else if (self.frame.origin.x + self.frame.size.width > screen.size.width + self.frame.size.width / 2.0) {
-                self.isStashed = YES;
-                self.stashedSide = 2;
-                [self updateSovereigntyAssertion];
-                self.preStashFrame = self.frame;
-                targetFrame.origin.x = screen.size.width - 44;
-                self.stashGrabber.alpha = 1.0;
-                self.stashGrabber.frame = CGRectMake(0, self.frame.size.height/2 - 22, 44, 44);
-                self.clippingContainer.alpha = 0;
-            } else {
-                [self clampToScreenBounds];
-            }
+            UIEdgeInsets safeArea = [self currentSafeAreaInsets];
+            CGFloat breath = CV3Style.safeAreaBreath;
+            CGFloat minX = safeArea.left + breath;
+            CGFloat minY = safeArea.top + breath;
+            CGFloat maxX = screen.size.width - safeArea.right - breath - targetFrame.size.width;
+            CGFloat maxY = screen.size.height - safeArea.bottom - breath - targetFrame.size.height;
+
+            if (maxX < minX) maxX = minX;
+            if (maxY < minY) maxY = minY;
+
+            targetFrame.origin.x = MIN(MAX(targetFrame.origin.x, minX), maxX);
+            targetFrame.origin.y = MIN(MAX(targetFrame.origin.y, minY), maxY);
             
             if (!CGRectEqualToRect(targetFrame, self.frame)) {
                 self.frame = targetFrame;
-                if (self.isStashed) {
-                    [self updateGrabberStack];
-                    for (CV3FloatingAppWindow *win in floatingWindows) {
-                        if (win != self && [win isKindOfClass:[CV3FloatingAppWindow class]] && win.isStashed) [win updateGrabberStack];
-                    }
-                }
             }
         } completion:^(BOOL finished) {
+            [self enforceSceneForegroundState];
+            [self refreshHostViewPresentation];
+            [self syncWindowBoundsToClient];
             CV3UpdateFloatingBackdrop(self.windowScene);
         }];
         
@@ -2383,6 +2458,7 @@ void CV3ToggleExposeMode(void) {
             self.clippingContainer.transform = CGAffineTransformIdentity;
             
             self.resizeHandle.alpha = 1.0;
+            self.homeBarView.alpha = 1.0;
             
             [self clampToScreenBounds];
             [self setNeedsLayout];
@@ -2440,11 +2516,7 @@ void CV3ToggleExposeMode(void) {
             self.layer.shadowRadius = 0;
             
             // 自由拖动位置：保持在安全区域内，但不强制吸附至侧边
-            UIWindow *keyWindow = nil;
-            if (@available(iOS 15.0, *)) {
-                keyWindow = self.windowScene.keyWindow;
-            }
-            UIEdgeInsets safeArea = keyWindow ? keyWindow.safeAreaInsets : UIEdgeInsetsMake(47, 0, 34, 0);
+            UIEdgeInsets safeArea = [self currentSafeAreaInsets];
             
             CGRect frame = self.frame;
             if (frame.origin.x < safeArea.left) frame.origin.x = safeArea.left;
@@ -2511,34 +2583,15 @@ void CV3ToggleExposeMode(void) {
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     if (self.isClosing || self.isStashed) return [super hitTest:point withEvent:event];
 
-    // 1. 深度优化：由于 App 渲染视图往往具备极高的触控优先级（尤其是带滚动的视图），
-    // 我们必须在 hitTest 阶段显式干预，优先判定装饰性交互组件。
-
-    if (self.multitaskingMenuView && !self.multitaskingMenuView.hidden) {
-        CGPoint pInMenu = [self convertPoint:point toView:self.multitaskingMenuView];
-        if ([self.multitaskingMenuView pointInside:pInMenu withEvent:event]) {
-            UIView *menuHit = [self.multitaskingMenuView hitTest:pInMenu withEvent:event];
-            return menuHit ?: self.multitaskingMenuView;
+    if (self.homeBarView && !self.homeBarView.hidden && self.homeBarView.alpha > 0.01) {
+        CGRect homeBarFrame = CGRectInset(self.homeBarView.frame, -18.0, -18.0);
+        if (CGRectContainsPoint(homeBarFrame, point)) {
+            CGPoint pInHomeBar = [self convertPoint:point toView:self.homeBarView];
+            UIView *homeBarHit = [self.homeBarView hitTest:pInHomeBar withEvent:event];
+            return homeBarHit ?: self.homeBarView;
         }
     }
-
-    CGRect dragHandleFrameInSelf = [self.windowChromeView convertRect:self.chromeDragHandle.frame toView:self];
-    CGRect expandedHandleFrame = CGRectInset(dragHandleFrameInSelf, -36.0, -30.0);
     
-    if (CGRectContainsPoint(expandedHandleFrame, point)) {
-        CGFloat minX = dragHandleFrameInSelf.origin.x;
-        CGFloat width = dragHandleFrameInSelf.size.width;
-        CGPoint pInChrome = [self convertPoint:point toView:self.windowChromeView];
-        CGFloat relX = MIN(MAX(0.0, pInChrome.x - minX), width);
-        NSInteger index = (NSInteger)(relX / (width / 3.0));
-        index = MIN(2, MAX(0, index));
-        
-        if (index == 0) return self.chromeCloseButton;
-        if (index == 1) return self.chromeMinimizeButton;
-        if (index == 2) return self.chromeModeButton;
-    }
-    
-    // 检查右下角缩放/移动热区 (最高优先级)
     CGRect expandedResizeFrame = [self expandedResizeHandleHitFrameInWindow];
     if (CGRectContainsPoint(expandedResizeFrame, point)) {
         return self.resizeHandle;
@@ -2588,8 +2641,7 @@ void CV3ToggleExposeMode(void) {
     // 这可以防止拖拽或缩放/位移窗口时，底下的 App 还在疯狂滚动
     if (gestureRecognizer == self.windowResizePan ||
         gestureRecognizer.view == self.resizeHandle ||
-        gestureRecognizer.view == self.windowChromeView ||
-        gestureRecognizer.view == self.chromeDragHandle) {
+        gestureRecognizer.view == self.homeBarView) {
         return YES;
     }
     return NO;
@@ -2736,15 +2788,7 @@ void CV3ToggleExposeMode(void) {
         newFrame.origin.x = initialCenter.x - outerWidth / 2.0;
         newFrame.origin.y = initialCenter.y - outerHeight / 2.0;
         
-        UIWindow *keyWin = nil;
-        if (@available(iOS 15.0, *)) { keyWin = self.windowScene.keyWindow; }
-        if (!keyWin) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            keyWin = [UIApplication sharedApplication].keyWindow;
-#pragma clang diagnostic pop
-        }
-        UIEdgeInsets safeArea = keyWin ? keyWin.safeAreaInsets : UIEdgeInsetsMake(47, 0, 34, 0);
+        UIEdgeInsets safeArea = [self currentSafeAreaInsets];
         
         if (newFrame.origin.y < safeArea.top && !hasTriggeredTopHaptic) {
             [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
@@ -2804,15 +2848,7 @@ void CV3ToggleExposeMode(void) {
         CGFloat aspect = longSide / MAX(shortSide, 1.0);
         CGPoint initialCenter = CGPointMake(CGRectGetMidX(self.frame), CGRectGetMidY(self.frame));
 
-        UIWindow *keyWin = nil;
-        if (@available(iOS 15.0, *)) { keyWin = self.windowScene.keyWindow; }
-        if (!keyWin) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            keyWin = [UIApplication sharedApplication].keyWindow;
-#pragma clang diagnostic pop
-        }
-        UIEdgeInsets safeArea = keyWin ? keyWin.safeAreaInsets : UIEdgeInsetsMake(47, 0, 34, 0);
+        UIEdgeInsets safeArea = [self currentSafeAreaInsets];
 
         // --- [Geek Advice] Asynchronous Frame Pipelining ---
         // Step 1: Immediately update scene settings to final frame and release live resize lock
@@ -2895,13 +2931,14 @@ void CV3ToggleExposeMode(void) {
                 [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
             }
 
-            // Safety clamp
-            if (snapFrame.origin.x < safeArea.left) snapFrame.origin.x = safeArea.left;
-            if (snapFrame.origin.y < safeArea.top) snapFrame.origin.y = safeArea.top;
-            if (CGRectGetMaxX(snapFrame) > screenBounds.size.width - safeArea.right) 
-                snapFrame.origin.x = screenBounds.size.width - safeArea.right - outerWidth;
-            if (CGRectGetMaxY(snapFrame) > screenBounds.size.height - safeArea.bottom) 
-                snapFrame.origin.y = screenBounds.size.height - safeArea.bottom - outerHeight;
+            // Safety clamp with breath padding to enforce Safe Area Constraint
+            CGFloat breath = CV3Style.safeAreaBreath;
+            if (snapFrame.origin.x < safeArea.left + breath) snapFrame.origin.x = safeArea.left + breath;
+            if (snapFrame.origin.y < safeArea.top + breath) snapFrame.origin.y = safeArea.top + breath;
+            if (CGRectGetMaxX(snapFrame) > screenBounds.size.width - safeArea.right - breath) 
+                snapFrame.origin.x = screenBounds.size.width - safeArea.right - breath - outerWidth;
+            if (CGRectGetMaxY(snapFrame) > screenBounds.size.height - safeArea.bottom - breath) 
+                snapFrame.origin.y = screenBounds.size.height - safeArea.bottom - breath - outerHeight;
 
             // Final bounce animation with dynamic spring velocity matching gesture release speed
             CGFloat springVelocity = MIN(4.0, MAX(0.5, speed / 800.0));
