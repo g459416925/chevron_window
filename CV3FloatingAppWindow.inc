@@ -143,6 +143,186 @@ void CV3ToggleExposeMode(void) {
 }
 
 @implementation CV3FloatingAppWindow
+- (CGFloat)angleForInterfaceOrientation:(UIInterfaceOrientation)orientation {
+    switch (orientation) {
+        case UIInterfaceOrientationLandscapeLeft:
+            return (CGFloat)(-M_PI_2);
+        case UIInterfaceOrientationLandscapeRight:
+            return (CGFloat)(M_PI_2);
+        case UIInterfaceOrientationPortraitUpsideDown:
+            return (CGFloat)M_PI;
+        case UIInterfaceOrientationPortrait:
+        default:
+            return 0.0;
+    }
+}
+
+- (UIImage *)imageByRotatingImage:(UIImage *)image fromOrientation:(UIInterfaceOrientation)fromOrientation toOrientation:(UIInterfaceOrientation)toOrientation {
+    if (!image || fromOrientation == toOrientation) return image;
+
+    CGFloat delta = [self angleForInterfaceOrientation:toOrientation] - [self angleForInterfaceOrientation:fromOrientation];
+    while (delta > M_PI) delta -= (CGFloat)(M_PI * 2.0);
+    while (delta < -M_PI) delta += (CGFloat)(M_PI * 2.0);
+    if (fabs(delta) < 0.001) return image;
+
+    CGSize sourceSize = image.size;
+    CGRect sourceRect = CGRectMake(0, 0, sourceSize.width, sourceSize.height);
+    CGRect rotatedRect = CGRectApplyAffineTransform(sourceRect, CGAffineTransformMakeRotation(delta));
+    CGSize rotatedSize = CGSizeMake(fabs(rotatedRect.size.width), fabs(rotatedRect.size.height));
+
+    UIGraphicsBeginImageContextWithOptions(rotatedSize, NO, image.scale);
+    CGContextRef context = UIGraphicsGetCurrentContext();
+    if (!context) {
+        UIGraphicsEndImageContext();
+        return image;
+    }
+
+    CGContextTranslateCTM(context, rotatedSize.width * 0.5, rotatedSize.height * 0.5);
+    CGContextRotateCTM(context, delta);
+    [image drawInRect:CGRectMake(-sourceSize.width * 0.5, -sourceSize.height * 0.5, sourceSize.width, sourceSize.height)];
+    UIImage *rotatedImage = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return rotatedImage ?: image;
+}
+
+- (UIImage *)snapshotImageForRestoreAnimation {
+    UIView *view = self.appContentWrapper;
+    if (!view || CGRectIsEmpty(view.bounds)) return nil;
+
+    UIGraphicsBeginImageContextWithOptions(view.bounds.size, NO, [UIScreen mainScreen].scale);
+    BOOL didDraw = [view drawViewHierarchyInRect:view.bounds afterScreenUpdates:NO];
+    if (!didDraw) {
+        CGContextRef context = UIGraphicsGetCurrentContext();
+        if (context) [view.layer renderInContext:context];
+    }
+    UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return image;
+}
+
+- (void)updateStashedRestoreSnapshotForOrientation:(UIInterfaceOrientation)orientation {
+    if (!CV3IsValidInterfaceOrientation(orientation)) return;
+    if (!self.stashedRestoreSnapshotImage) {
+        self.stashedRestoreSnapshotOrientation = orientation;
+        return;
+    }
+    UIInterfaceOrientation previousOrientation = CV3IsValidInterfaceOrientation(self.stashedRestoreSnapshotOrientation) ? self.stashedRestoreSnapshotOrientation : orientation;
+    self.stashedRestoreSnapshotImage = [self imageByRotatingImage:self.stashedRestoreSnapshotImage fromOrientation:previousOrientation toOrientation:orientation];
+    self.stashedRestoreSnapshotOrientation = orientation;
+}
+
+- (CGRect)interpolatedRectFrom:(CGRect)fromRect to:(CGRect)toRect progress:(CGFloat)progress {
+    CGFloat p = MIN(1.0, MAX(0.0, progress));
+    return CGRectMake(fromRect.origin.x + (toRect.origin.x - fromRect.origin.x) * p,
+                      fromRect.origin.y + (toRect.origin.y - fromRect.origin.y) * p,
+                      fromRect.size.width + (toRect.size.width - fromRect.size.width) * p,
+                      fromRect.size.height + (toRect.size.height - fromRect.size.height) * p);
+}
+
+- (CATransform3D)genieTransformWithProgress:(CGFloat)progress towardLeft:(BOOL)towardLeft presenting:(BOOL)presenting {
+    CGFloat p = MIN(1.0, MAX(0.0, progress));
+    CGFloat wave = sin((CGFloat)M_PI * p);
+    CGFloat direction = towardLeft ? -1.0 : 1.0;
+    CGFloat xScale = 1.0 - 0.10 * wave;
+    CGFloat yScale = 1.0 + 0.035 * wave;
+    CGFloat rotationY = direction * 0.10 * wave * (presenting ? -1.0 : 1.0);
+    CATransform3D transform = CATransform3DIdentity;
+    transform.m34 = -1.0 / 900.0;
+    transform = CATransform3DScale(transform, xScale, yScale, 1.0);
+    transform = CATransform3DRotate(transform, rotationY, 0, 1, 0);
+    return transform;
+}
+
+- (void)animateGenieSurfaceImage:(UIImage *)image
+                     sourceFrame:(CGRect)sourceFrame
+                       iconFrame:(CGRect)iconFrame
+                      presenting:(BOOL)presenting
+                      completion:(void (^)(void))completion {
+    if (!image || CGRectIsEmpty(sourceFrame) || CGRectIsEmpty(iconFrame)) {
+        if (completion) completion();
+        return;
+    }
+
+    BOOL towardLeft = CGRectGetMidX(iconFrame) < CGRectGetMidX(sourceFrame);
+    CGRect stageFrame = [self interpolatedRectFrom:sourceFrame to:iconFrame progress:0.64];
+    CGFloat stageInset = MAX(0.0, MIN(stageFrame.size.width * 0.16, fabs(sourceFrame.size.width - iconFrame.size.width) * 0.18));
+    stageFrame = CGRectInset(stageFrame, stageInset, -8.0);
+    stageFrame.size.width = MAX(iconFrame.size.width * 1.25, stageFrame.size.width);
+    stageFrame.size.height = MAX(iconFrame.size.height * 1.4, stageFrame.size.height * 0.62);
+
+    UIView *shadowSurface = [[UIView alloc] initWithFrame:presenting ? iconFrame : sourceFrame];
+    shadowSurface.backgroundColor = [UIColor clearColor];
+    shadowSurface.userInteractionEnabled = NO;
+    shadowSurface.layer.shadowColor = [UIColor blackColor].CGColor;
+    shadowSurface.layer.shadowOffset = presenting ? CGSizeMake(0, 2) : [self visualShadowLayer].shadowOffset;
+    shadowSurface.layer.shadowOpacity = presenting ? 0.0 : MIN(0.14, MAX(0.08, [self visualShadowLayer].shadowOpacity));
+    shadowSurface.layer.shadowRadius = presenting ? 3.0 : MIN(18.0, MAX(10.0, [self visualShadowLayer].shadowRadius * 0.65));
+    shadowSurface.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:shadowSurface.bounds cornerRadius:(presenting ? CV3Style.iconCornerRadius : self.clippingContainer.layer.cornerRadius)].CGPath;
+    shadowSurface.layer.allowsEdgeAntialiasing = YES;
+
+    UIImageView *imageView = [[UIImageView alloc] initWithFrame:shadowSurface.bounds];
+    imageView.image = image;
+    imageView.contentMode = UIViewContentModeScaleToFill;
+    imageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    imageView.clipsToBounds = YES;
+    imageView.layer.cornerRadius = presenting ? CV3Style.iconCornerRadius : self.clippingContainer.layer.cornerRadius;
+    imageView.layer.magnificationFilter = kCAFilterTrilinear;
+    imageView.layer.minificationFilter = kCAFilterTrilinear;
+    imageView.layer.allowsEdgeAntialiasing = YES;
+    [shadowSurface addSubview:imageView];
+    shadowSurface.alpha = presenting ? 0.0 : 1.0;
+    [self addSubview:shadowSurface];
+
+    NSTimeInterval duration = 0.34;
+    [UIView animateKeyframesWithDuration:duration
+                                   delay:0
+                                 options:UIViewKeyframeAnimationOptionCalculationModeCubic | UIViewAnimationOptionBeginFromCurrentState
+                              animations:^{
+        if (presenting) {
+            [UIView addKeyframeWithRelativeStartTime:0.0 relativeDuration:0.54 animations:^{
+                shadowSurface.frame = stageFrame;
+                shadowSurface.alpha = 0.92;
+                shadowSurface.layer.transform = [self genieTransformWithProgress:0.58 towardLeft:towardLeft presenting:YES];
+                shadowSurface.layer.shadowOpacity = 0.08;
+                shadowSurface.layer.shadowRadius = 10.0;
+                shadowSurface.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:shadowSurface.bounds cornerRadius:self.clippingContainer.layer.cornerRadius * 1.8].CGPath;
+                imageView.layer.cornerRadius = self.clippingContainer.layer.cornerRadius * 1.8;
+            }];
+            [UIView addKeyframeWithRelativeStartTime:0.34 relativeDuration:0.66 animations:^{
+                shadowSurface.frame = sourceFrame;
+                shadowSurface.alpha = 1.0;
+                shadowSurface.layer.transform = CATransform3DIdentity;
+                shadowSurface.layer.shadowOpacity = MIN(0.14, MAX(0.08, [self visualShadowLayer].shadowOpacity));
+                shadowSurface.layer.shadowRadius = MIN(18.0, MAX(10.0, [self visualShadowLayer].shadowRadius * 0.65));
+                shadowSurface.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:shadowSurface.bounds cornerRadius:self.clippingContainer.layer.cornerRadius].CGPath;
+                imageView.layer.cornerRadius = self.clippingContainer.layer.cornerRadius;
+            }];
+        } else {
+            [UIView addKeyframeWithRelativeStartTime:0.0 relativeDuration:0.52 animations:^{
+                shadowSurface.frame = stageFrame;
+                shadowSurface.alpha = 0.96;
+                shadowSurface.layer.transform = [self genieTransformWithProgress:0.58 towardLeft:towardLeft presenting:NO];
+                shadowSurface.layer.shadowOpacity = 0.08;
+                shadowSurface.layer.shadowRadius = 10.0;
+                shadowSurface.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:shadowSurface.bounds cornerRadius:self.clippingContainer.layer.cornerRadius * 1.8].CGPath;
+                imageView.layer.cornerRadius = self.clippingContainer.layer.cornerRadius * 1.8;
+            }];
+            [UIView addKeyframeWithRelativeStartTime:0.34 relativeDuration:0.54 animations:^{
+                shadowSurface.frame = iconFrame;
+                shadowSurface.alpha = 0.0;
+                shadowSurface.layer.transform = CATransform3DIdentity;
+                shadowSurface.layer.shadowOpacity = 0.0;
+                shadowSurface.layer.shadowRadius = 2.0;
+                shadowSurface.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:shadowSurface.bounds cornerRadius:CV3Style.iconCornerRadius].CGPath;
+                imageView.layer.cornerRadius = CV3Style.iconCornerRadius;
+            }];
+        }
+    } completion:^(BOOL finished) {
+        [shadowSurface removeFromSuperview];
+        if (completion) completion();
+    }];
+}
+
 - (UIEdgeInsets)currentSafeAreaInsets {
     UIEdgeInsets safeArea = self.safeAreaInsets;
     if (safeArea.top == 0 && safeArea.bottom == 0 && safeArea.left == 0 && safeArea.right == 0) {
@@ -194,6 +374,9 @@ void CV3ToggleExposeMode(void) {
     if (self.isStashed) {
         CGPoint preferredCenter = CGRectIsEmpty(self.preStashFrame) ? self.center : CGPointMake(CGRectGetMidX(self.preStashFrame), CGRectGetMidY(self.preStashFrame));
         self.preStashFrame = [self restorableFrameForOrientation:orientation preferredCenter:preferredCenter];
+        if (orientationChanged || !CV3IsValidInterfaceOrientation(self.stashedRestoreSnapshotOrientation)) {
+            [self updateStashedRestoreSnapshotForOrientation:orientation];
+        }
         self.baseRotationTransform = targetRotation;
         self.lastLayoutOrientation = orientation;
         self.rootTransformContainer.transform = CGAffineTransformIdentity;
@@ -2234,14 +2417,16 @@ void CV3ToggleExposeMode(void) {
     CGRect targetFrame = CGRectMake(stashCenter.x - stashHalf, stashCenter.y - stashHalf, kCV3StashIconSize, kCV3StashIconSize);
     CGRect targetFrameInWindow = CGRectOffset(targetFrame, -initialFrame.origin.x, -initialFrame.origin.y);
     CGRect snapshotStartFrame = [self convertRect:self.appContentWrapper.bounds fromView:self.appContentWrapper];
-    UIView *minimizeSnapshot = [self.appContentWrapper snapshotViewAfterScreenUpdates:NO];
+    self.stashedRestoreSnapshotImage = [self snapshotImageForRestoreAnimation];
+    self.stashedRestoreSnapshotOrientation = self.targetOrientation;
+    UIImage *genieImage = self.stashedRestoreSnapshotImage;
 
     self.preStashFrame = self.frame;
     self.isStashed = YES;
     self.stashedSide = isNearLeft ? 1 : 2;
     CV3CascadeUpdateSovereigntyAssertions(); // 级联刷新所有窗口前台优先级断言
 
-    if (!minimizeSnapshot) {
+    if (!genieImage) {
         self.frame = targetFrame;
         self.appContentWrapper.alpha = 0.0;
         self.resizeHandle.alpha = 0.0;
@@ -2250,34 +2435,6 @@ void CV3ToggleExposeMode(void) {
         CV3UpdateFloatingBackdrop(self.windowScene);
         return;
     }
-
-    UIView *minimizeContainer = [[UIView alloc] initWithFrame:snapshotStartFrame];
-    minimizeContainer.backgroundColor = [UIColor clearColor];
-    minimizeContainer.layer.shadowColor = [UIColor blackColor].CGColor;
-    minimizeContainer.layer.shadowOffset = [self visualShadowLayer].shadowOffset;
-    minimizeContainer.layer.shadowOpacity = MIN(0.14, MAX(0.08, [self visualShadowLayer].shadowOpacity));
-    minimizeContainer.layer.shadowRadius = MIN(18.0, MAX(10.0, [self visualShadowLayer].shadowRadius * 0.65));
-    minimizeContainer.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:minimizeContainer.bounds cornerRadius:self.clippingContainer.layer.cornerRadius].CGPath;
-    minimizeContainer.layer.shouldRasterize = YES;
-    minimizeContainer.layer.rasterizationScale = [UIScreen mainScreen].scale;
-
-    minimizeSnapshot.frame = minimizeContainer.bounds;
-    minimizeSnapshot.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    minimizeSnapshot.layer.cornerRadius = self.clippingContainer.layer.cornerRadius;
-    minimizeSnapshot.layer.masksToBounds = YES;
-    [minimizeContainer addSubview:minimizeSnapshot];
-    [self addSubview:minimizeContainer];
-    [self syncWindowShadowForCurrentState];
-
-    CGPoint startCenter = minimizeContainer.center;
-    CGPoint finalCenter = CGPointMake(CGRectGetMidX(targetFrameInWindow), CGRectGetMidY(targetFrameInWindow));
-    CGPoint stageCenter = CGPointMake(startCenter.x + (finalCenter.x - startCenter.x) * 0.58,
-                                      startCenter.y - MIN(18.0, initialFrame.size.height * 0.04));
-    CGFloat finalScaleX = targetFrame.size.width / MAX(snapshotStartFrame.size.width, 1.0);
-    CGFloat finalScaleY = targetFrame.size.height / MAX(snapshotStartFrame.size.height, 1.0);
-    CGFloat stageScaleX = MAX(finalScaleX * 3.4, 0.42);
-    CGFloat stageScaleY = MAX(finalScaleY * 5.0, 0.82);
-    CGFloat finalCornerRadius = CV3Style.iconCornerRadius / MAX(MIN(finalScaleX, finalScaleY), 0.01);
 
     self.stashGrabber.alpha = 0.0;
     self.stashGrabber.bounds = CGRectMake(0, 0, kCV3StashIconSize, kCV3StashIconSize);
@@ -2288,28 +2445,23 @@ void CV3ToggleExposeMode(void) {
     self.appContentWrapper.alpha = 0.0;
     self.resizeHandle.alpha = 0.0;
     self.homeBarView.alpha = 0.0;
+    [self syncWindowShadowForCurrentState];
 
-    [UIView animateKeyframesWithDuration:0.42 delay:0 options:UIViewKeyframeAnimationOptionCalculationModeCubic | UIViewAnimationOptionBeginFromCurrentState animations:^{
-        // Animate a visual proxy only; the UIWindow itself moves after the animation completes.
-        [UIView addKeyframeWithRelativeStartTime:0.0 relativeDuration:0.42 animations:^{
-            minimizeContainer.center = stageCenter;
-            minimizeContainer.transform = CGAffineTransformMakeScale(stageScaleX, stageScaleY);
-            minimizeContainer.alpha = 0.94;
-            minimizeContainer.layer.shadowOpacity = 0.08;
-            minimizeContainer.layer.shadowRadius = 10.0;
-            minimizeContainer.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:minimizeContainer.bounds cornerRadius:self.clippingContainer.layer.cornerRadius * 1.8].CGPath;
-            minimizeSnapshot.layer.cornerRadius = self.clippingContainer.layer.cornerRadius * 1.8;
-        }];
+    CGRect targetIconFrameInWindow = CGRectInset(targetFrameInWindow, kCV3StashIconInset, kCV3StashIconInset);
+    [self animateGenieSurfaceImage:genieImage sourceFrame:snapshotStartFrame iconFrame:targetIconFrameInWindow presenting:NO completion:^{
+        self.frame = targetFrame;
+        [self visualShadowLayer].shadowOpacity = 0.0;
+        [self visualShadowLayer].shadowRadius = 0.0;
+        [self visualShadowLayer].shadowOffset = CGSizeZero;
+        [self visualShadowLayer].shadowPath = nil;
+        self.appContentWrapper.transform = CGAffineTransformIdentity;
+        self.appContentWrapper.alpha = 0.0;
+        [self.hostView removeFromSuperview];
+        [self normalizeStashedGrabberLayout];
+        CV3UpdateFloatingBackdrop(self.windowScene);
+    }];
 
-        [UIView addKeyframeWithRelativeStartTime:0.22 relativeDuration:0.48 animations:^{
-            minimizeContainer.center = finalCenter;
-            minimizeContainer.transform = CGAffineTransformMakeScale(finalScaleX, finalScaleY);
-            minimizeContainer.alpha = 0.0;
-            minimizeContainer.layer.shadowOpacity = 0.0;
-            minimizeContainer.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:minimizeContainer.bounds cornerRadius:finalCornerRadius].CGPath;
-            minimizeSnapshot.layer.cornerRadius = finalCornerRadius;
-        }];
-
+    [UIView animateKeyframesWithDuration:0.28 delay:0.18 options:UIViewKeyframeAnimationOptionCalculationModeCubic | UIViewAnimationOptionBeginFromCurrentState animations:^{
         [UIView addKeyframeWithRelativeStartTime:0.45 relativeDuration:0.20 animations:^{
             self.stashGrabber.alpha = 0.72;
             self.appIconMiniView.transform = CGAffineTransformMakeScale(0.88, 0.88);
@@ -2322,19 +2474,7 @@ void CV3ToggleExposeMode(void) {
             self.appIconMiniView.frame = CGRectInset(self.stashGrabber.bounds, kCV3StashIconInset, kCV3StashIconInset);
             self.appIconMiniView.transform = CGAffineTransformIdentity;
         }];
-    } completion:^(BOOL finished) {
-        [minimizeContainer removeFromSuperview];
-        self.frame = targetFrame;
-        [self visualShadowLayer].shadowOpacity = 0.0;
-        [self visualShadowLayer].shadowRadius = 0.0;
-        [self visualShadowLayer].shadowOffset = CGSizeZero;
-        [self visualShadowLayer].shadowPath = nil;
-        self.appContentWrapper.transform = CGAffineTransformIdentity;
-        self.appContentWrapper.alpha = 0.0;
-        [self.hostView removeFromSuperview];
-        [self normalizeStashedGrabberLayout];
-        CV3UpdateFloatingBackdrop(self.windowScene);
-    }];
+    } completion:nil];
 }
 
 - (void)applyStashedGrabberOrientation {
@@ -3022,16 +3162,7 @@ void CV3ToggleExposeMode(void) {
 
         CGRect endFrameInWindow = [self convertRect:self.appContentWrapper.bounds fromView:self.appContentWrapper];
         CGRect startFrameInWindow = CGRectOffset(iconFrame, -targetFrame.origin.x, -targetFrame.origin.y);
-        UIView *restoreSnapshot = [self.appContentWrapper snapshotViewAfterScreenUpdates:YES];
-        if (!restoreSnapshot) {
-            restoreSnapshot = [self.appContentWrapper snapshotViewAfterScreenUpdates:NO];
-        }
-        if (!restoreSnapshot) {
-            restoreSnapshot = [self.hostContainerProxy snapshotViewAfterScreenUpdates:YES];
-        }
-        if (!restoreSnapshot) {
-            restoreSnapshot = [self.hostContainerProxy snapshotViewAfterScreenUpdates:NO];
-        }
+        UIImage *genieImage = self.stashedRestoreSnapshotImage ?: [self snapshotImageForRestoreAnimation];
 
         self.appContentWrapper.alpha = 0.0;
         self.resizeHandle.alpha = 0.0;
@@ -3042,7 +3173,7 @@ void CV3ToggleExposeMode(void) {
         [self visualShadowLayer].shadowOffset = CGSizeZero;
         [self visualShadowLayer].shadowPath = nil;
 
-        if (!restoreSnapshot) {
+        if (!genieImage) {
             self.appContentWrapper.alpha = 1.0;
             self.resizeHandle.alpha = 1.0;
             self.homeBarView.alpha = 1.0;
@@ -3055,22 +3186,6 @@ void CV3ToggleExposeMode(void) {
             return;
         }
 
-        UIView *restoreContainer = [[UIView alloc] initWithFrame:endFrameInWindow];
-        restoreContainer.backgroundColor = [UIColor clearColor];
-
-        UIView *restoreRotatedContent = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.appContentWrapper.bounds.size.width, self.appContentWrapper.bounds.size.height)];
-        restoreRotatedContent.backgroundColor = [UIColor clearColor];
-        restoreRotatedContent.center = CGPointMake(CGRectGetMidX(restoreContainer.bounds), CGRectGetMidY(restoreContainer.bounds));
-        restoreRotatedContent.transform = self.baseRotationTransform;
-
-        restoreSnapshot.frame = restoreRotatedContent.bounds;
-        restoreSnapshot.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        restoreSnapshot.layer.cornerRadius = self.clippingContainer.layer.cornerRadius;
-        restoreSnapshot.layer.masksToBounds = YES;
-        [restoreRotatedContent addSubview:restoreSnapshot];
-        [restoreContainer addSubview:restoreRotatedContent];
-        [self addSubview:restoreContainer];
-
         if (!iconProxy) {
             UIImageView *fallbackIconProxy = [[UIImageView alloc] initWithFrame:CGRectInset(startFrameInWindow, 4, 4)];
             fallbackIconProxy.image = self.appIconMiniView.image;
@@ -3081,47 +3196,14 @@ void CV3ToggleExposeMode(void) {
             iconProxy = fallbackIconProxy;
         } else {
             iconProxy.frame = startFrameInWindow;
+            iconProxy.transform = self.baseRotationTransform;
         }
         [self addSubview:iconProxy];
+        CGAffineTransform iconBaseTransform = self.baseRotationTransform;
 
-        CGPoint startCenter = CGPointMake(CGRectGetMidX(startFrameInWindow), CGRectGetMidY(startFrameInWindow));
-        CGPoint endCenter = restoreContainer.center;
-        CGPoint stageCenter = CGPointMake(endCenter.x + (startCenter.x - endCenter.x) * 0.58,
-                                          endCenter.y - MIN(18.0, targetFrame.size.height * 0.04));
-        CGFloat startScaleX = startFrameInWindow.size.width / MAX(endFrameInWindow.size.width, 1.0);
-        CGFloat startScaleY = startFrameInWindow.size.height / MAX(endFrameInWindow.size.height, 1.0);
-        CGFloat stageScaleX = MAX(startScaleX * 3.4, 0.42);
-        CGFloat stageScaleY = MAX(startScaleY * 5.0, 0.82);
-        CGFloat startCornerRadius = CV3Style.iconCornerRadius / MAX(MIN(startScaleX, startScaleY), 0.01);
-
-        restoreContainer.center = startCenter;
-        restoreContainer.transform = CGAffineTransformMakeScale(startScaleX, startScaleY);
-        restoreContainer.alpha = 0.0;
-        restoreSnapshot.layer.cornerRadius = startCornerRadius;
-
-        [UIView animateKeyframesWithDuration:0.42 delay:0 options:UIViewKeyframeAnimationOptionCalculationModeCubic | UIViewAnimationOptionBeginFromCurrentState animations:^{
-            [UIView addKeyframeWithRelativeStartTime:0.0 relativeDuration:0.22 animations:^{
-                iconProxy.alpha = 0.0;
-                iconProxy.transform = CGAffineTransformMakeScale(0.86, 0.86);
-                restoreContainer.alpha = 0.34;
-            }];
-
-            [UIView addKeyframeWithRelativeStartTime:0.18 relativeDuration:0.48 animations:^{
-                restoreContainer.center = stageCenter;
-                restoreContainer.transform = CGAffineTransformMakeScale(stageScaleX, stageScaleY);
-                restoreContainer.alpha = 0.92;
-                restoreSnapshot.layer.cornerRadius = self.clippingContainer.layer.cornerRadius * 1.8;
-            }];
-
-            [UIView addKeyframeWithRelativeStartTime:0.48 relativeDuration:0.52 animations:^{
-                restoreContainer.center = endCenter;
-                restoreContainer.transform = CGAffineTransformIdentity;
-                restoreContainer.alpha = 1.0;
-                restoreSnapshot.layer.cornerRadius = self.clippingContainer.layer.cornerRadius;
-            }];
-        } completion:^(BOOL finished) {
+        CGRect startIconFrameInWindow = CGRectInset(startFrameInWindow, kCV3StashIconInset, kCV3StashIconInset);
+        [self animateGenieSurfaceImage:genieImage sourceFrame:endFrameInWindow iconFrame:startIconFrameInWindow presenting:YES completion:^{
             [iconProxy removeFromSuperview];
-            [restoreContainer removeFromSuperview];
             self.appContentWrapper.alpha = 1.0;
             self.resizeHandle.alpha = 1.0;
             self.homeBarView.alpha = 1.0;
@@ -3133,6 +3215,13 @@ void CV3ToggleExposeMode(void) {
                 if (win.isStashed) [win updateGrabberStack];
             }
         }];
+
+        [UIView animateKeyframesWithDuration:0.18 delay:0 options:UIViewKeyframeAnimationOptionCalculationModeCubic | UIViewAnimationOptionBeginFromCurrentState animations:^{
+            [UIView addKeyframeWithRelativeStartTime:0.0 relativeDuration:0.22 animations:^{
+                iconProxy.alpha = 0.0;
+                iconProxy.transform = CGAffineTransformScale(iconBaseTransform, 0.86, 0.86);
+            }];
+        } completion:nil];
     } else {
         // 如果没有被隐藏，则执行轻微的脉冲动画提醒用户它已置顶
         [self triggerCollisionImpulse];
