@@ -826,6 +826,44 @@ void CV3ToggleExposeMode(void) {
     }
 }
 
+- (void)homeBarResizeLimitsForAspect:(CGFloat)aspect minWidth:(CGFloat *)minWidth maxWidth:(CGFloat *)maxWidth {
+    CGRect screenBounds = CV3DisplayBoundsForWindow(self);
+    UIEdgeInsets safeArea = [self currentSafeAreaInsets];
+    CGFloat breath = CV3Style.safeAreaBreath;
+    CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
+    CGFloat visibleWidth = MAX(1.0, screenBounds.size.width - safeArea.left - safeArea.right - breath * 2.0);
+    CGFloat visibleHeight = MAX(1.0, screenBounds.size.height - safeArea.top - safeArea.bottom - breath * 2.0);
+    CGFloat minW = shortSide * 0.4;
+    CGFloat maxW = shortSide * 0.75;
+
+    maxW = MIN(maxW, visibleWidth);
+    maxW = MIN(maxW, visibleHeight / MAX(aspect, 1.0));
+    if (maxW < minW) minW = maxW;
+
+    if (minWidth) *minWidth = MAX(1.0, minW);
+    if (maxWidth) *maxWidth = MAX(1.0, maxW);
+}
+
+- (CGRect)constrainedFloatingFrameForSize:(CGSize)size preferredCenter:(CGPoint)center {
+    CGRect screenBounds = CV3DisplayBoundsForWindow(self);
+    UIEdgeInsets safeArea = [self currentSafeAreaInsets];
+    CGFloat breath = CV3Style.safeAreaBreath;
+    CGRect frame = CGRectMake(center.x - size.width * 0.5,
+                              center.y - size.height * 0.5,
+                              size.width,
+                              size.height);
+    CGFloat minX = safeArea.left + breath;
+    CGFloat minY = safeArea.top + breath;
+    CGFloat maxX = screenBounds.size.width - safeArea.right - breath - size.width;
+    CGFloat maxY = screenBounds.size.height - safeArea.bottom - breath - size.height;
+
+    if (maxX < minX) maxX = minX;
+    if (maxY < minY) maxY = minY;
+    frame.origin.x = MIN(MAX(frame.origin.x, minX), maxX);
+    frame.origin.y = MIN(MAX(frame.origin.y, minY), maxY);
+    return frame;
+}
+
 - (void)updateFloatingHomeBarAppearance {
     if (!self.homeBarView || !self.homeBarBlurView) return;
 
@@ -904,6 +942,25 @@ void CV3ToggleExposeMode(void) {
         self.isCompactMode = NO;
         self.initialResizeFrame = self.frame;
         self.homeBarResizeStartPlacement = self.homeBarPlacement;
+        CGPoint axis = CGPointMake(1.0, 0.0);
+        if (self.homeBarView) {
+            CGRect barBounds = self.homeBarView.bounds;
+            CGPoint left = [self.homeBarView convertPoint:CGPointMake(CGRectGetMinX(barBounds), CGRectGetMidY(barBounds)) toView:nil];
+            CGPoint right = [self.homeBarView convertPoint:CGPointMake(CGRectGetMaxX(barBounds), CGRectGetMidY(barBounds)) toView:nil];
+            axis = CGPointMake(right.x - left.x, right.y - left.y);
+            CGFloat length = sqrt(axis.x * axis.x + axis.y * axis.y);
+            if (length > 0.1) {
+                axis.x /= length;
+                axis.y /= length;
+            } else {
+                axis = CGPointMake(1.0, 0.0);
+            }
+        }
+        if (self.homeBarResizeStartPlacement == 2 || self.homeBarResizeStartPlacement == 3) {
+            axis.x = -axis.x;
+            axis.y = -axis.y;
+        }
+        self.homeBarResizeAxis = axis;
         [gesture setTranslation:CGPointZero inView:nil];
         lastHapticOvershoot = 0;
         hasTriggeredTopHaptic = NO;
@@ -952,16 +1009,16 @@ void CV3ToggleExposeMode(void) {
         CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
         CGFloat longSide = MAX(screenBounds.size.width, screenBounds.size.height);
         CGFloat aspect = longSide / MAX(shortSide, 1.0);
-        CGFloat minAllowedWidth = shortSide * 0.4;
-        CGFloat maxAllowedWidth = shortSide * 0.75;
+        CGFloat minAllowedWidth = 1.0;
+        CGFloat maxAllowedWidth = 1.0;
+        [self homeBarResizeLimitsForAspect:aspect minWidth:&minAllowedWidth maxWidth:&maxAllowedWidth];
 
-        CGFloat dominantTranslation = 0.0;
-        NSInteger resizePlacement = self.homeBarResizeStartPlacement;
-        if (resizePlacement == 0 || resizePlacement == 1) {
-            dominantTranslation = translation.x;
-        } else {
-            dominantTranslation = -translation.y;
+        CGPoint axis = self.homeBarResizeAxis;
+        CGFloat axisLength = sqrt(axis.x * axis.x + axis.y * axis.y);
+        if (axisLength < 0.1) {
+            axis = CGPointMake(1.0, 0.0);
         }
+        CGFloat dominantTranslation = translation.x * axis.x + translation.y * axis.y;
 
         CGFloat initialLogicalWidth = self.initialResizeFrame.size.width;
         CGFloat targetWidth = initialLogicalWidth + dominantTranslation * 0.9;
@@ -989,18 +1046,11 @@ void CV3ToggleExposeMode(void) {
             }
         }
 
-        CGFloat finalWidth = targetWidth;
-        if (targetWidth < minAllowedWidth) {
-            finalWidth = minAllowedWidth - (minAllowedWidth - targetWidth) * 0.3;
-        } else if (targetWidth > maxAllowedWidth) {
-            finalWidth = maxAllowedWidth + (targetWidth - maxAllowedWidth) * 0.3;
-        }
+        CGFloat finalWidth = MIN(MAX(targetWidth, minAllowedWidth), maxAllowedWidth);
 
         CGFloat finalHeight = finalWidth * aspect;
-        CGRect newFrame;
-        newFrame.size = CGSizeMake(finalWidth, finalHeight);
-        newFrame.origin.x = CGRectGetMidX(self.initialResizeFrame) - finalWidth / 2.0;
-        newFrame.origin.y = CGRectGetMidY(self.initialResizeFrame) - finalHeight / 2.0;
+        CGPoint preferredCenter = CGPointMake(CGRectGetMidX(self.initialResizeFrame), CGRectGetMidY(self.initialResizeFrame));
+        CGRect newFrame = [self constrainedFloatingFrameForSize:CGSizeMake(finalWidth, finalHeight) preferredCenter:preferredCenter];
 
         UIEdgeInsets safeArea = [self currentSafeAreaInsets];
         if (newFrame.origin.y < safeArea.top && !hasTriggeredTopHaptic) {
@@ -1027,7 +1077,7 @@ void CV3ToggleExposeMode(void) {
 
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
-        self.bounds = CGRectMake(0, 0, finalWidth, finalHeight);
+        self.bounds = CGRectMake(0, 0, newFrame.size.width, newFrame.size.height);
         self.center = CGPointMake(CGRectGetMidX(newFrame), CGRectGetMidY(newFrame));
         [self layoutFloatingHomeBarForBounds:self.appContentWrapper.bounds];
         [CATransaction commit];
@@ -1084,14 +1134,17 @@ void CV3ToggleExposeMode(void) {
         if (gesture.state == UIGestureRecognizerStateEnded) {
             CGFloat finalWidth = self.bounds.size.width;
             CGPoint velocity = [gesture velocityInView:nil];
-            NSInteger resizePlacement = self.homeBarResizeStartPlacement;
-            CGFloat axisVelocity = (resizePlacement == 0 || resizePlacement == 1) ? velocity.x : -velocity.y;
+            CGPoint axis = self.homeBarResizeAxis;
+            CGFloat axisLength = sqrt(axis.x * axis.x + axis.y * axis.y);
+            if (axisLength < 0.1) axis = CGPointMake(1.0, 0.0);
+            CGFloat axisVelocity = velocity.x * axis.x + velocity.y * axis.y;
             if (fabs(axisVelocity) > 300.0) {
                 finalWidth += axisVelocity * 0.015;
             }
 
-            CGFloat minAllowedWidth = shortSide * 0.4;
-            CGFloat maxAllowedWidth = shortSide * 0.75;
+            CGFloat minAllowedWidth = 1.0;
+            CGFloat maxAllowedWidth = 1.0;
+            [self homeBarResizeLimitsForAspect:aspect minWidth:&minAllowedWidth maxWidth:&maxAllowedWidth];
             finalWidth = MAX(minAllowedWidth, MIN(maxAllowedWidth, finalWidth));
 
             CGFloat previousLogicalWidth = finalWidth;
@@ -1105,9 +1158,11 @@ void CV3ToggleExposeMode(void) {
             CGFloat currentRatio = finalWidth / shortSide;
             if (fabs(currentRatio - 0.5) < 0.03) finalWidth = shortSide * 0.5;
             else if (fabs(currentRatio - 0.75) < 0.03) finalWidth = shortSide * 0.75;
+            finalWidth = MAX(minAllowedWidth, MIN(maxAllowedWidth, finalWidth));
 
             CGFloat finalHeight = finalWidth * aspect;
-            snapFrame.size = CGSizeMake(finalWidth, finalHeight);
+            CGSize finalSize = CGSizeMake(finalWidth, finalHeight);
+            snapFrame.size = finalSize;
 
             if (fabs(finalWidth - previousLogicalWidth) > 0.1) {
                 snapFrame.origin.x = initialCenter.x - finalWidth / 2.0;
@@ -1115,15 +1170,7 @@ void CV3ToggleExposeMode(void) {
                 [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
             }
 
-            CGFloat breath = CV3Style.safeAreaBreath;
-            if (snapFrame.origin.x < safeArea.left + breath) snapFrame.origin.x = safeArea.left + breath;
-            if (snapFrame.origin.y < safeArea.top + breath) snapFrame.origin.y = safeArea.top + breath;
-            if (CGRectGetMaxX(snapFrame) > screenBounds.size.width - safeArea.right - breath) {
-                snapFrame.origin.x = screenBounds.size.width - safeArea.right - breath - finalWidth;
-            }
-            if (CGRectGetMaxY(snapFrame) > screenBounds.size.height - safeArea.bottom - breath) {
-                snapFrame.origin.y = screenBounds.size.height - safeArea.bottom - breath - finalHeight;
-            }
+            snapFrame = [self constrainedFloatingFrameForSize:finalSize preferredCenter:CGPointMake(CGRectGetMidX(snapFrame), CGRectGetMidY(snapFrame))];
 
             CGFloat springVelocity = MIN(4.0, MAX(0.5, fabs(axisVelocity) / 800.0));
             [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.75 initialSpringVelocity:springVelocity options:0 animations:^{
