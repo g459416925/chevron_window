@@ -762,16 +762,14 @@ void CV3ToggleExposeMode(void) {
     UILongPressGestureRecognizer *move = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleMoveLongPress:)];
     move.minimumPressDuration = 0.22;
     move.delegate = self;
-    UISwipeGestureRecognizer *swipeUp = [[UISwipeGestureRecognizer alloc] initWithTarget:self action:@selector(handleHomeBarSwipeUp:)];
-    swipeUp.direction = UISwipeGestureRecognizerDirectionUp;
-    UISwipeGestureRecognizer *swipeDown = [[UISwipeGestureRecognizer alloc] initWithTarget:self action:@selector(handleHomeBarSwipeDown:)];
-    swipeDown.direction = UISwipeGestureRecognizerDirectionDown;
+    UIPanGestureRecognizer *resizePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleHomeBarResizePan:)];
+    resizePan.delegate = self;
 
     [tap requireGestureRecognizerToFail:move];
+    [tap requireGestureRecognizerToFail:resizePan];
     [bar addGestureRecognizer:tap];
     [bar addGestureRecognizer:move];
-    [bar addGestureRecognizer:swipeUp];
-    [bar addGestureRecognizer:swipeDown];
+    [bar addGestureRecognizer:resizePan];
 
     self.homeBarView = bar;
     self.homeBarBlurView = blurView;
@@ -868,10 +866,256 @@ void CV3ToggleExposeMode(void) {
     [self handleHideAction];
 }
 
-- (void)handleHomeBarSwipeUp:(UISwipeGestureRecognizer *)gesture {
-    if (gesture.state != UIGestureRecognizerStateEnded || self.isClosing || self.isStashed) return;
-    [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
-    CV3ToggleExposeMode();
+- (void)handleHomeBarResizePan:(UIPanGestureRecognizer *)gesture {
+    static CGFloat lastHapticOvershoot = 0;
+    static BOOL hasTriggeredTopHaptic = NO;
+    static BOOL hasTriggeredBottomHaptic = NO;
+    static BOOL hasTriggeredSideHaptic = NO;
+
+    if (self.isClosing || self.isStashed) return;
+
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        self.isFullscreenMode = NO;
+        self.isCompactMode = NO;
+        self.initialResizeFrame = self.frame;
+        [gesture setTranslation:CGPointZero inView:nil];
+        lastHapticOvershoot = 0;
+        hasTriggeredTopHaptic = NO;
+        hasTriggeredBottomHaptic = NO;
+        hasTriggeredSideHaptic = NO;
+
+        UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+        [gen impactOccurred];
+
+        self.isLiveResizing = YES;
+        self.layer.shadowPath = nil;
+        [self startLiquidMotion];
+        [UIView animateWithDuration:0.2 animations:^{
+            self.layer.shadowOpacity = CV3Style.shadowOpacityUnfocused * 0.5;
+            self.glassBackdrop.effect = nil;
+            self.glassBackdrop.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.2];
+        }];
+
+        if (self.hostView) {
+            self.liveResizeSnapshotView = [self.hostView snapshotViewAfterScreenUpdates:NO];
+            if (self.liveResizeSnapshotView) {
+                self.liveResizeSnapshotView.frame = self.hostContainerProxy.bounds;
+                self.liveResizeSnapshotView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                [self.hostContainerProxy addSubview:self.liveResizeSnapshotView];
+                self.hostView.alpha = 0;
+            }
+        }
+
+        if (self.targetScene) {
+            @try {
+                FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
+                if ([settings respondsToSelector:@selector(setInLiveResize:)]) {
+                    [(UIMutableApplicationSceneSettings *)settings setInLiveResize:YES];
+                    [self.targetScene updateSettings:settings withTransitionContext:nil];
+                }
+            } @catch (NSException *e) {
+                CV3LogToFile(@"[Critical] Failed to set home bar live resize state: %@", e);
+            }
+        }
+    }
+
+    CGPoint translation = [gesture translationInView:nil];
+
+    if (gesture.state == UIGestureRecognizerStateChanged) {
+        CGRect screenBounds = CV3DisplayBoundsForWindow(self);
+        CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
+        CGFloat longSide = MAX(screenBounds.size.width, screenBounds.size.height);
+        CGFloat aspect = longSide / MAX(shortSide, 1.0);
+        CGFloat minAllowedWidth = shortSide * 0.4;
+        CGFloat maxAllowedWidth = shortSide * 0.75;
+
+        CGFloat dominantTranslation = 0.0;
+        if (self.homeBarPlacement == 0 || self.homeBarPlacement == 1) {
+            dominantTranslation = translation.x;
+        } else {
+            dominantTranslation = -translation.y;
+        }
+
+        CGFloat initialLogicalWidth = self.initialResizeFrame.size.width;
+        CGFloat targetWidth = initialLogicalWidth + dominantTranslation * 0.9;
+
+        CGFloat overshoot = 0;
+        if (targetWidth < minAllowedWidth) overshoot = (minAllowedWidth - targetWidth) / (minAllowedWidth * 0.2);
+        else if (targetWidth > maxAllowedWidth) overshoot = (targetWidth - maxAllowedWidth) / (maxAllowedWidth * 0.2);
+
+        if (overshoot > 0.05 && fabs(overshoot - lastHapticOvershoot) > 0.1) {
+            UIImpactFeedbackGenerator *gradientGen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+            [gradientGen impactOccurredWithIntensity:MIN(1.0, overshoot)];
+            lastHapticOvershoot = overshoot;
+        } else if (overshoot <= 0.05) {
+            lastHapticOvershoot = 0;
+        }
+
+        NSArray *windowsSnapshot = [floatingWindows copy];
+        for (CV3FloatingAppWindow *other in windowsSnapshot) {
+            if (other == self || other.isStashed || ![other isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+
+            CGFloat distance = sqrt(pow(self.center.x - other.center.x, 2) + pow(self.center.y - other.center.y, 2));
+            CGFloat minGap = (self.bounds.size.width + other.bounds.size.width) / 2.0 + 20.0;
+            if (distance < minGap) {
+                targetWidth *= (0.8 + 0.2 * (distance / minGap));
+            }
+        }
+
+        CGFloat finalWidth = targetWidth;
+        if (targetWidth < minAllowedWidth) {
+            finalWidth = minAllowedWidth - (minAllowedWidth - targetWidth) * 0.3;
+        } else if (targetWidth > maxAllowedWidth) {
+            finalWidth = maxAllowedWidth + (targetWidth - maxAllowedWidth) * 0.3;
+        }
+
+        CGFloat finalHeight = finalWidth * aspect;
+        CGRect newFrame;
+        newFrame.size = CGSizeMake(finalWidth, finalHeight);
+        newFrame.origin.x = CGRectGetMidX(self.initialResizeFrame) - finalWidth / 2.0;
+        newFrame.origin.y = CGRectGetMidY(self.initialResizeFrame) - finalHeight / 2.0;
+
+        UIEdgeInsets safeArea = [self currentSafeAreaInsets];
+        if (newFrame.origin.y < safeArea.top && !hasTriggeredTopHaptic) {
+            [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
+            hasTriggeredTopHaptic = YES;
+        } else if (newFrame.origin.y >= safeArea.top) {
+            hasTriggeredTopHaptic = NO;
+        }
+
+        if (CGRectGetMaxY(newFrame) > screenBounds.size.height - safeArea.bottom && !hasTriggeredBottomHaptic) {
+            [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
+            hasTriggeredBottomHaptic = YES;
+        } else if (CGRectGetMaxY(newFrame) <= screenBounds.size.height - safeArea.bottom) {
+            hasTriggeredBottomHaptic = NO;
+        }
+
+        BOOL hitSide = (newFrame.origin.x < safeArea.left || CGRectGetMaxX(newFrame) > screenBounds.size.width - safeArea.right);
+        if (hitSide && !hasTriggeredSideHaptic) {
+            [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
+            hasTriggeredSideHaptic = YES;
+        } else if (!hitSide) {
+            hasTriggeredSideHaptic = NO;
+        }
+
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        self.bounds = CGRectMake(0, 0, finalWidth, finalHeight);
+        self.center = CGPointMake(CGRectGetMidX(newFrame), CGRectGetMidY(newFrame));
+        [CATransaction commit];
+        [self syncWindowBoundsToClientAndNotify:NO];
+    }
+
+    if (gesture.state == UIGestureRecognizerStateEnded ||
+        gesture.state == UIGestureRecognizerStateCancelled ||
+        gesture.state == UIGestureRecognizerStateFailed) {
+        [self stopLiquidMotion];
+
+        if (gesture.state != UIGestureRecognizerStateEnded) {
+            self.isLiveResizing = NO;
+            CGFloat minEdge = MIN(self.bounds.size.width, self.bounds.size.height);
+            CGFloat finalRadius = MAX(CV3Style.adaptiveCornerRadiusMin, MIN(CV3Style.adaptiveCornerRadiusMax, minEdge * CV3Style.adaptiveCornerRadiusRatio));
+            self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:finalRadius].CGPath;
+            [self animateFocusShadow:self.isFocused];
+            [UIView animateWithDuration:0.4 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
+                self.glassBackdrop.effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial];
+                self.glassBackdrop.backgroundColor = [UIColor clearColor];
+            } completion:nil];
+        }
+
+        CGRect screenBounds = CV3DisplayBoundsForWindow(self);
+        CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
+        CGFloat longSide = MAX(screenBounds.size.width, screenBounds.size.height);
+        CGFloat aspect = longSide / MAX(shortSide, 1.0);
+        CGPoint initialCenter = CGPointMake(CGRectGetMidX(self.frame), CGRectGetMidY(self.frame));
+        UIEdgeInsets safeArea = [self currentSafeAreaInsets];
+
+        if (self.targetScene) {
+            @try {
+                FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
+                if ([settings respondsToSelector:@selector(setInLiveResize:)]) {
+                    [(UIMutableApplicationSceneSettings *)settings setInLiveResize:NO];
+                    [self.targetScene updateSettings:settings withTransitionContext:nil];
+                }
+                [self setNeedsLayout];
+                [self layoutIfNeeded];
+            } @catch (NSException *e) {}
+        }
+
+        UIView *snapshot = self.liveResizeSnapshotView;
+        self.liveResizeSnapshotView = nil;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [UIView animateWithDuration:0.4 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
+                self.hostView.alpha = 1.0;
+                if (snapshot) snapshot.alpha = 0;
+            } completion:^(BOOL finished) {
+                [snapshot removeFromSuperview];
+            }];
+        });
+
+        if (gesture.state == UIGestureRecognizerStateEnded) {
+            CGFloat finalWidth = self.bounds.size.width;
+            CGPoint velocity = [gesture velocityInView:nil];
+            CGFloat axisVelocity = (self.homeBarPlacement == 0 || self.homeBarPlacement == 1) ? velocity.x : -velocity.y;
+            if (fabs(axisVelocity) > 300.0) {
+                finalWidth += axisVelocity * 0.015;
+            }
+
+            CGFloat minAllowedWidth = shortSide * 0.4;
+            CGFloat maxAllowedWidth = shortSide * 0.75;
+            finalWidth = MAX(minAllowedWidth, MIN(maxAllowedWidth, finalWidth));
+
+            CGFloat previousLogicalWidth = finalWidth;
+            CGRect snapFrame = self.frame;
+            CGFloat snapThreshold = 25.0;
+            if (fabs(snapFrame.origin.y - safeArea.top) < snapThreshold) {
+                snapFrame.origin.y = safeArea.top;
+                [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
+            }
+
+            CGFloat currentRatio = finalWidth / shortSide;
+            if (fabs(currentRatio - 0.5) < 0.03) finalWidth = shortSide * 0.5;
+            else if (fabs(currentRatio - 0.75) < 0.03) finalWidth = shortSide * 0.75;
+
+            CGFloat finalHeight = finalWidth * aspect;
+            snapFrame.size = CGSizeMake(finalWidth, finalHeight);
+
+            if (fabs(finalWidth - previousLogicalWidth) > 0.1) {
+                snapFrame.origin.x = initialCenter.x - finalWidth / 2.0;
+                snapFrame.origin.y = initialCenter.y - finalHeight / 2.0;
+                [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
+            }
+
+            CGFloat breath = CV3Style.safeAreaBreath;
+            if (snapFrame.origin.x < safeArea.left + breath) snapFrame.origin.x = safeArea.left + breath;
+            if (snapFrame.origin.y < safeArea.top + breath) snapFrame.origin.y = safeArea.top + breath;
+            if (CGRectGetMaxX(snapFrame) > screenBounds.size.width - safeArea.right - breath) {
+                snapFrame.origin.x = screenBounds.size.width - safeArea.right - breath - finalWidth;
+            }
+            if (CGRectGetMaxY(snapFrame) > screenBounds.size.height - safeArea.bottom - breath) {
+                snapFrame.origin.y = screenBounds.size.height - safeArea.bottom - breath - finalHeight;
+            }
+
+            CGFloat springVelocity = MIN(4.0, MAX(0.5, fabs(axisVelocity) / 800.0));
+            [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.75 initialSpringVelocity:springVelocity options:0 animations:^{
+                self.bounds = CGRectMake(0, 0, snapFrame.size.width, snapFrame.size.height);
+                self.center = CGPointMake(CGRectGetMidX(snapFrame), CGRectGetMidY(snapFrame));
+            } completion:^(BOOL finished) {
+                self.isLiveResizing = NO;
+                CGFloat minEdge = MIN(self.bounds.size.width, self.bounds.size.height);
+                CGFloat finalRadius = MAX(CV3Style.adaptiveCornerRadiusMin, MIN(CV3Style.adaptiveCornerRadiusMax, minEdge * CV3Style.adaptiveCornerRadiusRatio));
+                self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:finalRadius].CGPath;
+                [UIView animateWithDuration:0.4 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
+                    self.glassBackdrop.effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial];
+                    self.glassBackdrop.backgroundColor = [UIColor clearColor];
+                } completion:nil];
+                [self syncWindowBoundsToClientAndNotify:YES];
+                [self syncWindowShadowForCurrentState];
+            }];
+
+            [self animateFocusShadow:self.isFocused];
+        }
+    }
 }
 
 - (void)activateHostedAppFullscreenAndClose {
@@ -892,12 +1136,6 @@ void CV3ToggleExposeMode(void) {
             [[CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace] openApplicationWithBundleID:bundleID];
         }
     });
-}
-
-- (void)handleHomeBarSwipeDown:(UISwipeGestureRecognizer *)gesture {
-    if (gesture.state != UIGestureRecognizerStateEnded || self.isClosing || self.isStashed) return;
-    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
-    [self activateHostedAppFullscreenAndClose];
 }
 
 - (UIButton *)multitaskingMenuButtonWithTitle:(NSString *)title symbol:(NSString *)symbol action:(SEL)action {
@@ -1184,43 +1422,6 @@ void CV3ToggleExposeMode(void) {
     CV3ToggleExposeMode();
 }
 
-- (CGRect)resizeHandleVisualFrameInWindow {
-    if (self.isClosing || self.isStashed || !self.resizeHandle || !self.resizeHandle.superview) return CGRectZero;
-
-    CGSize visualSize = self.resizeHandleVisualSize;
-    if (visualSize.width <= 0.0 || visualSize.height <= 0.0) {
-        visualSize = CGSizeMake(MIN(26.0, CGRectGetWidth(self.resizeHandle.bounds)),
-                                MIN(26.0, CGRectGetHeight(self.resizeHandle.bounds)));
-    }
-
-    CGRect handleBounds = self.resizeHandle.bounds;
-    CGRect visualRect = CGRectMake(CGRectGetWidth(handleBounds) - visualSize.width,
-                                   CGRectGetHeight(handleBounds) - visualSize.height,
-                                   visualSize.width,
-                                   visualSize.height);
-    CGRect visualFrame = [self.resizeHandle convertRect:visualRect toView:self];
-    return CGRectInset(visualFrame, -8.0, -8.0);
-}
-
-- (CGRect)expandedResizeHandleHitFrameInWindow {
-    if (self.isClosing || self.isStashed) return CGRectZero;
-
-    CGRect visualFrame = [self resizeHandleVisualFrameInWindow];
-    if (CGRectIsEmpty(visualFrame)) return CGRectZero;
-
-    CGFloat expansion = MAX(CV3Style.resizeHandleWindowExpansion, 12.0);
-    CGRect expandedFrame = CGRectInset(visualFrame, -expansion, -expansion);
-    CGRect trailingCornerFrame = CGRectMake(CGRectGetWidth(self.bounds) - expansion,
-                                            CGRectGetHeight(self.bounds) - expansion,
-                                            expansion * 2.0,
-                                            expansion * 2.0);
-    return CGRectUnion(expandedFrame, trailingCornerFrame);
-}
-
-- (BOOL)isPointInResizeHandleVisualZone:(CGPoint)point {
-    return CGRectContainsPoint([self resizeHandleVisualFrameInWindow], point);
-}
-
 - (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene {
     if (windowScene) {
         self = [super initWithWindowScene:windowScene];
@@ -1341,25 +1542,6 @@ void CV3ToggleExposeMode(void) {
         
         [self.clippingContainer addSubview:self.hostContainerProxy];
         [self ensureLaunchSplashVisible];
-        
-        // 右下角缩放与移动把手 (Home Bar 样式)
-        self.resizeHandle = [[CV3ResizeHandleView alloc] initWithFrame:CGRectMake(0, 0, 44, 22)];
-        self.resizeHandle.layer.cornerRadius = 11.0;
-        self.resizeHandle.layer.masksToBounds = YES;
-        self.resizeHandleLayer = [CAShapeLayer layer];
-        [self.resizeHandle.layer addSublayer:self.resizeHandleLayer];
-        [self.appContentWrapper addSubview:self.resizeHandle];
-        [self updateResizeHandleAppearance];
-        
-        // 1. 缩放手势 (Pan) - 保持不变
-        UIPanGestureRecognizer *resizePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleResizePan:)];
-        resizePan.delegate = self;
-        resizePan.cancelsTouchesInView = YES;
-        resizePan.delaysTouchesBegan = NO;
-        self.windowResizePan = resizePan;
-        [self.resizeHandle addGestureRecognizer:resizePan];
-
-        self.resizeHandle.userInteractionEnabled = YES;
         
         // 侧边隐藏拉手 (Grabber -> Prism Switcher)
         self.stashGrabber = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kCV3StashIconSize, kCV3StashIconSize)];
@@ -2168,20 +2350,6 @@ void CV3ToggleExposeMode(void) {
     self.specularHighlight.frame = self.clippingContainer.bounds;
     self.specularHighlight.cornerRadius = adaptiveRadius;
     [CATransaction commit];
-    [self updateResizeHandleAppearance];
-    
-    CGFloat handleScale = MIN(1.35, MAX(0.78, MIN(logicalW, logicalH) / 390.0));
-    CGFloat visualW = 26.0 * handleScale;
-    CGFloat visualH = 26.0 * handleScale;
-    
-    // 智能限制把手热区占比：不超过当前窗口最小边长的 35%，防止小窗口下误触
-    CGFloat maxAllowedHitSize = MIN(logicalW, logicalH) * 0.35;
-    CGFloat hitSize = MAX(60.0, MIN(maxAllowedHitSize, CV3Style.resizeHandleHitArea * handleScale));
-    
-    self.resizeHandleVisualSize = CGSizeMake(visualW, visualH);
-    self.resizeHandle.frame = CGRectMake(logicalW - hitSize, logicalH - hitSize, hitSize, hitSize);
-    self.resizeHandle.layer.cornerRadius = 0;
-    [self updateResizeHandleAppearance];
 
     // 5. 更新内部 App 场景 (等比铺满算法：基于直立窗口比例动态映射虚拟画布)
     if (self.hostContainerProxy) {
@@ -2204,7 +2372,6 @@ void CV3ToggleExposeMode(void) {
         self.hostContainerProxy.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
         self.hostContainerProxy.transform = CGAffineTransformMakeScale(uniformScale, uniformScale);
     }
-    [self.appContentWrapper bringSubviewToFront:self.resizeHandle];
     if (self.homeBarView && self.homeBarView.superview) {
         [self.homeBarView.superview bringSubviewToFront:self.homeBarView];
     }
@@ -2349,7 +2516,6 @@ void CV3ToggleExposeMode(void) {
                             }
                         }
                         
-                        [self bringSubviewToFront:self.resizeHandle];
                         CV3LogToFile(isReused ? @"[Debug] 成功重用已有的 _UISceneLayerHostContainerView" : @"[Debug] 成功通过 _UISceneLayerHostContainerView 创建渲染视图");
                         
                         [self syncWindowBoundsToClient];
@@ -2634,7 +2800,6 @@ void CV3ToggleExposeMode(void) {
             }
             self.hostView.hidden = NO;
             self.hostView.alpha = 1.0;
-            [self bringSubviewToFront:self.resizeHandle];
         }
 
         self.frame = targetFrame;
@@ -2890,11 +3055,6 @@ void CV3ToggleExposeMode(void) {
         }
     }
     
-    CGRect expandedResizeFrame = [self expandedResizeHandleHitFrameInWindow];
-    if (CGRectContainsPoint(expandedResizeFrame, point)) {
-        return self.resizeHandle;
-    }
-
     CGRect visibleFrame = [self visiblePortraitContentFrame];
     if (!CGRectContainsPoint(visibleFrame, point)) return nil;
 
@@ -2915,56 +3075,27 @@ void CV3ToggleExposeMode(void) {
 }
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
-    if (gesture == self.windowResizePan) {
-        return YES;
-    }
-    if (gesture.view == self.resizeHandle) {
-        return YES;
-    }
     return YES;
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
-    if (gestureRecognizer == self.windowResizePan) {
-        return YES;
-    }
-    if (gestureRecognizer.view == self.resizeHandle) {
-        return YES;
-    }
     return YES;
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     // 强制要求其他手势（即来自宿主 App 内部的手势）在我们自己的控制手势面前失败
     // 这可以防止拖拽或缩放/位移窗口时，底下的 App 还在疯狂滚动
-    if (gestureRecognizer == self.windowResizePan ||
-        gestureRecognizer.view == self.resizeHandle ||
-        gestureRecognizer.view == self.homeBarView) {
+    if (gestureRecognizer.view == self.homeBarView) {
         return YES;
     }
     return NO;
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
-    if (gestureRecognizer == self.windowResizePan ||
-        gestureRecognizer.view == self.resizeHandle) {
-        return NO;
-    }
-    if (otherGestureRecognizer == self.windowResizePan ||
-        otherGestureRecognizer.view == self.resizeHandle) {
-        return YES;
-    }
     return NO;
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
-    if (gestureRecognizer == self.windowResizePan || otherGestureRecognizer == self.windowResizePan) {
-        // 禁止缩放手势与 resizeHandle 上的其它控制手势（如 moveLongPress）同时识别，确保先判定缩放
-        if (gestureRecognizer.view == self.resizeHandle && otherGestureRecognizer.view == self.resizeHandle) {
-            return NO;
-        }
-        return YES;
-    }
     return NO;
 }
 
