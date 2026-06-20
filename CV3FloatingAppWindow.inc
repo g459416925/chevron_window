@@ -192,6 +192,8 @@ void CV3ToggleExposeMode(void) {
     self.targetOrientation = orientation;
 
     if (self.isStashed) {
+        CGPoint preferredCenter = CGRectIsEmpty(self.preStashFrame) ? self.center : CGPointMake(CGRectGetMidX(self.preStashFrame), CGRectGetMidY(self.preStashFrame));
+        self.preStashFrame = [self restorableFrameForOrientation:orientation preferredCenter:preferredCenter];
         self.baseRotationTransform = targetRotation;
         self.lastLayoutOrientation = orientation;
         self.rootTransformContainer.transform = CGAffineTransformIdentity;
@@ -267,6 +269,42 @@ void CV3ToggleExposeMode(void) {
 
 - (void)applyTrustedOrientationNow {
     [self applyInterfaceOrientation:CV3TrustedInterfaceOrientation(self.windowScene) force:NO];
+}
+
+- (CGRect)restorableFrameForOrientation:(UIInterfaceOrientation)orientation preferredCenter:(CGPoint)preferredCenter {
+    CGRect screenBounds = CV3DisplayBoundsForWindow(self);
+    CGFloat portraitW = MIN(screenBounds.size.width, screenBounds.size.height);
+    CGFloat portraitH = MAX(screenBounds.size.width, screenBounds.size.height);
+    CGFloat screenScale = portraitH / MAX(portraitW, 1.0);
+
+    CGSize targetSize;
+    if (UIInterfaceOrientationIsLandscape(orientation)) {
+        UIEdgeInsets safeArea = [self currentSafeAreaInsets];
+        CGFloat breath = CV3Style.safeAreaBreath;
+        CGFloat maxH = portraitW - safeArea.top - safeArea.bottom - breath * 2.0;
+        CGFloat targetH = MAX(1.0, maxH);
+        CGFloat targetW = targetH / MAX(screenScale, 1.0);
+        targetSize = CGSizeMake(targetW, targetH);
+    } else {
+        CGFloat targetW = portraitW * 0.45;
+        targetSize = CGSizeMake(targetW, targetW * screenScale);
+    }
+
+    CGRect targetFrame = CGRectMake(preferredCenter.x - targetSize.width * 0.5,
+                                    preferredCenter.y - targetSize.height * 0.5,
+                                    targetSize.width,
+                                    targetSize.height);
+    UIEdgeInsets safeArea = [self currentSafeAreaInsets];
+    CGFloat breath = CV3Style.safeAreaBreath;
+    CGFloat minX = safeArea.left + breath;
+    CGFloat minY = safeArea.top + breath;
+    CGFloat maxX = screenBounds.size.width - safeArea.right - breath - targetFrame.size.width;
+    CGFloat maxY = screenBounds.size.height - safeArea.bottom - breath - targetFrame.size.height;
+    if (maxX < minX) maxX = minX;
+    if (maxY < minY) maxY = minY;
+    targetFrame.origin.x = MIN(MAX(targetFrame.origin.x, minX), maxX);
+    targetFrame.origin.y = MIN(MAX(targetFrame.origin.y, minY), maxY);
+    return targetFrame;
 }
 
 - (CGRect)visiblePortraitContentFrame {
@@ -2573,18 +2611,11 @@ void CV3ToggleExposeMode(void) {
         [gen impactOccurred];
 
         CGRect iconFrame = self.frame;
-        CGRect targetFrame = self.preStashFrame;
-        UIEdgeInsets safeArea = [self currentSafeAreaInsets];
-        CGRect screenBounds = CV3DisplayBoundsForWindow(self);
-        CGFloat breath = CV3Style.safeAreaBreath;
-        CGFloat minX = safeArea.left + breath;
-        CGFloat minY = safeArea.top + breath;
-        CGFloat maxX = screenBounds.size.width - safeArea.right - breath - targetFrame.size.width;
-        CGFloat maxY = screenBounds.size.height - safeArea.bottom - breath - targetFrame.size.height;
-        if (maxX < minX) maxX = minX;
-        if (maxY < minY) maxY = minY;
-        targetFrame.origin.x = MIN(MAX(targetFrame.origin.x, minX), maxX);
-        targetFrame.origin.y = MIN(MAX(targetFrame.origin.y, minY), maxY);
+        UIView *iconProxy = [self.stashGrabber snapshotViewAfterScreenUpdates:NO];
+        CGPoint preferredCenter = CGRectIsEmpty(self.preStashFrame) ? self.center : CGPointMake(CGRectGetMidX(self.preStashFrame), CGRectGetMidY(self.preStashFrame));
+        CGRect targetFrame = [self restorableFrameForOrientation:self.targetOrientation preferredCenter:preferredCenter];
+        self.preStashFrame = targetFrame;
+        self.stashGrabber.alpha = 0.0;
 
         self.isStashed = NO; // 先解除 Stash 标志，以便下面 updateSettings 时能被识别为前台
         CV3CascadeUpdateSovereigntyAssertions(); // 级联刷新所有窗口前台优先级断言
@@ -2625,6 +2656,12 @@ void CV3ToggleExposeMode(void) {
         if (!restoreSnapshot) {
             restoreSnapshot = [self.appContentWrapper snapshotViewAfterScreenUpdates:NO];
         }
+        if (!restoreSnapshot) {
+            restoreSnapshot = [self.hostContainerProxy snapshotViewAfterScreenUpdates:YES];
+        }
+        if (!restoreSnapshot) {
+            restoreSnapshot = [self.hostContainerProxy snapshotViewAfterScreenUpdates:NO];
+        }
 
         self.appContentWrapper.alpha = 0.0;
         self.resizeHandle.alpha = 0.0;
@@ -2658,18 +2695,30 @@ void CV3ToggleExposeMode(void) {
         restoreContainer.layer.shouldRasterize = YES;
         restoreContainer.layer.rasterizationScale = [UIScreen mainScreen].scale;
 
-        restoreSnapshot.frame = restoreContainer.bounds;
+        UIView *restoreRotatedContent = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.appContentWrapper.bounds.size.width, self.appContentWrapper.bounds.size.height)];
+        restoreRotatedContent.backgroundColor = [UIColor clearColor];
+        restoreRotatedContent.center = CGPointMake(CGRectGetMidX(restoreContainer.bounds), CGRectGetMidY(restoreContainer.bounds));
+        restoreRotatedContent.transform = self.baseRotationTransform;
+
+        restoreSnapshot.frame = restoreRotatedContent.bounds;
         restoreSnapshot.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         restoreSnapshot.layer.cornerRadius = self.clippingContainer.layer.cornerRadius;
         restoreSnapshot.layer.masksToBounds = YES;
-        [restoreContainer addSubview:restoreSnapshot];
+        [restoreRotatedContent addSubview:restoreSnapshot];
+        [restoreContainer addSubview:restoreRotatedContent];
         [self addSubview:restoreContainer];
 
-        UIImageView *iconProxy = [[UIImageView alloc] initWithFrame:CGRectInset(startFrameInWindow, 4, 4)];
-        iconProxy.image = self.appIconMiniView.image;
-        iconProxy.layer.cornerRadius = CV3Style.iconCornerRadius;
-        iconProxy.layer.masksToBounds = YES;
-        iconProxy.contentMode = UIViewContentModeScaleAspectFill;
+        if (!iconProxy) {
+            UIImageView *fallbackIconProxy = [[UIImageView alloc] initWithFrame:CGRectInset(startFrameInWindow, 4, 4)];
+            fallbackIconProxy.image = self.appIconMiniView.image;
+            fallbackIconProxy.layer.cornerRadius = CV3Style.iconCornerRadius;
+            fallbackIconProxy.layer.masksToBounds = YES;
+            fallbackIconProxy.contentMode = UIViewContentModeScaleAspectFill;
+            fallbackIconProxy.transform = self.baseRotationTransform;
+            iconProxy = fallbackIconProxy;
+        } else {
+            iconProxy.frame = startFrameInWindow;
+        }
         [self addSubview:iconProxy];
 
         CGPoint startCenter = CGPointMake(CGRectGetMidX(startFrameInWindow), CGRectGetMidY(startFrameInWindow));
