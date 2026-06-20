@@ -1015,6 +1015,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (void)triggerCollisionImpulse;
 - (void)updateAdaptiveColor;
 - (void)setWindowFocused:(BOOL)focused;
+- (void)promoteFloatingWindowInZOrder;
 - (void)animateFocusShadow:(BOOL)focused;
 - (void)restoreFromStash;
 - (void)setTargetOrientation:(UIInterfaceOrientation)orientation;
