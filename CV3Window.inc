@@ -1,10 +1,64 @@
+static NSInteger CV3GetTimePriorityForCategory(NSString *cat);
+
 @implementation CV3Window
 
 - (void)applyBackgroundTint:(UIColor *)color {
+    if (color) CV3CurrentAdaptiveTint = color;
     [UIView animateWithDuration:0.8 animations:^{
         // 使用极低的不透明度（6%）注入色彩，保持玻璃质感
         self.dimmingView.backgroundColor = [color colorWithAlphaComponent:0.06];
+        [self refreshGlassAccentSurfaces];
     }];
+}
+
+- (void)refreshGlassAccentSurfaces {
+    UIColor *accentColor = CV3CurrentAdaptiveTint ?: [UIColor labelColor];
+
+    if (self.appPanel) {
+        self.appPanel.contentView.backgroundColor = [UIColor clearColor];
+        self.appPanel.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:self.isPanelShowing ? 0.18 : 0.12].CGColor;
+        self.appPanel.layer.borderWidth = 0.5 / [UIScreen mainScreen].scale;
+        if (self.specularHighlight) {
+            self.specularHighlight.colors = @[
+                (id)[[UIColor whiteColor] colorWithAlphaComponent:0.0].CGColor,
+                (id)[accentColor colorWithAlphaComponent:self.isPanelShowing ? 0.035 : 0.02].CGColor,
+                (id)[[UIColor whiteColor] colorWithAlphaComponent:0.0].CGColor
+            ];
+        }
+        if (self.innerGlowLayer) {
+            self.innerGlowLayer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:self.isPanelShowing ? 0.20 : 0.14].CGColor;
+            self.innerGlowLayer.borderWidth = 0.3;
+        }
+    }
+
+    for (UIView *sub in self.categoryBar.subviews) {
+        if (![sub isKindOfClass:[UIButton class]]) continue;
+        UIButton *btn = (UIButton *)sub;
+        NSString *fullTitle = btn.titleLabel.text ?: @"";
+        NSString *catName = fullTitle;
+        if ([fullTitle containsString:@" ("]) {
+            catName = [fullTitle componentsSeparatedByString:@" ("][0];
+        }
+        BOOL isSelected = [catName isEqualToString:self.selectedCategory];
+        BOOL isSuggested = CV3GetTimePriorityForCategory(catName) > 0;
+        [self applyGlassAccentToCategoryButton:btn selected:isSelected suggested:isSuggested];
+    }
+}
+
+- (void)applyGlassAccentToCategoryButton:(UIButton *)button selected:(BOOL)selected suggested:(BOOL)suggested {
+    if (!button) return;
+
+    CGFloat intensity = selected ? 0.78 : (suggested ? 0.52 : 0.34);
+    button.clipsToBounds = YES;
+    button.layer.cornerRadius = CGRectGetHeight(button.bounds) * 0.5;
+    CV3ApplyGlassAccentStyle(button,
+                             button,
+                             CV3EnsureGlassAccentLayer(button),
+                             CV3CurrentAdaptiveTint ?: [UIColor labelColor],
+                             CGRectGetHeight(button.bounds) * 0.5,
+                             intensity,
+                             selected);
+    [button setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
 }
 
 - (void)handleDoubleTap:(UITapGestureRecognizer *)gesture {
@@ -560,12 +614,6 @@
     self.contrastBackdrop.userInteractionEnabled = NO;
     [self.appPanel.contentView addSubview:self.contrastBackdrop];
 
-    // 2. 冰川蓝注入层 (Ice Tint): 抵消毛玻璃自带的脏灰感，提升视觉通透度
-    self.whiteFilter = [[UIView alloc] initWithFrame:self.appPanel.bounds];
-    self.whiteFilter.backgroundColor = [UIColor colorWithRed:0.0 green:0.8 blue:1.0 alpha:0.012];
-    self.whiteFilter.userInteractionEnabled = NO;
-    [self.appPanel.contentView addSubview:self.whiteFilter];
-
     // 3. 极致精致感：0.3pt 白色内发光 (Inner Glow)
     // 这种极细的高亮边框能赋予面板物理实体的“边缘折射”感
     self.innerGlowLayer = [CALayer layer];
@@ -612,6 +660,7 @@
     [self.dispersionContainer.layer addSublayer:self.magentaLayer];
 
     [self.panelContainer addSubview:self.appPanel];
+    [self refreshGlassAccentSurfaces];
 
     // 终极融合系统：初始化全屏投影层
     self.projectionView = [[UIView alloc] initWithFrame:self.bounds];
@@ -1072,8 +1121,8 @@
             }
             
             BOOL isSelected = [btnCatName isEqualToString:self.selectedCategory];
-            btn.backgroundColor = isSelected ? [[UIColor labelColor] colorWithAlphaComponent:0.2] : [[UIColor labelColor] colorWithAlphaComponent:0.06];
-            btn.layer.borderColor = isSelected ? [[UIColor cyanColor] colorWithAlphaComponent:0.5].CGColor : [[UIColor labelColor] colorWithAlphaComponent:0.1].CGColor;
+            BOOL isSuggested = CV3GetTimePriorityForCategory(btnCatName) > 0;
+            [self applyGlassAccentToCategoryButton:btn selected:isSelected suggested:isSuggested];
         }
     }
     
@@ -1182,10 +1231,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         btn.layer.cornerRadius = 14;
         
         BOOL isSelected = [cat isEqualToString:self.selectedCategory];
-        btn.backgroundColor = isSelected ? [[UIColor labelColor] colorWithAlphaComponent:0.2] : [[UIColor labelColor] colorWithAlphaComponent:0.06];
-        btn.layer.borderWidth = isSuggested ? 1.0 : 0.5;
-        btn.layer.borderColor = isSelected ? [[UIColor cyanColor] colorWithAlphaComponent:0.5].CGColor : 
-                                (isSuggested ? [[UIColor labelColor] colorWithAlphaComponent:0.3].CGColor : [[UIColor labelColor] colorWithAlphaComponent:0.1].CGColor);
+        [self applyGlassAccentToCategoryButton:btn selected:isSelected suggested:isSuggested];
         
         [btn addTarget:self action:@selector(handleCategoryTap:) forControlEvents:UIControlEventTouchUpInside];
         [self.categoryBar addSubview:btn];
@@ -1445,7 +1491,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     [CATransaction setDisableActions:YES];
     
     self.contrastBackdrop.frame = self.appPanel.bounds;
-    self.whiteFilter.frame = self.appPanel.bounds;
     self.innerGlowLayer.frame = self.appPanel.bounds;
     self.dispersionContainer.frame = self.appPanel.bounds;
     self.specularHighlight.frame = self.appPanel.bounds;
@@ -1627,7 +1672,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
             self.contrastBackdrop.frame = self.appPanel.bounds;
-            self.whiteFilter.frame = self.appPanel.bounds;
             self.innerGlowLayer.frame = self.appPanel.bounds;
             self.dispersionContainer.frame = self.appPanel.bounds;
             self.specularHighlight.frame = self.appPanel.bounds;
@@ -1914,7 +1958,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         self.magentaLayer.hidden = NO;
         self.innerGlowLayer.hidden = NO;
         self.contrastBackdrop.hidden = NO;
-        self.whiteFilter.hidden = NO;
         self.specularHighlight.hidden = NO;
 
         // 预先应用正确的旋转变换和尺寸
@@ -1969,6 +2012,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         self.specularHighlight.frame = self.appPanel.bounds;
         self.cyanLayer.frame = CGRectInset(self.appPanel.bounds, -0.3, -0.3);
         self.magentaLayer.frame = CGRectInset(self.appPanel.bounds, 0.3, 0.3);
+        [self refreshGlassAccentSurfaces];
         [self.collectionView.collectionViewLayout invalidateLayout];
 
         self.panelContainer.transform = CGAffineTransformScale(startTransform, 0.4, 0.4);
@@ -2018,6 +2062,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         [self updateTrafficLightsFocus:NO];
         [self stopLiquidMotion];
         self.dimmingView.userInteractionEnabled = NO; // 隐藏时关闭拦截
+        [self refreshGlassAccentSurfaces];
         
         // 获取当前的旋转状态
         CGAffineTransform currentRotation = self.panelContainer.transform;
@@ -2046,7 +2091,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             self.magentaLayer.hidden = YES;
             self.innerGlowLayer.hidden = YES;
             self.contrastBackdrop.hidden = YES;
-            self.whiteFilter.hidden = YES;
             self.specularHighlight.hidden = YES;
         }];
     }
@@ -2138,7 +2182,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     
     // 移动特效层 (Effect Layers)
     self.contrastBackdrop.transform = contentParallax;
-    self.whiteFilter.transform = contentParallax;
     self.dispersionContainer.transform = contentParallax;
     self.specularHighlight.affineTransform = contentParallax;
     [CATransaction commit];

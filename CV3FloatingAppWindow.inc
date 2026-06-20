@@ -1117,12 +1117,13 @@ void CV3ToggleExposeMode(void) {
 
     self.homeBarView.layer.shadowOpacity = self.isFocused ? 0.18 : 0.10;
     self.homeBarView.layer.shadowRadius = self.isFocused ? 16.0 : 10.0;
-    self.homeBarBlurView.contentView.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:self.isFocused ? 0.08 : 0.04];
-    self.homeBarGlowLayer.colors = @[
-        (id)[tintColor colorWithAlphaComponent:0.00].CGColor,
-        (id)[tintColor colorWithAlphaComponent:self.isFocused ? 0.32 : 0.18].CGColor,
-        (id)[tintColor colorWithAlphaComponent:0.00].CGColor
-    ];
+    CV3ApplyGlassAccentStyle(self.homeBarBlurView,
+                             self.homeBarBlurView.contentView,
+                             self.homeBarGlowLayer,
+                             tintColor,
+                             CGRectGetHeight(self.homeBarBlurView.bounds) / 2.0,
+                             self.isFocused ? 0.74 : 0.44,
+                             self.isFocused);
 }
 
 - (void)layoutFloatingHomeBarForBounds:(CGRect)bounds {
@@ -2530,26 +2531,14 @@ void CV3ToggleExposeMode(void) {
     if (@available(iOS 13.0, *)) {
         self.stashIconBackdropView.layer.cornerCurve = kCACornerCurveContinuous;
     }
-    self.stashIconBackdropView.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.28].CGColor;
-    self.stashIconBackdropView.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;
-
     UIColor *tintColor = self.adaptiveAppColor ?: [UIColor labelColor];
-    CGFloat hue = 0, saturation = 0, brightness = 0, alpha = 0;
-    if ([tintColor getHue:&hue saturation:&saturation brightness:&brightness alpha:&alpha]) {
-        saturation = MIN(0.62, MAX(0.22, saturation));
-        brightness = MIN(0.96, MAX(0.54, brightness));
-        tintColor = [UIColor colorWithHue:hue saturation:saturation brightness:brightness alpha:1.0];
-    }
-
-    self.stashIconBackdropView.contentView.backgroundColor = [tintColor colorWithAlphaComponent:0.16];
-    self.stashIconHighlightLayer.frame = self.stashIconBackdropView.contentView.bounds;
-    self.stashIconHighlightLayer.cornerRadius = cornerRadius;
-    self.stashIconHighlightLayer.colors = @[
-        (id)[[UIColor whiteColor] colorWithAlphaComponent:0.42].CGColor,
-        (id)[tintColor colorWithAlphaComponent:0.18].CGColor,
-        (id)[[UIColor blackColor] colorWithAlphaComponent:0.10].CGColor
-    ];
-    self.stashIconHighlightLayer.locations = @[@0.0, @0.48, @1.0];
+    CV3ApplyGlassAccentStyle(self.stashIconBackdropView,
+                             self.stashIconBackdropView.contentView,
+                             self.stashIconHighlightLayer,
+                             tintColor,
+                             cornerRadius,
+                             0.88,
+                             YES);
 
     self.appIconMiniView.frame = CGRectInset(bounds, kCV3StashIconInset, kCV3StashIconInset);
     self.appIconMiniView.layer.cornerRadius = 10.0;
