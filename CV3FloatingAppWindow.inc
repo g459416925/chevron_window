@@ -8,6 +8,8 @@ static void CV3CascadeUpdateSovereigntyAssertions(void) {
     }
 }
 static const CGFloat kCV3RotationCascadeStep = 20.0;
+static const CGFloat kCV3StashIconSize = 44.0;
+static const CGFloat kCV3StashIconInset = 4.0;
 
 static CGRect CV3DisplayBoundsForWindow(UIWindow *window) {
     if (window.windowScene) {
@@ -190,6 +192,9 @@ void CV3ToggleExposeMode(void) {
     self.targetOrientation = orientation;
 
     if (self.isStashed) {
+        self.baseRotationTransform = targetRotation;
+        self.lastLayoutOrientation = orientation;
+        self.rootTransformContainer.transform = CGAffineTransformIdentity;
         [self normalizeStashedGrabberLayout];
         return;
     }
@@ -1325,14 +1330,14 @@ void CV3ToggleExposeMode(void) {
         self.resizeHandle.userInteractionEnabled = YES;
         
         // 侧边隐藏拉手 (Grabber -> Prism Switcher)
-        self.stashGrabber = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 44, 44)]; // Wider for icon
+        self.stashGrabber = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kCV3StashIconSize, kCV3StashIconSize)];
         self.stashGrabber.backgroundColor = [UIColor clearColor];
         self.stashGrabber.layer.cornerRadius = 0;
         self.stashGrabber.layer.borderWidth = 0;
         self.stashGrabber.alpha = 0; // 初始隐藏
-        [self.rootTransformContainer addSubview:self.stashGrabber];
+        [self addSubview:self.stashGrabber];
 
-        self.appIconMiniView = [[UIImageView alloc] initWithFrame:CGRectMake(4, 4, 36, 36)];
+        self.appIconMiniView = [[UIImageView alloc] initWithFrame:CGRectMake(kCV3StashIconInset, kCV3StashIconInset, kCV3StashIconSize - kCV3StashIconInset * 2.0, kCV3StashIconSize - kCV3StashIconInset * 2.0)];
         self.appIconMiniView.layer.cornerRadius = 8;
         self.appIconMiniView.clipsToBounds = YES;
         [self.stashGrabber addSubview:self.appIconMiniView];
@@ -1807,9 +1812,19 @@ void CV3ToggleExposeMode(void) {
     CGRect screen = CV3DisplayBoundsForWindow(self);
     BOOL isNearLeft = (self.center.x < screen.size.width / 2.0);
     CGRect initialFrame = self.frame;
-    CGFloat targetX = isNearLeft ? 0 : screen.size.width - 44;
-    CGFloat targetY = initialFrame.origin.y + initialFrame.size.height / 2.0 - 22.0;
-    CGRect targetFrame = CGRectMake(targetX, targetY, 44, 44);
+    UIEdgeInsets safeArea = [self currentSafeAreaInsets];
+    CGFloat breath = CV3Style.safeAreaBreath;
+    CGFloat stashHalf = kCV3StashIconSize * 0.5;
+    CGPoint stashCenter = CGPointMake(CGRectGetMidX(initialFrame), CGRectGetMidY(initialFrame));
+    CGFloat minCenterX = safeArea.left + breath + stashHalf;
+    CGFloat maxCenterX = screen.size.width - safeArea.right - breath - stashHalf;
+    CGFloat minCenterY = safeArea.top + breath + stashHalf;
+    CGFloat maxCenterY = screen.size.height - safeArea.bottom - breath - stashHalf;
+    if (maxCenterX < minCenterX) maxCenterX = minCenterX;
+    if (maxCenterY < minCenterY) maxCenterY = minCenterY;
+    stashCenter.x = MIN(MAX(stashCenter.x, minCenterX), maxCenterX);
+    stashCenter.y = MIN(MAX(stashCenter.y, minCenterY), maxCenterY);
+    CGRect targetFrame = CGRectMake(stashCenter.x - stashHalf, stashCenter.y - stashHalf, kCV3StashIconSize, kCV3StashIconSize);
     CGRect targetFrameInWindow = CGRectOffset(targetFrame, -initialFrame.origin.x, -initialFrame.origin.y);
     CGRect snapshotStartFrame = [self convertRect:self.appContentWrapper.bounds fromView:self.appContentWrapper];
     UIView *minimizeSnapshot = [self.appContentWrapper snapshotViewAfterScreenUpdates:NO];
@@ -1858,8 +1873,10 @@ void CV3ToggleExposeMode(void) {
     CGFloat finalCornerRadius = CV3Style.iconCornerRadius / MAX(MIN(finalScaleX, finalScaleY), 0.01);
 
     self.stashGrabber.alpha = 0.0;
-    self.stashGrabber.frame = targetFrameInWindow;
-    self.appIconMiniView.frame = CGRectInset(self.stashGrabber.bounds, 4, 4);
+    self.stashGrabber.bounds = CGRectMake(0, 0, kCV3StashIconSize, kCV3StashIconSize);
+    self.stashGrabber.center = CGPointMake(CGRectGetMidX(targetFrameInWindow), CGRectGetMidY(targetFrameInWindow));
+    [self applyStashedGrabberOrientation];
+    self.appIconMiniView.frame = CGRectInset(self.stashGrabber.bounds, kCV3StashIconInset, kCV3StashIconInset);
     self.appIconMiniView.transform = CGAffineTransformMakeScale(0.82, 0.82);
     self.appContentWrapper.alpha = 0.0;
     self.resizeHandle.alpha = 0.0;
@@ -1892,8 +1909,10 @@ void CV3ToggleExposeMode(void) {
         }];
         [UIView addKeyframeWithRelativeStartTime:0.62 relativeDuration:0.38 animations:^{
             self.stashGrabber.alpha = 1.0;
-            self.stashGrabber.frame = targetFrameInWindow;
-            self.appIconMiniView.frame = CGRectInset(self.stashGrabber.bounds, 4, 4);
+            self.stashGrabber.bounds = CGRectMake(0, 0, kCV3StashIconSize, kCV3StashIconSize);
+            self.stashGrabber.center = CGPointMake(CGRectGetMidX(targetFrameInWindow), CGRectGetMidY(targetFrameInWindow));
+            [self applyStashedGrabberOrientation];
+            self.appIconMiniView.frame = CGRectInset(self.stashGrabber.bounds, kCV3StashIconInset, kCV3StashIconInset);
             self.appIconMiniView.transform = CGAffineTransformIdentity;
         }];
     } completion:^(BOOL finished) {
@@ -1911,14 +1930,21 @@ void CV3ToggleExposeMode(void) {
     }];
 }
 
+- (void)applyStashedGrabberOrientation {
+    self.stashGrabber.transform = self.baseRotationTransform;
+}
+
 - (void)normalizeStashedGrabberLayout {
     if (!self.isStashed) return;
     self.rootTransformContainer.transform = CGAffineTransformIdentity;
     self.rootTransformContainer.frame = self.bounds;
-    self.stashGrabber.frame = self.bounds;
+    self.stashGrabber.bounds = CGRectMake(0, 0, kCV3StashIconSize, kCV3StashIconSize);
+    self.stashGrabber.center = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
+    [self applyStashedGrabberOrientation];
     self.stashGrabber.alpha = 1.0;
     self.stashGrabber.userInteractionEnabled = YES;
-    self.appIconMiniView.frame = CGRectInset(self.stashGrabber.bounds, 4, 4);
+    self.appIconMiniView.frame = CGRectInset(self.stashGrabber.bounds, kCV3StashIconInset, kCV3StashIconInset);
+    self.appIconMiniView.transform = CGAffineTransformIdentity;
     [self bringSubviewToFront:self.stashGrabber];
     [self syncWindowShadowForCurrentState];
 }
@@ -2524,7 +2550,7 @@ void CV3ToggleExposeMode(void) {
     // 核心修复：由于窗口本身已缩小为图标，堆叠时需要移动整个窗口的位置
     CGFloat stackOffset = 48.0; // 每个图标之间的垂直间距
     CGRect currentFrame = self.frame;
-    currentFrame.origin.y = self.preStashFrame.origin.y + self.preStashFrame.size.height/2.0 - 22 + (stashedCount * stackOffset);
+    currentFrame.origin.y = self.preStashFrame.origin.y + self.preStashFrame.size.height / 2.0 - (kCV3StashIconSize * 0.5) + (stashedCount * stackOffset);
 
     [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0 options:0 animations:^{
         self.frame = currentFrame;
@@ -2759,8 +2785,8 @@ void CV3ToggleExposeMode(void) {
             
             // 重要：更新 preStashFrame，确保从当前图标位置还原
             CGRect psf = self.preStashFrame;
-            psf.origin.x = self.frame.origin.x + 22 - psf.size.width / 2.0;
-            psf.origin.y = self.frame.origin.y + 22 - psf.size.height / 2.0;
+            psf.origin.x = self.frame.origin.x + (kCV3StashIconSize * 0.5) - psf.size.width / 2.0;
+            psf.origin.y = self.frame.origin.y + (kCV3StashIconSize * 0.5) - psf.size.height / 2.0;
             self.preStashFrame = psf;
             
             // 重新判定 stashedSide 以便堆叠逻辑参考 (以中线为界)
