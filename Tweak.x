@@ -965,8 +965,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (void)layoutFloatingHomeBarForBounds:(CGRect)bounds;
 - (NSInteger)preferredHomeBarPlacementForScreenFrame:(CGRect)frame;
 - (void)handleHomeBarTap:(UITapGestureRecognizer *)gesture;
-- (void)handleHomeBarSwipeUp:(UISwipeGestureRecognizer *)gesture;
-- (void)handleHomeBarSwipeDown:(UISwipeGestureRecognizer *)gesture;
+- (void)handleHomeBarResizePan:(UIPanGestureRecognizer *)gesture;
 - (void)activateHostedAppFullscreenAndClose;
 - (void)dismissMultitaskingMenu;
 - (void)ensureLaunchSplashVisible;
