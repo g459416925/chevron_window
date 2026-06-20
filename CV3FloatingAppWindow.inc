@@ -1528,14 +1528,9 @@ void CV3ToggleExposeMode(void) {
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
         @try {
-            if ([[UIApplication sharedApplication] respondsToSelector:@selector(launchApplicationWithIdentifier:suspended:)]) {
-                [[UIApplication sharedApplication] launchApplicationWithIdentifier:bundleID suspended:NO];
-            } else {
-                [[CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace] openApplicationWithBundleID:bundleID];
-            }
+            [[CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace] openApplicationWithBundleID:bundleID];
         } @catch (NSException *e) {
             CV3LogToFile(@"[HomeBar] 打开全屏应用失败 %@: %@", bundleID, e);
-            [[CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace] openApplicationWithBundleID:bundleID];
         }
     });
 }

@@ -112,25 +112,15 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat);
             [defaults synchronize];
         });
 
-        NSString *activeBundleID = [[self currentActiveBundleID] copy];
         CV3BeginWorkspaceTransitionProtection([NSString stringWithFormat:@"LauncherOpen:%@", bid]);
         [self.searchField resignFirstResponder];
         [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
 
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
             @try {
-                BOOL hasForegroundApp = (activeBundleID.length > 0 &&
-                                         ![activeBundleID isEqualToString:@"com.apple.springboard"] &&
-                                         ![activeBundleID isEqualToString:bid]);
-                if (hasForegroundApp &&
-                    [[UIApplication sharedApplication] respondsToSelector:@selector(launchApplicationWithIdentifier:suspended:)]) {
-                    [[UIApplication sharedApplication] launchApplicationWithIdentifier:bid suspended:NO];
-                } else {
-                    [[NSClassFromString(@"LSApplicationWorkspace") defaultWorkspace] openApplicationWithBundleID:bid];
-                }
+                [[CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace] openApplicationWithBundleID:bid];
             } @catch (NSException *e) {
                 CV3LogToFile(@"[Error] Launcher 打开普通应用失败 %@: %@", bid, e);
-                [[NSClassFromString(@"LSApplicationWorkspace") defaultWorkspace] openApplicationWithBundleID:bid];
             }
         });
     }
