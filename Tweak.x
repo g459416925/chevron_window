@@ -252,6 +252,38 @@ struct {
     CGFloat floatingChromeCornerRadius;
     CGFloat resizeHandleHitArea;
     CGFloat resizeHandleWindowExpansion;
+    CGFloat trafficLightInactiveGray;
+    CGFloat trafficLightInactiveAlpha;
+    CGFloat multitaskingMenuFontSize;
+    CGFloat multitaskingMenuIconSize;
+    CGFloat menuTintR;
+    CGFloat menuTintG;
+    CGFloat menuTintB;
+    CGFloat menuTintA;
+    CGFloat menuBtnScale;
+    CGFloat menuStartScale;
+    CGFloat menuAnimDuration;
+    CGFloat menuAnimDamping;
+    CGFloat menuParabolicOffset;
+    CGFloat menuSpecularAlpha;
+    CGFloat transitionParallaxExpand;
+    CGFloat transitionParallaxShrink;
+    CGFloat shadowOpacityFocused;
+    CGFloat shadowOpacityUnfocused;
+    CGFloat shadowRadiusFocused;
+    CGFloat shadowRadiusUnfocused;
+    CGFloat shadowRadiusPeak;
+    CGFloat shadowOpacityPeak;
+    CGFloat shadowOffsetFocusedY;
+    CGFloat shadowOffsetUnfocusedY;
+    CGFloat shadowOffsetPeakY;
+    CGFloat dragLagShadowFactor;
+    CGFloat dragLagShadowMaxOffset;
+    CGFloat adaptiveCornerRadiusMin;
+    CGFloat adaptiveCornerRadiusMax;
+    CGFloat adaptiveCornerRadiusRatio;
+    CGFloat dragLagShadowElevationFactor;
+    CGFloat dragLagShadowElevationMax;
 } static const CV3Style = {
     .iconCornerRadius = 13.0,
     .iconShadowOpacity = 0.3,
@@ -297,7 +329,39 @@ struct {
     .floatingChromeControlSize = 12.0,
     .floatingChromeCornerRadius = 18.0,
     .resizeHandleHitArea = 80.0,
-    .resizeHandleWindowExpansion = 40.0
+    .resizeHandleWindowExpansion = 40.0,
+    .trafficLightInactiveGray = 0.78,
+    .trafficLightInactiveAlpha = 0.35,
+    .multitaskingMenuFontSize = 11.0,
+    .multitaskingMenuIconSize = 13.0,
+    .menuTintR = 0.0,
+    .menuTintG = 0.8,
+    .menuTintB = 1.0,
+    .menuTintA = 0.02,
+    .menuBtnScale = 0.94,
+    .menuStartScale = 0.15,
+    .menuAnimDuration = 0.38,
+    .menuAnimDamping = 0.72,
+    .menuParabolicOffset = 60.0,
+    .menuSpecularAlpha = 0.25,
+    .transitionParallaxExpand = 0.93,
+    .transitionParallaxShrink = 1.05,
+    .shadowOpacityFocused = 0.18,
+    .shadowOpacityUnfocused = 0.12,
+    .shadowRadiusFocused = 26.0,
+    .shadowRadiusUnfocused = 18.0,
+    .shadowRadiusPeak = 40.0,
+    .shadowOpacityPeak = 0.24,
+    .shadowOffsetFocusedY = 12.0,
+    .shadowOffsetUnfocusedY = 6.0,
+    .shadowOffsetPeakY = 22.0,
+    .dragLagShadowFactor = 0.04,
+    .dragLagShadowMaxOffset = 30.0,
+    .adaptiveCornerRadiusMin = 12.0,
+    .adaptiveCornerRadiusMax = 28.0,
+    .adaptiveCornerRadiusRatio = 0.06,
+    .dragLagShadowElevationFactor = 0.005,
+    .dragLagShadowElevationMax = 15.0
 };
 
 #pragma mark - Custom Cell
@@ -857,11 +921,31 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 @property (nonatomic, strong) UIView *liveResizeSnapshotView;
 @property (nonatomic, strong) RBSAssertion *rbsAssertion; 
 @property (nonatomic, assign) BOOL allowProcessTerminationOnClose;
+@property (nonatomic, assign) CGRect preExposeFrame;
+@property (nonatomic, assign) CGAffineTransform preExposeTransform;
+@property (nonatomic, strong) UIView *exposeOverlayView;
+@property (nonatomic, strong) NSTimer *assertionWatchdogTimer;
+@property (nonatomic, assign) BOOL isLiveResizing;
+@property (nonatomic, strong) CAGradientLayer *specularHighlight;
+@property (nonatomic, strong) CADisplayLink *liquidDisplayLink;
+@property (nonatomic, assign) BOOL hasCapturedBaseline;
+@property (nonatomic, assign) CGFloat baseRoll;
+@property (nonatomic, assign) CGFloat basePitch;
+@property (nonatomic, assign) NSTimeInterval collisionReleaseTime;
+@property (nonatomic, assign) CGFloat collisionReleaseValue;
+@property (nonatomic, assign) NSInteger collisionReleaseAxis;
 
++ (CMMotionManager *)sharedMotionManager;
+- (void)startLiquidMotion;
+- (void)stopLiquidMotion;
 - (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene;
+- (void)updateSovereigntyAssertion;
+- (void)menuBtnTouchDown:(UIButton *)sender;
+- (void)menuBtnTouchUp:(UIButton *)sender;
 - (void)triggerCollisionImpulse;
 - (void)updateAdaptiveColor;
 - (void)setWindowFocused:(BOOL)focused;
+- (void)animateFocusShadow:(BOOL)focused;
 - (void)restoreFromStash;
 - (void)setTargetOrientation:(UIInterfaceOrientation)orientation;
 - (void)applyCurrentTransformWithScale:(CGFloat)scale;
@@ -887,6 +971,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (void)handleCloseMenuAction:(id)sender;
 - (UIButton *)multitaskingMenuButtonWithTitle:(NSString *)title symbol:(NSString *)symbol action:(SEL)action;
 - (void)ensureLaunchSplashVisible;
+- (void)loadAppScene;
 - (void)dismissLaunchSplashAnimated;
 - (void)enforcePortraitWindowGeometry;
 - (void)applyInterfaceOrientation:(UIInterfaceOrientation)orientation force:(BOOL)force;
@@ -1701,7 +1786,18 @@ static NSTimeInterval lastLogTime = 0;
         FBScene *scene = (FBScene *)arg1;
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if ([scene.identifier containsString:win.bundleID] && !win.isClosing) {
-                CV3LogToFile(@"[Lifecycle] 系统尝试销毁托管场景 (%@)，已放行并准备自动恢复流程", win.bundleID);
+                CV3LogToFile(@"[Lifecycle] 系统尝试销毁托管场景 (%@)，清理渲染并准备恢复", win.bundleID);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (win.hostView) {
+                        [win.hostView removeFromSuperview];
+                        win.hostView = nil;
+                    }
+                    win.targetScene = nil;
+                    if (!win.isStashed) {
+                        [win ensureLaunchSplashVisible];
+                        [win loadAppScene];
+                    }
+                });
                 break;
             }
         }

@@ -89,6 +89,52 @@ static CV3SharedGeometry *CV3SharedGeometryForBundleID(NSString *bundleID) {
     }
 }
 
+static inline void CV3RetainSharedGeometry(NSString *bundleID) {
+    if (bundleID.length == 0) return;
+    NSMutableDictionary *registry = CV3SharedGeometryRegistry();
+    NSMutableDictionary *entry = registry[bundleID];
+    if (entry) {
+        NSInteger ref = [entry[@"refCount"] integerValue];
+        entry[@"refCount"] = @(ref + 1);
+    } else {
+        CV3SharedGeometryForBundleID(bundleID);
+        entry = registry[bundleID];
+        if (entry) {
+            entry[@"refCount"] = @(1);
+        }
+    }
+}
+
+static inline void CV3ReleaseSharedGeometry(NSString *bundleID) {
+    if (bundleID.length == 0) return;
+    NSMutableDictionary *registry = CV3SharedGeometryRegistry();
+    NSMutableDictionary *entry = registry[bundleID];
+    if (entry) {
+        NSInteger ref = [entry[@"refCount"] integerValue] - 1;
+        if (ref <= 0) {
+            CV3SharedGeometry *geometry = [entry[@"pointer"] pointerValue];
+            int fd = [entry[@"fd"] intValue];
+            if (geometry) {
+                munmap(geometry, sizeof(CV3SharedGeometry));
+            }
+            if (fd >= 0) {
+                close(fd);
+            }
+            [registry removeObjectForKey:bundleID];
+            NSLog(@"[ChevronV3] [SHM] Released geometry for %@", bundleID);
+        } else {
+            entry[@"refCount"] = @(ref);
+        }
+    }
+}
+
+static inline void CV3WriteSharedGeometry(CV3SharedGeometry *geometry, float w, float h, int isHosted) {
+    if (!geometry) return;
+    geometry->width = w;
+    geometry->height = h;
+    geometry->isHosted = (uint32_t)isHosted;
+}
+
 static dispatch_queue_t CV3LogQueue(void) {
     static dispatch_queue_t queue;
     static dispatch_once_t onceToken;
