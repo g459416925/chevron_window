@@ -3,17 +3,14 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat);
 @implementation CV3Window
 
 - (void)applyBackgroundTint:(UIColor *)color {
-    if (color) CV3CurrentAdaptiveTint = color;
+    (void)color;
     [UIView animateWithDuration:0.8 animations:^{
-        // 使用极低的不透明度（6%）注入色彩，保持玻璃质感
-        self.dimmingView.backgroundColor = [color colorWithAlphaComponent:0.06];
+        self.dimmingView.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.15];
         [self refreshGlassAccentSurfaces];
     }];
 }
 
 - (void)refreshGlassAccentSurfaces {
-    UIColor *accentColor = CV3CurrentAdaptiveTint ?: [UIColor labelColor];
-
     if (self.appPanel) {
         self.appPanel.contentView.backgroundColor = [UIColor clearColor];
         self.appPanel.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:self.isPanelShowing ? 0.18 : 0.12].CGColor;
@@ -21,7 +18,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat);
         if (self.specularHighlight) {
             self.specularHighlight.colors = @[
                 (id)[[UIColor whiteColor] colorWithAlphaComponent:0.0].CGColor,
-                (id)[accentColor colorWithAlphaComponent:self.isPanelShowing ? 0.035 : 0.02].CGColor,
+                (id)[[UIColor whiteColor] colorWithAlphaComponent:self.isPanelShowing ? 0.035 : 0.02].CGColor,
                 (id)[[UIColor whiteColor] colorWithAlphaComponent:0.0].CGColor
             ];
         }
@@ -54,7 +51,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat);
     CV3ApplyGlassAccentStyle(button,
                              button,
                              CV3EnsureGlassAccentLayer(button),
-                             CV3CurrentAdaptiveTint ?: [UIColor labelColor],
+                             nil,
                              CGRectGetHeight(button.bounds) * 0.5,
                              intensity,
                              selected);
