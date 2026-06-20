@@ -1,0 +1,2759 @@
+@implementation CV3Window
+
+- (void)applyBackgroundTint:(UIColor *)color {
+    [UIView animateWithDuration:0.8 animations:^{
+        // 使用极低的不透明度（6%）注入色彩，保持玻璃质感
+        self.dimmingView.backgroundColor = [color colorWithAlphaComponent:0.06];
+    }];
+}
+
+- (void)handleDoubleTap:(UITapGestureRecognizer *)gesture {
+    // 建议 5：搜索极速启动
+    // 如果搜索框有内容且有结果，双击面板直接启动第一个
+    if (self.searchField.text.length > 0 && self.filteredApps.count > 0) {
+        [self launchApp:self.filteredApps[0]];
+        return;
+    }
+    
+    [self.feedback impactOccurred];
+    [self.searchField becomeFirstResponder];
+}
+
+// 统一 App 启动逻辑
+- (void)launchApp:(CV3AppInfo *)info {
+    if (self.launchDebounce) return;
+    self.launchDebounce = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        self.launchDebounce = NO;
+    });
+
+    UIImpactFeedbackGenerator *launcherImpact = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [launcherImpact impactOccurred];
+
+    if (info.bundleId) {
+        NSString *bid = [info.bundleId copy];
+        
+        // 核心修复：检测是否已有该应用的分屏窗口，如果有则直接激活而非全屏开启
+        CV3FloatingAppWindow *existingWindow = nil;
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if ([win.bundleID isEqualToString:bid]) {
+                existingWindow = win;
+                break;
+            }
+        }
+        
+        if (existingWindow) {
+            CV3LogToFile(@"[Info] Launcher 检测到已有分屏窗口: %@", bid);
+            [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
+            [existingWindow restoreFromStash];
+            return;
+        }
+
+        // 记录使用频率（带时间戳）
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+            NSMutableDictionary *usage = [[defaults dictionaryForKey:@"CV3AppUsageData"] mutableCopy] ?: [NSMutableDictionary dictionary];
+            NSMutableArray *timestamps = [usage[bid] mutableCopy] ?: [NSMutableArray array];
+            [timestamps addObject:@([[NSDate date] timeIntervalSince1970])];
+            if (timestamps.count > 20) [timestamps removeObjectAtIndex:0];
+            usage[bid] = timestamps;
+            [defaults setObject:usage forKey:@"CV3AppUsageData"];
+            [defaults synchronize];
+        });
+
+        NSString *activeBundleID = [[self currentActiveBundleID] copy];
+        CV3BeginWorkspaceTransitionProtection([NSString stringWithFormat:@"LauncherOpen:%@", bid]);
+        [self.searchField resignFirstResponder];
+        [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
+
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+            @try {
+                BOOL hasForegroundApp = (activeBundleID.length > 0 &&
+                                         ![activeBundleID isEqualToString:@"com.apple.springboard"] &&
+                                         ![activeBundleID isEqualToString:bid]);
+                if (hasForegroundApp &&
+                    [[UIApplication sharedApplication] respondsToSelector:@selector(launchApplicationWithIdentifier:suspended:)]) {
+                    [[UIApplication sharedApplication] launchApplicationWithIdentifier:bid suspended:NO];
+                } else {
+                    [[NSClassFromString(@"LSApplicationWorkspace") defaultWorkspace] openApplicationWithBundleID:bid];
+                }
+            } @catch (NSException *e) {
+                CV3LogToFile(@"[Error] Launcher 打开普通应用失败 %@: %@", bid, e);
+                [[NSClassFromString(@"LSApplicationWorkspace") defaultWorkspace] openApplicationWithBundleID:bid];
+            }
+        });
+    }
+}
+
+- (void)searchTextChanged:(UITextField *)textField {
+    [self filterApps];
+}
+
+// 建议 2：透视穿孔效果 (Holographic Punch-through)
+- (void)updateRefractionEffect {
+    if (!self.isPanelShowing) return;
+    // 使用 CIFilter 模拟光学穿孔效果
+    self.distortionFilter = [CIFilter filterWithName:@"CIDisplacementDistortion"];
+    [self.distortionFilter setValue:[CIImage imageWithColor:[CIColor colorWithRed:0 green:0 blue:0]] forKey:kCIInputImageKey];
+    // 动态调整畸变参数
+    self.refractionView.layer.filters = @[self.distortionFilter];
+}
+
+// 建议 2：应用“衰老”效果 (Entropy Archive)
+- (void)applyAgingEffectToCell:(CV3AppCell *)cell withInfo:(CV3AppInfo *)info {
+    cell.alpha = 1.0;
+}
+
+- (void)filterApps {
+    self.interactionCount++;
+    
+    NSString *text = [self.searchField.text lowercaseString];
+    
+    BOOL hasSearch = (text && text.length > 0);
+    BOOL isRecentlyUsed = [self.selectedCategory isEqualToString:@"最近使用"];
+    BOOL isPinnedView = [self.selectedCategory isEqualToString:@"置顶"];
+    BOOL hasCategory = (self.selectedCategory && ![self.selectedCategory isEqualToString:@"全部"] && !isRecentlyUsed && !isPinnedView);
+
+    NSMutableArray *res = [NSMutableArray array];
+    
+    if (isRecentlyUsed) {
+        for (CV3AppInfo *info in self.recentlyUsedApps) {
+            if (!hasSearch || ([info.name rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                               [info.bundleId rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                               (info.pinyinInitial && [info.pinyinInitial rangeOfString:text].location != NSNotFound))) {
+                [res addObject:info];
+            }
+        }
+    } else if (isPinnedView) {
+        for (CV3AppInfo *info in self.apps) {
+            if (info.isPinned) {
+                if (!hasSearch || ([info.name rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                                   [info.bundleId rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                                   (info.pinyinInitial && [info.pinyinInitial rangeOfString:text].location != NSNotFound))) {
+                    [res addObject:info];
+                }
+            }
+        }
+    } else {
+        for (CV3AppInfo *info in self.apps) {
+            BOOL matchSearch = YES;
+            if (hasSearch) {
+                matchSearch = ([info.name rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                               [info.bundleId rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                               (info.pinyinInitial && [info.pinyinInitial rangeOfString:text].location != NSNotFound));
+            }
+            
+            BOOL matchCategory = YES;
+            if (hasCategory) {
+                matchCategory = [info.category isEqualToString:self.selectedCategory];
+            }
+            
+            if (matchSearch && matchCategory) {
+                // 应用衰老效果
+                [self applyAgingEffectToCell:nil withInfo:info];
+                [res addObject:info];
+            }
+        }
+    }
+
+    self.filteredApps = res;
+    
+    [self.collectionView reloadData];
+    
+    // 调用引力布局
+    [self updateMagneticLayout];
+
+    // 建议 4 & 5：涟漪动效与首项吸附
+    NSInteger filterGeneration = self.interactionCount;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.01 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (filterGeneration != self.interactionCount) return;
+        [self animateIconsStaggered];
+        if (hasSearch && self.filteredApps.count > 0) {
+            [self.feedback impactOccurredWithIntensity:0.75];
+        }
+    });
+
+    // 优化：仅在必要时刷新 inputAccessoryView
+    if (!hasSearch) {
+        if (!self.searchField.inputAccessoryView && self.apps.count > 0) {
+            NSArray *topApps = [self.apps subarrayWithRange:NSMakeRange(0, MIN(5, self.apps.count))];
+            __weak typeof(self) weakSelf = self;
+            self.searchField.inputAccessoryView = [[CV3QuickAccessView alloc] initWithApps:topApps selectionHandler:^(CV3AppInfo *appInfo) {
+                [weakSelf launchApp:appInfo];
+            }];
+            [self.searchField reloadInputViews];
+        }
+    } else {
+        if (self.searchField.inputAccessoryView) {
+            self.searchField.inputAccessoryView = nil;
+            [self.searchField reloadInputViews];
+        }
+    }
+    self.noResultsLabel.hidden = (self.filteredApps.count > 0);
+}
+
+- (BOOL)textFieldShouldReturn:(UITextField *)textField {
+    if (textField == self.searchField) {
+        if (self.filteredApps.count > 0) {
+            [self launchApp:self.filteredApps[0]];
+        } else {
+            [textField resignFirstResponder];
+        }
+        return NO;
+    }
+    return YES;
+}
+
+- (void)textFieldDidBeginEditing:(UITextField *)textField {
+    if (textField == self.searchField) {
+        UIView *container = textField.superview;
+        
+        // 建议2：搜索框液态响应 (Liquid Search Focus)
+        // 面板圆角呼吸动画：28pt -> 32pt -> 28pt
+        CABasicAnimation *cornerAnim = [CABasicAnimation animationWithKeyPath:@"cornerRadius"];
+        cornerAnim.fromValue = @(CV3Style.cornerRadius);
+        cornerAnim.toValue = @(32.0);
+        cornerAnim.duration = 0.6;
+        cornerAnim.autoreverses = YES;
+        cornerAnim.repeatCount = HUGE_VALF;
+        cornerAnim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [self.appPanel.layer addAnimation:cornerAnim forKey:@"liquidCorner"];
+        [self.innerGlowLayer addAnimation:cornerAnim forKey:@"liquidCorner"];
+        [self.dispersionContainer.layer addAnimation:cornerAnim forKey:@"liquidCorner"];
+
+        // 1. 基础缩放与阴影动画
+        [UIView animateWithDuration:0.5 delay:0 options:UIViewAnimationOptionAutoreverse | UIViewAnimationOptionRepeat | UIViewAnimationOptionAllowUserInteraction animations:^{
+            container.transform = CGAffineTransformMakeScale(1.02, 1.02);
+            self.searchBackground.shadowColor = [UIColor labelColor].CGColor;
+            self.searchBackground.shadowOffset = CGSizeZero;
+            self.searchBackground.shadowOpacity = 0.4;
+            self.searchBackground.shadowRadius = 8.0;
+        } completion:nil];
+
+        // 2. 液态形变路径动画 (Deformation)
+        CGRect b = self.searchBackground.bounds;
+        UIBezierPath *liquidPath = [UIBezierPath bezierPath];
+        CGFloat offset = 4.0;
+        [liquidPath moveToPoint:CGPointMake(10, 0)];
+        [liquidPath addQuadCurveToPoint:CGPointMake(b.size.width-10, 0) controlPoint:CGPointMake(b.size.width/2, -offset)];
+        [liquidPath addQuadCurveToPoint:CGPointMake(b.size.width, 10) controlPoint:CGPointMake(b.size.width+offset, 0)];
+        [liquidPath addQuadCurveToPoint:CGPointMake(b.size.width, b.size.height-10) controlPoint:CGPointMake(b.size.width-offset, b.size.height/2)];
+        [liquidPath addQuadCurveToPoint:CGPointMake(b.size.width-10, b.size.height) controlPoint:CGPointMake(b.size.width, b.size.height+offset)];
+        [liquidPath addQuadCurveToPoint:CGPointMake(10, b.size.height) controlPoint:CGPointMake(b.size.width/2, b.size.height-offset)];
+        [liquidPath addQuadCurveToPoint:CGPointMake(0, b.size.height-10) controlPoint:CGPointMake(-offset, b.size.height)];
+        [liquidPath addQuadCurveToPoint:CGPointMake(0, 10) controlPoint:CGPointMake(offset, b.size.height/2)];
+        [liquidPath addQuadCurveToPoint:CGPointMake(10, 0) controlPoint:CGPointMake(0, -offset)];
+        [liquidPath closePath];
+
+        CABasicAnimation *pathAnim = [CABasicAnimation animationWithKeyPath:@"path"];
+        pathAnim.toValue = (id)liquidPath.CGPath;
+        pathAnim.duration = 0.4;
+        pathAnim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        pathAnim.fillMode = kCAFillModeForwards;
+        pathAnim.removedOnCompletion = NO;
+        [self.searchBackground addAnimation:pathAnim forKey:@"liquidPath"];
+
+        // 3. 边框颜色流转
+        CABasicAnimation *colorAnim = [CABasicAnimation animationWithKeyPath:@"strokeColor"];
+        colorAnim.fromValue = (id)self.searchBackground.strokeColor;
+        colorAnim.toValue = (id)[[UIColor cyanColor] colorWithAlphaComponent:0.6].CGColor;
+        colorAnim.duration = 1.5;
+        colorAnim.autoreverses = YES;
+        colorAnim.repeatCount = HUGE_VALF;
+        [self.searchBackground addAnimation:colorAnim forKey:@"colorFlow"];
+    }
+}
+
+- (void)textFieldDidEndEditing:(UITextField *)textField {
+    if (textField == self.searchField) {
+        UIView *container = textField.superview;
+        [container.layer removeAllAnimations];
+        [self.searchBackground removeAllAnimations];
+        [self.appPanel.layer removeAnimationForKey:@"liquidCorner"];
+        [self.innerGlowLayer removeAnimationForKey:@"liquidCorner"];
+        [self.dispersionContainer.layer removeAnimationForKey:@"liquidCorner"];
+
+        [UIView animateWithDuration:0.3 animations:^{
+            container.transform = CGAffineTransformIdentity;
+            self.searchBackground.shadowOpacity = 0;
+            self.searchBackground.shadowRadius = 0;
+            self.searchBackground.path = [UIBezierPath bezierPathWithRoundedRect:self.searchBackground.bounds cornerRadius:10].CGPath;
+            self.searchBackground.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.1].CGColor;
+        }];
+    }
+}
+
+- (void)collectionView:(UICollectionView *)cv didHighlightItemAtIndexPath:(NSIndexPath *)indexPath {
+    UICollectionViewCell *cell = [cv cellForItemAtIndexPath:indexPath];
+    [UIView animateWithDuration:0.2 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+        // 放大 1.1x 并向上漂浮 5pt，模拟 macOS Dock 的悬停/追踪感
+        cell.transform = CGAffineTransformMakeScale(1.1, 1.1);
+        cell.contentView.transform = CGAffineTransformMakeTranslation(0, -5);
+    } completion:nil];
+}
+
+- (void)collectionView:(UICollectionView *)cv didUnhighlightItemAtIndexPath:(NSIndexPath *)indexPath {
+    UICollectionViewCell *cell = [cv cellForItemAtIndexPath:indexPath];
+    [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.5 initialSpringVelocity:0.5 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+        cell.transform = CGAffineTransformIdentity;
+        cell.contentView.transform = CGAffineTransformIdentity;
+    } completion:nil];
+}
+
+- (void)collectionView:(UICollectionView *)cv didSelectItemAtIndexPath:(NSIndexPath *)indexPath {
+    UICollectionViewCell *cell = [cv cellForItemAtIndexPath:indexPath];
+    
+    // 立即提供物理点击感：微缩动画
+    [UIView animateWithDuration:0.15 delay:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
+        cell.transform = CGAffineTransformMakeScale(0.9, 0.9);
+    } completion:^(BOOL finished) {
+        [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.5 initialSpringVelocity:0.5 options:0 animations:^{
+            cell.transform = CGAffineTransformIdentity;
+        } completion:nil];
+    }];
+
+    if (indexPath.item < self.filteredApps.count) {
+        [self launchApp:self.filteredApps[indexPath.item]];
+    }
+}
+
+- (CGSize)calculateMaxPanelSize {
+    UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+    BOOL isLandscape = (orientation == UIInterfaceOrientationLandscapeLeft || orientation == UIInterfaceOrientationLandscapeRight);
+    UIEdgeInsets safe = self.safeAreaInsets;
+    CGFloat w = self.bounds.size.width;
+    CGFloat h = self.bounds.size.height;
+    CGFloat maxW, maxH;
+    
+    if (isLandscape) {
+        maxW = h - (safe.top + safe.bottom + CV3Style.safeAreaBreath * 2);
+        maxH = w - (safe.left + safe.right + CV3Style.safeAreaBreath * 2);
+    } else {
+        maxW = w - (safe.left + safe.right + CV3Style.safeAreaBreath * 2);
+        maxH = h - (safe.top + safe.bottom + CV3Style.safeAreaBreath * 2);
+    }
+    return CGSizeMake(maxW, maxH);
+}
+
+- (NSString *)_role {
+    return @"SBWindowRoleFloatingCanHostLaunchpad"; 
+}
+
+- (BOOL)_canAffectStatusBarAppearance { return NO; }
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    // 允许调整大小手势
+    if (gestureRecognizer.view == self.resizingHandle) {
+        return YES;
+    }
+
+    // 拦截面板移动手势
+    if (gestureRecognizer.view == self.panelContainer && ![gestureRecognizer isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) {
+        CGPoint location = [touch locationInView:self.panelContainer];
+        // 限制：仅标题栏（顶部 45pt）才允许触发移动
+        // 同时确保不在右下角的调整把手区域（虽然 45pt 已经排除了大部分，但为了严谨性保留逻辑）
+        BOOL isHeader = (location.y <= 45.0);
+        BOOL isHandle = CGRectContainsPoint(self.resizingHandle.frame, location);
+
+        if (!isHeader || isHandle) {
+            return NO;
+        }
+    }
+
+    return YES;
+}
+
+- (NSString *)currentActiveBundleID {
+    @try {
+        id workspace = [CV3ClassNamed(@"SBMainWorkspace") sharedInstance];
+        id activeItem = CV3InvokeObject(workspace, @selector(activeDisplayItem));
+        NSString *bundleID = CV3InvokeObject(activeItem, @selector(bundleIdentifier));
+        if (bundleID.length > 0) return bundleID;
+    } @catch (NSException *e) {}
+    return nil;
+}
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
+    if (gesture == self.systemEdgePan) {
+        // 使用与 handleEdgeInteraction 一致的安全绝对坐标系
+        CGPoint location = [gesture locationInView:nil];
+        
+        UIWindow *keyWindow = nil;
+        if (@available(iOS 15.0, *)) {
+            keyWindow = self.windowScene.keyWindow;
+        } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            keyWindow = [UIApplication sharedApplication].keyWindow;
+#pragma clang diagnostic pop
+        }
+        
+        // 动态获取准确的安全区域和边界
+        UIEdgeInsets safeArea = keyWindow ? keyWindow.safeAreaInsets : self.safeAreaInsets;
+        // 如果系统返回的 safeArea 全是 0，提供硬编码的兜底防线
+        if (safeArea.top == 0 && safeArea.bottom == 0) {
+            safeArea = UIEdgeInsetsMake(47, 0, 34, 0); // iPhone 14 Pro Max 典型值兜底
+        }
+
+        CGSize screenSize = [UIScreen mainScreen].bounds.size;
+        
+        // 根据当前的 edges 动态拦截
+        if (self.systemEdgePan.edges == UIRectEdgeLeft || self.systemEdgePan.edges == UIRectEdgeRight) {
+            // 垂直方向边缘（Portrait）: 限制 Y 轴
+            if (location.y < safeArea.top + 10 || location.y > screenSize.height - safeArea.bottom - 10) {
+                return NO;
+            }
+        } else if (self.systemEdgePan.edges == UIRectEdgeTop || self.systemEdgePan.edges == UIRectEdgeBottom) {
+            // 水平方向边缘（Landscape）: 限制 X 轴
+            if (location.x < safeArea.left + 10 || location.x > screenSize.width - safeArea.right - 10) {
+                return NO;
+            }
+        }
+        
+        return YES;
+    }
+    return YES;
+}
+
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    return NO;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    return NO;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    if (gestureRecognizer == self.systemEdgePan || otherGestureRecognizer == self.systemEdgePan) {
+        return YES; // 允许与其他手势并发，避免被系统侧滑手势完全阻断
+    }
+
+    // 禁止拖拽手势与调整大小手势同时发生
+    if (([gestureRecognizer isKindOfClass:[UIPanGestureRecognizer class]] && otherGestureRecognizer.view == self.resizingHandle) ||
+        (gestureRecognizer.view == self.resizingHandle && [otherGestureRecognizer isKindOfClass:[UIPanGestureRecognizer class]])) {
+        return NO;
+    }
+    return YES;
+}
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        if (!cv3IconCache) {
+            cv3IconCache = [[NSCache alloc] init];
+            cv3IconCache.countLimit = 150; // 防御 Jetsam: 限制最大缓存数量
+            cv3IconCache.totalCostLimit = 150 * 1024 * 1024; // 防御 Jetsam: 限制最大成本 (约 150MB)
+        }
+        [self applyAdaptiveLevel];
+        self.backgroundColor = [UIColor clearColor];
+        self.apps = [NSMutableArray array];
+        self.feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
+        self.selectionFeedback = [[UISelectionFeedbackGenerator alloc] init];
+        self.motionManager = [[CMMotionManager alloc] init];
+        self.motionManager.deviceMotionUpdateInterval = 1.0 / 120.0;
+        
+        // 初始化边缘预警层
+        self.triggerPreviewLayer = [CAGradientLayer layer];
+        self.triggerPreviewLayer.type = kCAGradientLayerRadial;
+        self.triggerPreviewLayer.colors = @[(id)[[UIColor cyanColor] colorWithAlphaComponent:0.3].CGColor, (id)[UIColor clearColor].CGColor];
+        self.triggerPreviewLayer.startPoint = CGPointMake(0.5, 0.5);
+        self.triggerPreviewLayer.endPoint = CGPointMake(1, 1);
+        self.triggerPreviewLayer.opacity = 0;
+        [self.layer addSublayer:self.triggerPreviewLayer];
+        
+        CV3RootViewController *rootVC = [[CV3RootViewController alloc] init];
+        rootVC.view.backgroundColor = [UIColor clearColor];
+        self.rootViewController = rootVC;
+        self.baseRotationTransform = CGAffineTransformIdentity;
+        
+        // 加载置顶应用数据
+        NSArray *savedPinned = [[NSUserDefaults standardUserDefaults] objectForKey:@"CV3PinnedApps"];
+        self.pinnedBundleIDs = savedPinned ? [NSMutableSet setWithArray:savedPinned] : [NSMutableSet set];
+
+        [self setupUI];
+        
+        // 注册应用安装/卸载观察者
+        id ws = [CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace];
+        CV3InvokeObject1(ws, @selector(addObserver:), [CV3AppObserver sharedObserver]);
+    }
+    return self;
+}
+
+- (void)setupUI {
+    CGRect bounds = self.bounds;
+
+    self.edgeTriggerView = [[UIView alloc] initWithFrame:CGRectZero];
+    self.edgeTriggerView.backgroundColor = [UIColor clearColor];
+    self.edgeTriggerView.userInteractionEnabled = NO;
+    self.edgeTriggerView.autoresizingMask = UIViewAutoresizingNone;
+    [self.rootViewController.view addSubview:self.edgeTriggerView];
+    
+    // 创建边缘手势
+    self.systemEdgePan = [[UIScreenEdgePanGestureRecognizer alloc] initWithTarget:self action:@selector(handleEdgeInteraction:)];
+    self.systemEdgePan.edges = UIRectEdgeRight;
+    self.systemEdgePan.delegate = self;
+    
+    @try {
+        SBSystemGestureManager *manager = [CV3ClassNamed(@"SBSystemGestureManager") mainDisplayManager];
+        [manager addGestureRecognizer:self.systemEdgePan withType:112];
+    } @catch (NSException *e) {}
+    
+    self.dimmingView = [[UIView alloc] initWithFrame:bounds];
+    self.dimmingView.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.15];
+    self.dimmingView.alpha = 0;
+    self.dimmingView.userInteractionEnabled = NO; // 初始关闭
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDimmingTap:)];
+    [self.dimmingView addGestureRecognizer:tap];
+    [self.rootViewController.view addSubview:self.dimmingView];
+    
+    self.bezierContainer = [[UIView alloc] initWithFrame:bounds];
+    self.bezierContainer.alpha = 0;
+    self.bezierContainer.userInteractionEnabled = NO;
+    self.bezierContainer.autoresizingMask = UIViewAutoresizingNone;
+    [self.rootViewController.view addSubview:self.bezierContainer];
+    
+    self.bezierBlur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
+    self.bezierBlur.frame = bounds;
+    self.bezierBlur.autoresizingMask = UIViewAutoresizingNone;
+    [self.bezierContainer addSubview:self.bezierBlur];
+    self.bezierLayer = [CAShapeLayer layer];
+    self.bezierLayer.fillColor = [UIColor labelColor].CGColor;
+    self.bezierBlur.layer.mask = self.bezierLayer; 
+    
+    self.panelContainer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, CV3Style.panelW, CV3Style.panelH)];
+    self.panelContainer.backgroundColor = [UIColor clearColor];
+    self.panelContainer.hidden = YES;
+    self.panelContainer.layer.shadowColor = [UIColor blackColor].CGColor;
+    self.panelContainer.layer.shadowOffset = CGSizeMake(0, 0); // 居中阴影，四周扩散
+    self.panelContainer.layer.shadowOpacity = 0.7; // 加深不透明度凸显聚焦
+    self.panelContainer.layer.shadowRadius = 60; // 扩大阴影半径
+    self.panelContainer.autoresizingMask = UIViewAutoresizingNone;
+    [self.rootViewController.view addSubview:self.panelContainer];
+    
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePanelDrag:)];
+    pan.delegate = self;
+    [self.panelContainer addGestureRecognizer:pan];
+
+    // 添加双击手势用于快速激活搜索
+    UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDoubleTap:)];
+    doubleTap.numberOfTapsRequired = 2;
+    doubleTap.delegate = self;
+    [self.panelContainer addGestureRecognizer:doubleTap];
+
+    self.appPanel = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];    self.appPanel.frame = self.panelContainer.bounds;
+    self.appPanel.backgroundColor = [[UIColor clearColor] colorWithAlphaComponent:0.0]; // 移除黄色测试色
+    self.appPanel.layer.cornerRadius = CV3Style.cornerRadius;
+    if (@available(iOS 13.0, *)) {
+        self.appPanel.layer.cornerCurve = kCACornerCurveContinuous;
+    }
+    self.appPanel.layer.masksToBounds = YES;
+    self.appPanel.layer.borderWidth = 0.5; // 建议：微增描边宽度以强化边缘抗锯齿
+    self.appPanel.layer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.2].CGColor;
+    
+    // 建议：注入三线性过滤 (Trilinear Filtering) 消除次像素位移锯齿
+    self.appPanel.layer.magnificationFilter = kCAFilterTrilinear;
+    self.appPanel.layer.minificationFilter = kCAFilterTrilinear;
+    
+    // 1. 对比度增强层 (Contrast Booster): 极淡的黑色，用于压住背景杂色，让 App 图标更浮出
+    self.contrastBackdrop = [[UIView alloc] initWithFrame:self.appPanel.bounds];
+    self.contrastBackdrop.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.025];
+    self.contrastBackdrop.userInteractionEnabled = NO;
+    [self.appPanel.contentView addSubview:self.contrastBackdrop];
+
+    // 2. 冰川蓝注入层 (Ice Tint): 抵消毛玻璃自带的脏灰感，提升视觉通透度
+    self.whiteFilter = [[UIView alloc] initWithFrame:self.appPanel.bounds];
+    self.whiteFilter.backgroundColor = [UIColor colorWithRed:0.0 green:0.8 blue:1.0 alpha:0.012];
+    self.whiteFilter.userInteractionEnabled = NO;
+    [self.appPanel.contentView addSubview:self.whiteFilter];
+
+    // 3. 极致精致感：0.3pt 白色内发光 (Inner Glow)
+    // 这种极细的高亮边框能赋予面板物理实体的“边缘折射”感
+    self.innerGlowLayer = [CALayer layer];
+    self.innerGlowLayer.frame = self.appPanel.bounds;
+    self.innerGlowLayer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.45].CGColor;
+    self.innerGlowLayer.borderWidth = 0.3;
+    self.innerGlowLayer.cornerRadius = CV3Style.cornerRadius;
+    if (@available(iOS 13.0, *)) {
+        self.innerGlowLayer.cornerCurve = kCACornerCurveContinuous;
+    }
+    [self.appPanel.layer addSublayer:self.innerGlowLayer];
+
+    self.specularHighlight = [CAGradientLayer layer];
+    self.specularHighlight.frame = self.appPanel.bounds;
+    self.specularHighlight.colors = @[(id)[[UIColor labelColor] colorWithAlphaComponent:0.0].CGColor, (id)[[UIColor labelColor] colorWithAlphaComponent:0.07].CGColor, (id)[[UIColor labelColor] colorWithAlphaComponent:0.0].CGColor];
+    [self.appPanel.layer addSublayer:self.specularHighlight];
+
+    self.dispersionContainer = [[UIView alloc] initWithFrame:self.appPanel.bounds];
+    self.dispersionContainer.layer.cornerRadius = CV3Style.cornerRadius;
+    if (@available(iOS 13.0, *)) {
+        self.dispersionContainer.layer.cornerCurve = kCACornerCurveContinuous;
+    }
+    self.dispersionContainer.layer.masksToBounds = YES;
+    self.dispersionContainer.userInteractionEnabled = NO;
+    [self.appPanel.contentView addSubview:self.dispersionContainer];
+    
+    self.cyanLayer = [CALayer layer]; 
+    self.cyanLayer.frame = CGRectInset(self.dispersionContainer.bounds, -0.3, -0.3);
+    
+    // 创意：光学折射层 (Negative Lens Effect)
+    self.refractionView = [[UIView alloc] initWithFrame:self.appPanel.bounds];
+    self.refractionView.userInteractionEnabled = NO;
+    self.refractionView.layer.compositingFilter = @"overlayBlendMode";
+    [self.appPanel.contentView addSubview:self.refractionView];
+
+    self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.12].CGColor; 
+    self.cyanLayer.borderWidth = 0.3; 
+    [self.dispersionContainer.layer addSublayer:self.cyanLayer];
+    
+    self.magentaLayer = [CALayer layer]; 
+    self.magentaLayer.frame = CGRectInset(self.dispersionContainer.bounds, 0.3, 0.3); 
+    self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:0.12].CGColor; 
+    self.magentaLayer.borderWidth = 0.3; 
+    [self.dispersionContainer.layer addSublayer:self.magentaLayer];
+
+    [self.panelContainer addSubview:self.appPanel];
+
+    // 终极融合系统：初始化全屏投影层
+    self.projectionView = [[UIView alloc] initWithFrame:self.bounds];
+    self.projectionView.userInteractionEnabled = NO;
+    self.projectionView.layer.compositingFilter = @"plusLighterBlendMode";
+    self.projectionView.alpha = 0.3;
+    [self.rootViewController.view insertSubview:self.projectionView atIndex:0];
+
+    // 建议 1-3：主动交互图层初始化
+    self.trailLayer = [CAShapeLayer layer];
+    self.trailLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.4].CGColor;
+    self.trailLayer.lineWidth = 4.0;
+    self.trailLayer.lineCap = kCALineCapRound;
+    [self.rootViewController.view.layer addSublayer:self.trailLayer];
+    
+    self.lightWaveView = [[UIView alloc] initWithFrame:self.bounds];
+    self.lightWaveView.userInteractionEnabled = NO;
+    self.lightWaveView.backgroundColor = [UIColor clearColor];
+    [self.rootViewController.view addSubview:self.lightWaveView];
+
+    // 建议 1：初始化光纤导光图层 (Fiber-Optic Setup)
+    // 这些光晕位于最底层，用于模拟玻璃内部的导光效果
+    NSArray *glowColors = @[[UIColor colorWithRed:1.00 green:0.37 blue:0.33 alpha:1.0], 
+                           [UIColor colorWithRed:1.00 green:0.75 blue:0.18 alpha:1.0], 
+                           [UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:1.0]];
+    for (int i = 0; i < 3; i++) {
+        CAGradientLayer *glow = [CAGradientLayer layer];
+        glow.frame = CGRectMake(0, 0, 150, 150);
+        glow.type = kCAGradientLayerRadial;
+        glow.colors = @[(id)[glowColors[i] colorWithAlphaComponent:0.08].CGColor, (id)[UIColor clearColor].CGColor];
+        glow.startPoint = CGPointMake(0.5, 0.5);
+        glow.endPoint = CGPointMake(1.0, 1.0);
+        glow.hidden = YES; // 初始隐藏，仅在面板显示时激活
+        [self.appPanel.layer insertSublayer:glow atIndex:0];
+        if (i == 0) self.redGlow = glow;
+        else if (i == 1) self.yellowGlow = glow;
+        else self.greenGlow = glow;
+    }
+
+    self.trafficCapsule = [[UIView alloc] initWithFrame:CGRectMake(16, 14, CV3Style.trafficCapsuleW, CV3Style.trafficCapsuleH)];
+    self.trafficCapsule.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.08];
+    self.trafficCapsule.layer.cornerRadius = CV3Style.trafficCapsuleH / 2.0;
+    [self.panelContainer addSubview:self.trafficCapsule];
+    
+    NSMutableArray *dots = [NSMutableArray array];
+    NSArray *tc = @[[UIColor colorWithRed:1.00 green:0.37 blue:0.33 alpha:1.0], [UIColor colorWithRed:1.00 green:0.75 blue:0.18 alpha:1.0], [UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:1.0]];
+    for (int i = 0; i < 3; i++) {
+        UIButton *dotBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+        // 扩展热区：每个按钮占据更大的点击范围 (约 17.3x24)
+        CGFloat btnW = (CV3Style.trafficCapsuleW - 12) / 3.0;
+        dotBtn.frame = CGRectMake(6 + i * btnW, 0, btnW, CV3Style.trafficCapsuleH);
+        
+        // 视觉圆点作为子视图，保持原有 8x8 外观
+        UIView *visualDot = [[UIView alloc] initWithFrame:CGRectMake((btnW - CV3Style.trafficDotSize)/2, (CV3Style.trafficCapsuleH - CV3Style.trafficDotSize)/2, CV3Style.trafficDotSize, CV3Style.trafficDotSize)];
+        visualDot.backgroundColor = tc[i];
+        visualDot.layer.cornerRadius = CV3Style.trafficDotSize / 2.0;
+        visualDot.userInteractionEnabled = NO;
+        [dotBtn addSubview:visualDot];
+        
+        dotBtn.tag = i;
+        [dotBtn addTarget:self action:@selector(handleTrafficLight:) forControlEvents:UIControlEventTouchDown];
+        
+        // 增加按钮点击的微缩视觉反馈
+        [dotBtn addTarget:self action:@selector(btnTouchDown:) forControlEvents:UIControlEventTouchDown];
+        [dotBtn addTarget:self action:@selector(btnTouchUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
+        
+        [self.trafficCapsule addSubview:dotBtn];
+        [dots addObject:visualDot]; // 存储视觉圆点用于颜色更新
+    }
+    self.trafficDots = dots;
+
+#pragma mark - Search Bar Setup
+    UIView *searchContainer = [[UIView alloc] initWithFrame:CGRectMake(15, 50, CV3Style.panelW - 30, 36)];
+    searchContainer.backgroundColor = [UIColor clearColor];
+    [self.appPanel.contentView addSubview:searchContainer];
+
+    // 液态背景层
+    self.searchBackground = [CAShapeLayer layer];
+    self.searchBackground.frame = searchContainer.bounds;
+    self.searchBackground.path = [UIBezierPath bezierPathWithRoundedRect:searchContainer.bounds cornerRadius:10].CGPath;
+    self.searchBackground.fillColor = [[UIColor labelColor] colorWithAlphaComponent:0.06].CGColor;
+    self.searchBackground.strokeColor = [[UIColor labelColor] colorWithAlphaComponent:0.1].CGColor;
+    self.searchBackground.lineWidth = 0.4;
+    [searchContainer.layer addSublayer:self.searchBackground];
+    
+    self.searchField = [[UITextField alloc] initWithFrame:CGRectInset(searchContainer.bounds, 10, 0)];
+    self.searchField.placeholder = @"搜索应用...";
+    self.searchField.textColor = [UIColor labelColor];
+    self.searchField.font = [UIFont systemFontOfSize:14];
+    self.searchField.tintColor = [UIColor labelColor];
+    // 设置占位符颜色
+    self.searchField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"搜索应用..." attributes:@{NSForegroundColorAttributeName: [UIColor secondaryLabelColor]}];
+    [self.searchField addTarget:self action:@selector(searchTextChanged:) forControlEvents:UIControlEventEditingChanged];
+    self.searchField.delegate = self;
+    self.searchField.returnKeyType = UIReturnKeySearch;
+    self.searchField.clearButtonMode = UITextFieldViewModeWhileEditing; // 启用清空按钮
+    [searchContainer addSubview:self.searchField];
+
+#pragma mark - No Results Label Setup
+    self.noResultsLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 150, CV3Style.panelW, 40)];
+    self.noResultsLabel.text = @"未找到相关应用";
+    self.noResultsLabel.textColor = [UIColor secondaryLabelColor];
+    self.noResultsLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    self.noResultsLabel.textAlignment = NSTextAlignmentCenter;
+    self.noResultsLabel.hidden = YES;
+    [self.appPanel.contentView addSubview:self.noResultsLabel];
+
+    self.selectedCategory = @"全部";
+    self.categoryBar = [[UIScrollView alloc] initWithFrame:CGRectMake(15, 96, CV3Style.panelW - 30, 40)];
+    self.categoryBar.showsHorizontalScrollIndicator = NO;
+    self.categoryBar.backgroundColor = [UIColor clearColor];
+    [self.appPanel.contentView addSubview:self.categoryBar];
+
+    self.resizingHandle = [[CV3ResizeHandleView alloc] initWithFrame:CGRectMake(CV3Style.panelW - 40, CV3Style.panelH - 40, 40, 40)];
+    self.resizingHandle.backgroundColor = [UIColor clearColor];
+    [self.panelContainer addSubview:self.resizingHandle];
+    
+    self.resizingHandleLayer = [CAShapeLayer layer];
+    // 视觉优化：将把手弧度中心与面板 28pt 圆角中心对齐 (12, 12)
+    // 半径统一调整为 24pt，与分屏窗口保持一致的 4pt 平行间距
+    CGFloat panelArcRadius = 24.0;
+    CGFloat panelCenterAngle = M_PI_4;
+    CGFloat panelHalfSweep = M_PI / 8.0; 
+    self.resizingHandleLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(12, 12) 
+                                                                  radius:panelArcRadius 
+                                                              startAngle:panelCenterAngle - panelHalfSweep 
+                                                                endAngle:panelCenterAngle + panelHalfSweep 
+                                                               clockwise:YES].CGPath;
+    self.resizingHandleLayer.fillColor = [UIColor clearColor].CGColor;
+    self.resizingHandleLayer.strokeColor = [[UIColor labelColor] colorWithAlphaComponent:0.3].CGColor;
+    self.resizingHandleLayer.lineWidth = 2.0;
+    [self.resizingHandle.layer addSublayer:self.resizingHandleLayer];
+    
+    UIPanGestureRecognizer *resizePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleResize:)];
+    resizePan.delegate = self;
+    [self.resizingHandle addGestureRecognizer:resizePan];
+
+    UICollectionViewFlowLayout *layout = [[UICollectionViewFlowLayout alloc] init];
+    layout.itemSize = CGSizeMake(80, 100);
+    layout.minimumInteritemSpacing = 5.0;
+    layout.minimumLineSpacing = 10.0;
+    // 调整 CollectionView 的 y 起点以避开搜索框和分类栏 (从 96 移至 140)
+    self.collectionView = [[UICollectionView alloc] initWithFrame:CGRectMake(0, 140, CV3Style.panelW, CV3Style.panelH-140) collectionViewLayout:layout];
+    self.collectionView.dataSource = self; self.collectionView.delegate = self;
+    self.collectionView.backgroundColor = [UIColor clearColor];
+    self.collectionView.delaysContentTouches = NO; // 关键：禁用触碰延迟实现即时反馈
+    self.collectionView.showsVerticalScrollIndicator = NO;   // 隐藏纵向滚动条
+    self.collectionView.showsHorizontalScrollIndicator = NO; // 隐藏横向滚动条
+    self.collectionView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag; // 滚动时自动收起键盘
+    [self.collectionView registerClass:[CV3AppCell class] forCellWithReuseIdentifier:@"C"];
+    [self.appPanel.contentView addSubview:self.collectionView];
+
+    // 增加实时波纹追踪手势 (Fish-eye Effect)
+    UILongPressGestureRecognizer *waveTracker = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleWaveGesture:)];
+    waveTracker.minimumPressDuration = 0; // 触碰即开始追踪
+    waveTracker.delegate = self;
+    waveTracker.cancelsTouchesInView = NO; // 不拦截点击事件
+    [self.collectionView addGestureRecognizer:waveTracker];
+
+    // 增加长按置顶手势
+    UILongPressGestureRecognizer *pinLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleAppLongPress:)];
+    pinLongPress.minimumPressDuration = 0.6;
+    pinLongPress.delegate = self;
+    [self.collectionView addGestureRecognizer:pinLongPress];
+}
+
+- (void)triggerCollisionImpulse {
+    // 建议 3：Chromatic Collision Impulse (边缘色散碰撞脉冲)
+    // 模拟物理冲击导致的镜头组瞬时偏移
+    [CATransaction begin];
+    [CATransaction setAnimationDuration:0.12];
+    [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut]];
+    
+    // 青色/品红层向相反方向剧烈抖动后回弹
+    CAKeyframeAnimation *cyanAnim = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation"];
+    cyanAnim.values = @[[NSValue valueWithCGPoint:CGPointMake(-4, -4)], [NSValue valueWithCGPoint:CGPointZero]];
+    [self.cyanLayer addAnimation:cyanAnim forKey:@"collision"];
+    
+    CAKeyframeAnimation *magAnim = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation"];
+    magAnim.values = @[[NSValue valueWithCGPoint:CGPointMake(4, 4)], [NSValue valueWithCGPoint:CGPointZero]];
+    [self.magentaLayer addAnimation:magAnim forKey:@"collision"];
+    
+    // 内发光瞬间增强，模拟碰撞火花
+    CAKeyframeAnimation *glowAnim = [CAKeyframeAnimation animationWithKeyPath:@"borderWidth"];
+    glowAnim.values = @[@2.0, @0.3];
+    [self.innerGlowLayer addAnimation:glowAnim forKey:@"collision"];
+    
+    [CATransaction commit];
+    
+    // 触觉反馈：刚性碰撞
+    UIImpactFeedbackGenerator *rigid = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid];
+    [rigid impactOccurredWithIntensity:1.0];
+}
+
+// 建议 2：Magnetic Search Attraction (磁极引力搜索)
+- (void)updateMagneticLayout {
+    self.isMagneticLayoutActive = (self.searchField.text.length > 0);
+    
+    if (self.isMagneticLayoutActive) {
+        CGPoint center = CGPointMake(self.collectionView.bounds.size.width / 2, self.collectionView.bounds.size.height / 2);
+        
+        [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
+            NSArray *visibleCells = [self.collectionView visibleCells];
+            for (UICollectionViewCell *cell in visibleCells) {
+                NSIndexPath *indexPath = [self.collectionView indexPathForCell:cell];
+                CGFloat weight = 1.0 - (indexPath.item / (CGFloat)self.filteredApps.count);
+                
+                CGFloat tx = (center.x - cell.center.x) * weight * 0.5;
+                CGFloat ty = (center.y - cell.center.y) * weight * 0.5;
+                cell.transform = CGAffineTransformMakeTranslation(tx, ty);
+            }
+        } completion:nil];
+    } else {
+        [UIView animateWithDuration:0.3 animations:^{
+            for (UICollectionViewCell *cell in [self.collectionView visibleCells]) {
+                cell.transform = CGAffineTransformIdentity;
+            }
+        }];
+    }
+}
+
+- (void)handleAppLongPress:(UILongPressGestureRecognizer *)gesture {
+    CGPoint pointInCollection = [gesture locationInView:self.collectionView];
+    CGPoint pointInPanel = [gesture locationInView:self.panelContainer];
+    
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        NSIndexPath *indexPath = [self.collectionView indexPathForItemAtPoint:pointInCollection];
+        if (indexPath && indexPath.item < self.filteredApps.count) {
+            CV3AppCell *cell = (CV3AppCell *)[self.collectionView cellForItemAtIndexPath:indexPath];
+            self.draggedAppInfo = self.filteredApps[indexPath.item];
+            
+            [self.feedback impactOccurredWithIntensity:0.85];
+            
+            // 锁定 CollectionView 滚动，防止拖拽时面板跟着滑动
+            self.collectionView.scrollEnabled = NO;
+            
+            // 创建拖拽的浮动图标
+            if (cell.iconView.image) {
+                self.draggedIconView = [[UIImageView alloc] initWithImage:cell.iconView.image];
+                CGRect iconFrameInPanel = [self.panelContainer convertRect:cell.iconView.bounds fromView:cell.iconView];
+                self.draggedIconView.frame = iconFrameInPanel;
+                self.dragStartCenter = self.draggedIconView.center;
+                
+                // 在 panelContainer 坐标系内拖拽，让图标继承横屏旋转并保持与视觉位置一致。
+                self.dragTouchOffset = CGPointMake(pointInPanel.x - self.dragStartCenter.x, pointInPanel.y - self.dragStartCenter.y);
+                
+                [self.panelContainer addSubview:self.draggedIconView];
+                
+                [UIView animateWithDuration:0.2 animations:^{
+                    self.draggedIconView.transform = CGAffineTransformMakeScale(1.2, 1.2);
+                    self.draggedIconView.alpha = 0.9;
+                }];
+                cell.alpha = 0.3; // 降低原cell透明度
+            }
+        }
+    } else if (gesture.state == UIGestureRecognizerStateChanged) {
+        if (self.draggedIconView) {
+            // 应用偏移量，使图标跟随手指但保持初始抓取点
+            self.draggedIconView.center = CGPointMake(pointInPanel.x - self.dragTouchOffset.x, pointInPanel.y - self.dragTouchOffset.y);
+        }
+    } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        // 恢复 CollectionView 滚动
+        self.collectionView.scrollEnabled = YES;
+        
+        if (self.draggedIconView && self.draggedAppInfo) {
+            // 判断是否拖出面板边界。这里直接使用 panelContainer 坐标，避免横屏 transform 下的换算误差。
+            BOOL isOutside = !CGRectContainsPoint(self.panelContainer.bounds, pointInPanel);
+            
+            if (isOutside && gesture.state == UIGestureRecognizerStateEnded) {
+                [self.feedback impactOccurredWithIntensity:1.0];
+                CV3LogToFile(@"[Info] 拖拽出面板，使用自带 App Hosting 开启: %@", self.draggedAppInfo.bundleId);
+                
+                NSString *bundleID = [self.draggedAppInfo.bundleId copy];
+                CGPoint spawnPoint = [self.draggedIconView.superview convertPoint:self.draggedIconView.center toView:nil];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (!floatingWindows) {
+                        floatingWindows = [NSMutableArray array];
+                    }
+                    
+                    // 核心修复：检测是否已有该应用的分屏窗口
+                    CV3FloatingAppWindow *existingWindow = nil;
+                    for (CV3FloatingAppWindow *win in floatingWindows) {
+                        if ([win.bundleID isEqualToString:bundleID]) {
+                            existingWindow = win;
+                            break;
+                        }
+                    }
+                    
+                    if (existingWindow) {
+                        CV3LogToFile(@"[Info] 检测到已有分屏窗口，执行还原与聚焦: %@", bundleID);
+                        [existingWindow restoreFromStash];
+                    } else {
+                        // 使用实际拖拽图标的屏幕位置创建分屏，横屏下不会退回竖屏坐标。
+                        CV3FloatingAppWindow *floatingWindow = [[CV3FloatingAppWindow alloc] initWithBundleID:bundleID center:spawnPoint windowScene:self.windowScene];
+                        floatingWindow.targetOrientation = CV3TrustedInterfaceOrientation(self.windowScene);
+                        [floatingWindows addObject:floatingWindow];
+                        [floatingWindow makeKeyAndVisible];
+                        floatingWindow.windowLevel = CV3Style.floatingApp;
+                        CV3UpdateFloatingBackdrop(self.windowScene);
+                    }
+                });
+                
+                // 移除浮动视图并隐藏面板
+                [UIView animateWithDuration:0.3 animations:^{
+                    self.draggedIconView.alpha = 0;
+                    self.draggedIconView.transform = CGAffineTransformMakeScale(0.1, 0.1);
+                } completion:^(BOOL finished) {
+                    [self.draggedIconView removeFromSuperview];
+                    self.draggedIconView = nil;
+                    self.draggedAppInfo = nil;
+                    [self loadAppsAsync];
+                }];
+                
+                [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
+                
+            } else {
+                // 如果没有拖出去，保留原有的“置顶/取消置顶”逻辑，并动画弹回
+                if ([self.pinnedBundleIDs containsObject:self.draggedAppInfo.bundleId]) {
+                    [self.pinnedBundleIDs removeObject:self.draggedAppInfo.bundleId];
+                } else {
+                    [self.pinnedBundleIDs addObject:self.draggedAppInfo.bundleId];
+                }
+                
+                [[NSUserDefaults standardUserDefaults] setObject:[self.pinnedBundleIDs allObjects] forKey:@"CV3PinnedApps"];
+                [[NSUserDefaults standardUserDefaults] synchronize];
+                
+                [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
+                    self.draggedIconView.center = self.dragStartCenter;
+                    self.draggedIconView.transform = CGAffineTransformIdentity;
+                } completion:^(BOOL finished) {
+                    [self.draggedIconView removeFromSuperview];
+                    self.draggedIconView = nil;
+                    self.draggedAppInfo = nil;
+                    [self loadAppsAsync];
+                }];
+            }
+        }
+    }
+}
+
+- (void)handleWaveGesture:(UILongPressGestureRecognizer *)gesture {
+    CGPoint location = [gesture locationInView:self.collectionView];
+    
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        self.lastWaveHapticIndexPath = nil;
+        [self.selectionFeedback prepare];
+    }
+
+    if (gesture.state == UIGestureRecognizerStateBegan || gesture.state == UIGestureRecognizerStateChanged) {
+        NSArray *cells = [self.collectionView visibleCells];
+        UICollectionViewCell *closestCell = nil;
+        CGFloat minDistance = CGFLOAT_MAX;
+
+        for (UICollectionViewCell *cell in cells) {
+            CGPoint cellCenter = cell.center;
+            CGFloat dx = location.x - cellCenter.x;
+            CGFloat dy = location.y - cellCenter.y;
+            CGFloat distance = sqrt(dx*dx + dy*dy);
+            
+            if (distance < minDistance) {
+                minDistance = distance;
+                closestCell = cell;
+            }
+
+            CGFloat radius = 150.0;
+            CGFloat maxScale = 1.25;
+            
+            if (distance < radius) {
+                CGFloat ratio = (radius - distance) / radius;
+                CGFloat smoothRatio = 0.5 * (1.0 + cos(M_PI * (1.0 - ratio))); 
+                CGFloat scale = 1.0 + (maxScale - 1.0) * smoothRatio;
+                
+                // 建议 1：Dynamic Lean (3D 鱼眼姿态偏移)
+                // 增加 M34 透视感
+                CATransform3D transform = CATransform3DIdentity;
+                transform.m34 = -1.0 / 500.0;
+                
+                // 根据手指偏移量计算旋转角度（最大 25 度）
+                CGFloat angleX = (dy / radius) * (M_PI / 7.0) * smoothRatio;
+                CGFloat angleY = -(dx / radius) * (M_PI / 7.0) * smoothRatio;
+                
+                transform = CATransform3DRotate(transform, angleX, 1, 0, 0);
+                transform = CATransform3DRotate(transform, angleY, 0, 1, 0);
+                transform = CATransform3DScale(transform, scale, scale, 1.0);
+
+                // 建议 4：Pressure Wavefronts (触控压感波动 - 物理推开效果)
+                // 计算远离手指的推力位移
+                CGFloat pushAmount = 18.0 * smoothRatio;
+                CGFloat pushX = (distance > 0) ? -(dx / distance) * pushAmount : 0;
+                CGFloat pushY = (distance > 0) ? -(dy / distance) * pushAmount : 0;
+
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                cell.layer.transform = transform;
+                // 应用“推开”位移 + 基础浮动偏移
+                cell.contentView.transform = CGAffineTransformMakeTranslation(pushX, pushY - 10 * smoothRatio);
+
+                if ([cell isKindOfClass:[CV3AppCell class]]) {
+                    CV3AppCell *appCell = (CV3AppCell *)cell;
+                    appCell.iconHighlight.opacity = smoothRatio * 0.4;
+                    CGFloat offsetX = dx / radius;
+                    CGFloat offsetY = dy / radius;
+                    appCell.iconHighlight.startPoint = CGPointMake(0.5 - offsetX, 0.5 - offsetY);
+                    appCell.iconHighlight.endPoint = CGPointMake(1.0 - offsetX, 1.0 - offsetY);
+                }
+                [CATransaction commit];
+            } else {
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                cell.layer.transform = CATransform3DIdentity;
+                cell.contentView.transform = CGAffineTransformIdentity;
+                if ([cell isKindOfClass:[CV3AppCell class]]) {
+                    ((CV3AppCell *)cell).iconHighlight.opacity = 0;
+                }
+                [CATransaction commit];
+            }
+        }
+
+        if (closestCell && minDistance < 40.0) {
+            NSIndexPath *indexPath = [self.collectionView indexPathForCell:closestCell];
+            if (indexPath && (!self.lastWaveHapticIndexPath || ![indexPath isEqual:self.lastWaveHapticIndexPath])) {
+                [self.selectionFeedback selectionChanged];
+                self.lastWaveHapticIndexPath = indexPath;
+            }
+        }
+    } else {
+        [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.6 initialSpringVelocity:0.5 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+            for (UICollectionViewCell *cell in [self.collectionView visibleCells]) {
+                cell.layer.transform = CATransform3DIdentity;
+                cell.contentView.transform = CGAffineTransformIdentity;
+                if ([cell isKindOfClass:[CV3AppCell class]]) {
+                    ((CV3AppCell *)cell).iconHighlight.opacity = 0;
+                }
+            }
+        } completion:nil];
+    }
+}
+
+- (void)handleCategoryTap:(UIButton *)sender {
+    [self.selectionFeedback selectionChanged]; // 模拟物理拨轮的刻度感
+    
+    // 从标题中解析出原始分类名，如从 "社交 (12)" 解析出 "社交"
+    NSString *fullTitle = sender.titleLabel.text;
+    NSString *categoryName = fullTitle;
+    if ([fullTitle containsString:@" ("]) {
+        categoryName = [fullTitle componentsSeparatedByString:@" ("][0];
+    }
+    self.selectedCategory = categoryName;
+    
+    // 更新按钮状态
+    for (UIView *sub in self.categoryBar.subviews) {
+        if ([sub isKindOfClass:[UIButton class]]) {
+            UIButton *btn = (UIButton *)sub;
+            NSString *btnFullTitle = btn.titleLabel.text;
+            NSString *btnCatName = btnFullTitle;
+            if ([btnFullTitle containsString:@" ("]) {
+                btnCatName = [btnFullTitle componentsSeparatedByString:@" ("][0];
+            }
+            
+            BOOL isSelected = [btnCatName isEqualToString:self.selectedCategory];
+            btn.backgroundColor = isSelected ? [[UIColor labelColor] colorWithAlphaComponent:0.2] : [[UIColor labelColor] colorWithAlphaComponent:0.06];
+            btn.layer.borderColor = isSelected ? [[UIColor cyanColor] colorWithAlphaComponent:0.5].CGColor : [[UIColor labelColor] colorWithAlphaComponent:0.1].CGColor;
+        }
+    }
+    
+    [self filterApps];
+}
+
+#pragma mark - Helper: Time-based Category Priority
+static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
+    NSDateComponents *components = [[NSCalendar currentCalendar] components:NSCalendarUnitHour fromDate:[NSDate date]];
+    NSInteger hour = [components hour];
+    
+    // 定义关键字与时段的匹配权重
+    // 0: 默认, 100: 高优
+    
+    // 早上 (6-12): 办公、效率、新闻、财务
+    if (hour >= 6 && hour < 12) {
+        if ([cat containsString:@"Efficiency"] || [cat containsString:@"效率"] || 
+            [cat containsString:@"Productivity"] || [cat containsString:@"生产力"] ||
+            [cat containsString:@"News"] || [cat containsString:@"新闻"] ||
+            [cat containsString:@"Finance"] || [cat containsString:@"财务"]) return 100;
+    }
+    // 下午 (12-18): 购物、食物、工具、生活
+    else if (hour >= 12 && hour < 18) {
+        if ([cat containsString:@"Shopping"] || [cat containsString:@"购物"] || 
+            [cat containsString:@"Food"] || [cat containsString:@"美食"] ||
+            [cat containsString:@"Utilities"] || [cat containsString:@"工具"] ||
+            [cat containsString:@"Lifestyle"] || [cat containsString:@"生活"]) return 100;
+    }
+    // 晚上 (18-23): 社交、游戏、娱乐、视频、音乐
+    else if (hour >= 18 && hour < 23) {
+        if ([cat containsString:@"Social"] || [cat containsString:@"社交"] || 
+            [cat containsString:@"Game"] || [cat containsString:@"游戏"] ||
+            [cat containsString:@"Entertainment"] || [cat containsString:@"娱乐"] ||
+            [cat containsString:@"Video"] || [cat containsString:@"视频"] ||
+            [cat containsString:@"Music"] || [cat containsString:@"音乐"]) return 100;
+    }
+    // 深夜 (23-6): 健康、天气、图书
+    else {
+        if ([cat containsString:@"Health"] || [cat containsString:@"健康"] || 
+            [cat containsString:@"Weather"] || [cat containsString:@"天气"] ||
+            [cat containsString:@"Book"] || [cat containsString:@"图书"]) return 100;
+    }
+    
+    return 0;
+}
+
+- (void)updateCategoryBar {
+    for (UIView *sub in self.categoryBar.subviews) [sub removeFromSuperview];
+    
+    // 1. 统计每个分类下的应用数量
+    NSMutableDictionary *counts = [NSMutableDictionary dictionary];
+    for (CV3AppInfo *info in self.apps) {
+        if (info.category) {
+            counts[info.category] = @([counts[info.category] integerValue] + 1);
+        }
+    }
+    
+    // 2. 排序逻辑：时间权重 > 应用数量 > 字母
+    NSMutableArray *sortedCategories = [[counts allKeys] mutableCopy];
+    [sortedCategories sortUsingComparator:^NSComparisonResult(NSString *c1, NSString *c2) {
+        NSInteger p1 = CV3GetTimePriorityForCategory(c1);
+        NSInteger p2 = CV3GetTimePriorityForCategory(c2);
+        
+        if (p1 != p2) return p1 > p2 ? NSOrderedAscending : NSOrderedDescending;
+        
+        NSInteger count1 = [counts[c1] integerValue];
+        NSInteger count2 = [counts[c2] integerValue];
+        if (count1 != count2) return count1 > count2 ? NSOrderedAscending : NSOrderedDescending;
+        
+        return [c1 localizedCaseInsensitiveCompare:c2];
+    }];
+    
+    // 3. 始终确保“全部”排在第一位，“置顶”排在第二位，“最近使用”排在第三位
+    if (self.recentlyUsedApps.count > 0) {
+        [sortedCategories insertObject:@"最近使用" atIndex:0];
+    }
+    if (self.pinnedBundleIDs.count > 0) {
+        [sortedCategories insertObject:@"置顶" atIndex:0];
+    }
+    [sortedCategories insertObject:@"全部" atIndex:0];
+    
+    CGFloat x = 0;
+    for (NSString *cat in sortedCategories) {
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+        
+        // 显示分类名和数量
+        NSString *displayTitle = cat;
+        if ([cat isEqualToString:@"最近使用"]) {
+            displayTitle = [NSString stringWithFormat:@"%@ (%ld)", cat, (long)self.recentlyUsedApps.count];
+        } else if ([cat isEqualToString:@"置顶"]) {
+            displayTitle = [NSString stringWithFormat:@"%@ (%ld)", cat, (long)self.pinnedBundleIDs.count];
+        } else if (![cat isEqualToString:@"全部"]) {
+            displayTitle = [NSString stringWithFormat:@"%@ (%ld)", cat, (long)[counts[cat] integerValue]];
+        }
+        [btn setTitle:displayTitle forState:UIControlStateNormal];
+        
+        btn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+        [btn setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
+        
+        // 如果是当前时段推荐的分类，增加一个微弱的发光边框暗示
+        BOOL isSuggested = CV3GetTimePriorityForCategory(cat) > 0;
+        
+        CGSize size = [displayTitle sizeWithAttributes:@{NSFontAttributeName: btn.titleLabel.font}];
+        CGFloat w = size.width + 24;
+        btn.frame = CGRectMake(x, 5, w, 28);
+        btn.layer.cornerRadius = 14;
+        
+        BOOL isSelected = [cat isEqualToString:self.selectedCategory];
+        btn.backgroundColor = isSelected ? [[UIColor labelColor] colorWithAlphaComponent:0.2] : [[UIColor labelColor] colorWithAlphaComponent:0.06];
+        btn.layer.borderWidth = isSuggested ? 1.0 : 0.5;
+        btn.layer.borderColor = isSelected ? [[UIColor cyanColor] colorWithAlphaComponent:0.5].CGColor : 
+                                (isSuggested ? [[UIColor labelColor] colorWithAlphaComponent:0.3].CGColor : [[UIColor labelColor] colorWithAlphaComponent:0.1].CGColor);
+        
+        [btn addTarget:self action:@selector(handleCategoryTap:) forControlEvents:UIControlEventTouchUpInside];
+        [self.categoryBar addSubview:btn];
+        x += w + 8;
+    }
+    self.categoryBar.contentSize = CGSizeMake(x, 40);
+}
+
+- (void)handlePanelDrag:(UIPanGestureRecognizer *)gesture {
+    CGPoint location = [gesture locationInView:self.panelContainer];
+    
+    // 智能模糊抽离 (Smart Blur Easing) 计算
+    
+    
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        if (location.y > 45.0) { return; }
+        self.hasBeenMoved = YES;
+        [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.5 initialSpringVelocity:1.0 options:0 animations:^{
+            CGAffineTransform currentTransform = self.panelContainer.transform;
+            self.panelContainer.transform = CGAffineTransformScale(currentTransform, 1.05, 1.05);
+        } completion:nil];
+    }
+
+    if (gesture.state == UIGestureRecognizerStateChanged) {
+        CGPoint translation = [gesture translationInView:self.panelContainer.superview];
+        CGPoint newCenter = CGPointMake(self.panelContainer.center.x + translation.x, self.panelContainer.center.y + translation.y);
+        
+        CGRect bounds = self.bounds;
+        CGRect panelBounds = self.panelContainer.bounds;
+        CGFloat halfW = (panelBounds.size.width * 1.05) / 2.0;
+        CGFloat halfH = (panelBounds.size.height * 1.05) / 2.0;
+        
+        newCenter.x = MAX(halfW - panelBounds.size.width * 0.4, MIN(bounds.size.width - halfW + panelBounds.size.width * 0.4, newCenter.x));
+        newCenter.y = MAX(halfH - panelBounds.size.height * 0.4, MIN(bounds.size.height - halfH + panelBounds.size.height * 0.4, newCenter.y));
+        
+        self.panelContainer.center = newCenter;
+        [gesture setTranslation:CGPointZero inView:self.panelContainer.superview];
+    }
+    if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        // 恢复原始缩放，但不重置 transform（保留旋转）
+        CGAffineTransform current = self.panelContainer.transform;
+        
+        // 磁吸靠边 (Magnetic Snapping) 逻辑
+        CGRect screenBounds = self.bounds;
+        UIEdgeInsets safe = self.safeAreaInsets;
+        CGFloat threshold = 60.0; // 磁吸阈值
+        
+        CGPoint currentCenter = self.panelContainer.center;
+        CGPoint targetCenter = currentCenter;
+        
+        CGRect panelBounds = self.panelContainer.bounds;
+        CGSize sizeInRoot = CGRectApplyAffineTransform(panelBounds, self.panelContainer.transform).size;
+        CGFloat rootHalfW = sizeInRoot.width / 2.0;
+        CGFloat rootHalfH = sizeInRoot.height / 2.0;
+
+        // 检查左/右磁吸
+        if (currentCenter.x < (safe.left + rootHalfW + threshold)) {
+            targetCenter.x = safe.left + rootHalfW;
+        } else if (currentCenter.x > (screenBounds.size.width - safe.right - rootHalfW - threshold)) {
+            targetCenter.x = screenBounds.size.width - safe.right - rootHalfW;
+        }
+        
+        // 检查顶/底磁吸
+        if (currentCenter.y < (safe.top + rootHalfH + threshold)) {
+            targetCenter.y = safe.top + rootHalfH;
+        } else if (currentCenter.y > (screenBounds.size.height - safe.bottom - rootHalfH - threshold)) {
+            targetCenter.y = screenBounds.size.height - safe.bottom - rootHalfH;
+        }
+
+        // 提前应用回弹钳位约束，避免在 Block 中捕获为只读变量
+        CGRect b = self.bounds;
+        CGRect pb = self.panelContainer.bounds;
+        CGFloat hW = pb.size.width * 0.4;
+        CGFloat hH = pb.size.height * 0.4;
+        targetCenter.x = MAX(hW, MIN(b.size.width - hW, targetCenter.x));
+        targetCenter.y = MAX(hH, MIN(b.size.height - hH, targetCenter.y));
+
+        // 建议1：触觉反馈深度耦合 (Haptic Coupling)
+        // 如果检测到位置发生了磁吸偏移，触发一次刚性震动和碰撞脉冲 (C3)
+        if (!CGPointEqualToPoint(currentCenter, targetCenter)) {
+            [self triggerCollisionImpulse];
+        }
+
+        [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.6 initialSpringVelocity:1.0 options:0 animations:^{
+            self.panelContainer.transform = CGAffineTransformScale(current, 1/1.05, 1/1.05);
+            self.appPanel.alpha = 1.0; // 恢复全透明度
+            self.panelContainer.center = targetCenter;
+        } completion:nil];
+    }
+}
+
+- (void)handleDimmingTap:(UITapGestureRecognizer *)tap {
+    [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
+}
+
+- (void)handleResize:(UIPanGestureRecognizer *)gesture {
+    // 增加 resize 锁
+    self.isProcessing = YES; 
+
+    // 建议：把手动态激活 (Handle Flare)
+    // 根据手势状态切换把手视觉样式
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        [self.feedback impactOccurredWithIntensity:0.5];
+        [CATransaction begin];
+        [CATransaction setAnimationDuration:0.25];
+        self.resizingHandleLayer.strokeColor = [[UIColor cyanColor] colorWithAlphaComponent:0.8].CGColor;
+        self.resizingHandleLayer.lineWidth = 3.5;
+        [CATransaction commit];
+    } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        [CATransaction begin];
+        [CATransaction setAnimationDuration:0.4];
+        self.resizingHandleLayer.strokeColor = [[UIColor labelColor] colorWithAlphaComponent:0.3].CGColor;
+        self.resizingHandleLayer.lineWidth = 2.0;
+        [CATransaction commit];
+    }
+
+    // 建议 4：Animation Transaction Safety (避免坐标跳变)
+    CGRect currentBounds = self.panelContainer.layer.presentationLayer ? self.panelContainer.layer.presentationLayer.bounds : self.panelContainer.bounds;
+
+    if (gesture) {
+        // 1. 获取屏幕坐标系的平移，确保拖拽感在所有旋转下保持一致
+        CGPoint translation = [gesture translationInView:self];
+        
+        // 2. 将屏幕位移映射回面板局部坐标系
+        CGAffineTransform inv = CGAffineTransformInvert(self.baseRotationTransform);
+        CGPoint localTranslation = CGPointApplyAffineTransform(translation, inv);
+
+        CGFloat rawW = currentBounds.size.width + localTranslation.x;
+        CGFloat rawH = currentBounds.size.height + localTranslation.y;
+        
+#pragma mark - 核心修复：基于投影的全方位边界钳位
+        CGRect screenBounds = self.bounds;
+        UIEdgeInsets safe = self.safeAreaInsets;
+        CGFloat breath = CV3Style.safeAreaBreath;
+        UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+        BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
+        
+        // 定义屏幕内的绝对安全矩形边界
+        CGRect safeFrame = CGRectMake(safe.left + breath, 
+                                      safe.top + breath, 
+                                      screenBounds.size.width - safe.left - safe.right - 2*breath, 
+                                      screenBounds.size.height - safe.top - safe.bottom - 2*breath);
+
+        CGPoint center = self.panelContainer.layer.presentationLayer ? self.panelContainer.layer.presentationLayer.position : self.panelContainer.center;
+        
+        // 计算屏幕安全区域内允许的最大半宽高 (相对于中心点)
+        CGFloat rootAllowedHalfW = MIN(center.x - safeFrame.origin.x, CGRectGetMaxX(safeFrame) - center.x);
+        CGFloat rootAllowedHalfH = MIN(center.y - safeFrame.origin.y, CGRectGetMaxY(safeFrame) - center.y);
+        
+        // 将屏幕限制映射回面板本地坐标
+        // 关键点：横屏下，屏幕宽度限制 (rootAllowedHalfW) 对应面板高度限制 (maxH)
+        CGFloat maxW, maxH;
+        if (isLandscape) {
+            maxW = rootAllowedHalfH * 2.0;
+            maxH = rootAllowedHalfW * 2.0;
+        } else {
+            maxW = rootAllowedHalfW * 2.0;
+            maxH = rootAllowedHalfH * 2.0;
+        }
+
+#pragma mark - 智能自动推移 (Auto-Push)
+        // 如果想要达到的尺寸超过了当前位置允许的最大尺寸，尝试平移中心点以换取空间
+        CGFloat preferredW = MAX(50.0, rawW);
+        CGFloat preferredH = MAX(50.0, rawH);
+        
+        // 计算投影后的首选尺寸
+        CGRect prefLocalBounds = CGRectMake(0, 0, preferredW, preferredH);
+        CGSize prefSizeInRoot = CGRectApplyAffineTransform(prefLocalBounds, self.baseRotationTransform).size;
+        CGFloat prefHalfW = prefSizeInRoot.width / 2.0;
+        CGFloat prefHalfH = prefSizeInRoot.height / 2.0;
+        
+        // 计算为了容纳这个尺寸，中心点理想的摆放位置（钳位在屏幕内）
+        CGPoint idealCenter = center;
+        idealCenter.x = MAX(safeFrame.origin.x + prefHalfW, MIN(CGRectGetMaxX(safeFrame) - prefHalfW, idealCenter.x));
+        idealCenter.y = MAX(safeFrame.origin.y + prefHalfH, MIN(CGRectGetMaxY(safeFrame) - prefHalfH, idealCenter.y));
+        
+        // 应用中心点位移（推移）
+        if (!CGPointEqualToPoint(center, idealCenter)) {
+            self.panelContainer.center = idealCenter;
+            center = idealCenter; // 更新当前参考中心
+            
+            // 重新计算推移后的可用空间
+            rootAllowedHalfW = MIN(center.x - safeFrame.origin.x, CGRectGetMaxX(safeFrame) - center.x);
+            rootAllowedHalfH = MIN(center.y - safeFrame.origin.y, CGRectGetMaxY(safeFrame) - center.y);
+            if (isLandscape) {
+                maxW = rootAllowedHalfH * 2.0;
+                maxH = rootAllowedHalfW * 2.0;
+            } else {
+                maxW = rootAllowedHalfW * 2.0;
+                maxH = rootAllowedHalfH * 2.0;
+            }
+        }
+
+        // 尝试计算新尺寸（带最大值强制钳位）
+        CGFloat targetW = MIN(maxW, preferredW);
+        CGFloat targetH = MIN(maxH, preferredH);
+
+#pragma mark - 最小值与果冻效果逻辑
+        CGFloat minW = 175.0;
+        CGFloat minH = isLandscape ? 270.0 : 380.0;
+        
+        CGFloat finalW = targetW, finalH = targetH;
+        if (rawW < minW) {
+            finalW = minW - ((minW - rawW) * 0.3);
+        }
+        if (rawH < minH) {
+            finalH = minH - ((minH - rawH) * 0.3);
+        }
+
+        // 极限反馈判定（在 Begin/Ended 时已经处理了基础颜色，这里处理 Drag 过程中的 Limit 反馈）
+        BOOL atLimit = (rawW < minW || rawH < minH || rawW > maxW || rawH > maxH);
+        if (atLimit && gesture.state == UIGestureRecognizerStateChanged) {
+            static BOOL lastAtLimit = NO;
+            if (!lastAtLimit) [self.feedback impactOccurredWithIntensity:0.65];
+            lastAtLimit = YES;
+            
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            self.resizingHandleLayer.strokeColor = [[UIColor redColor] colorWithAlphaComponent:0.8].CGColor; // 触底/触顶变红提示
+            [CATransaction commit];
+        } else if (gesture.state == UIGestureRecognizerStateChanged) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            self.resizingHandleLayer.strokeColor = [[UIColor cyanColor] colorWithAlphaComponent:0.8].CGColor;
+            [CATransaction commit];
+        }
+
+        self.panelContainer.bounds = CGRectMake(0, 0, finalW, finalH);
+        [gesture setTranslation:CGPointZero inView:self];
+    }
+
+    self.appPanel.bounds = self.panelContainer.bounds;
+    self.appPanel.center = CGPointMake(CGRectGetMidX(self.panelContainer.bounds), CGRectGetMidY(self.panelContainer.bounds));
+    CGRect updatedBounds = self.panelContainer.bounds;
+    
+#pragma mark - UI 智能自适应逻辑
+    // 如果高度太小（不足以舒适容纳分类栏），则隐藏分类栏并上移 CollectionView
+    BOOL hideCategories = (updatedBounds.size.height < 320.0);
+    self.categoryBar.alpha = hideCategories ? 0 : 1.0;
+    CGFloat collectionViewY = hideCategories ? 96.0 : 140.0;
+
+    // 动态调整搜索框和 CollectionView
+    UIView *searchContainer = self.searchField.superview;
+    searchContainer.frame = CGRectMake(15, 50, updatedBounds.size.width - 30, 36);
+    self.searchField.frame = CGRectInset(searchContainer.bounds, 10, 0);
+    self.searchBackground.frame = searchContainer.bounds;
+    self.searchBackground.path = [UIBezierPath bezierPathWithRoundedRect:searchContainer.bounds cornerRadius:10].CGPath;
+
+    self.categoryBar.frame = CGRectMake(15, 96, updatedBounds.size.width - 30, 40);
+    self.collectionView.frame = CGRectMake(0, collectionViewY, updatedBounds.size.width, updatedBounds.size.height - collectionViewY);
+    self.noResultsLabel.frame = CGRectMake(0, 150, updatedBounds.size.width, 40);
+
+    [self updateResizingHandleFrame];
+
+    // 关键修复：同步更新所有装饰层并禁用隐式动画，消除“追赶感”和“固定宽高”问题
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    
+    self.contrastBackdrop.frame = self.appPanel.bounds;
+    self.whiteFilter.frame = self.appPanel.bounds;
+    self.innerGlowLayer.frame = self.appPanel.bounds;
+    self.dispersionContainer.frame = self.appPanel.bounds;
+    self.specularHighlight.frame = self.appPanel.bounds;
+    self.cyanLayer.frame = CGRectInset(self.dispersionContainer.bounds, -0.3, -0.3);
+    self.magentaLayer.frame = CGRectInset(self.dispersionContainer.bounds, 0.3, 0.3);
+    
+    [CATransaction commit];
+
+    [self.collectionView.collectionViewLayout invalidateLayout];
+
+    if (gesture && (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled)) {
+#pragma mark - 弹簧回弹 (Snapback)
+        UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+        BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
+
+        CGFloat minW = 175.0;
+        CGFloat minH = isLandscape ? 270.0 : 380.0;
+        CGRect currentBounds = self.panelContainer.bounds;
+
+        if (currentBounds.size.width < minW || currentBounds.size.height < minH) {
+            CGRect targetBounds = CGRectMake(0, 0, MAX(minW, currentBounds.size.width), MAX(minH, currentBounds.size.height));
+            [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.6 initialSpringVelocity:0.8 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
+                self.panelContainer.bounds = targetBounds;
+                [self handleResize:nil]; // 触发内部层同步
+            } completion:^(BOOL f){ self.isProcessing = NO; }];
+        } else {
+            self.isProcessing = NO;
+        }
+    }
+ else if (!gesture) {
+        self.isProcessing = NO;
+    }
+}
+
+- (void)btnTouchDown:(UIButton *)sender {
+    [UIView animateWithDuration:0.2 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+        sender.transform = CGAffineTransformMakeScale(0.85, 0.85);
+    } completion:nil];
+}
+
+- (void)btnTouchUp:(UIButton *)sender {
+    [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.5 initialSpringVelocity:0.5 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+        sender.transform = CGAffineTransformIdentity;
+    } completion:nil];
+}
+
+- (CGPoint)calculateTargetCenter {
+    UIEdgeInsets safe = self.safeAreaInsets;
+    CGRect bounds = self.bounds;
+    CGFloat w = bounds.size.width;
+    CGFloat h = bounds.size.height;
+    
+    // 计算安全区域内的有效绘图区
+    CGRect safeBounds = CGRectMake(safe.left + CV3Style.safeAreaBreath, 
+                                   safe.top + CV3Style.safeAreaBreath, 
+                                   w - safe.left - safe.right - 2 * CV3Style.safeAreaBreath, 
+                                   h - safe.top - safe.bottom - 2 * CV3Style.safeAreaBreath);
+                                   
+    return CGPointMake(CGRectGetMidX(safeBounds), CGRectGetMidY(safeBounds));
+}
+
+- (void)handleTrafficLight:(UIButton *)sender {
+    // 立即反馈
+    [self.feedback impactOccurred];
+    [self updateTrafficLightsFocus:NO];
+
+    if (sender.tag == 0 || sender.tag == 1) {
+        // 直接触发，不再通过 dispatch_after 延迟，以匹配点击背景的极速响应
+        [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
+    } else if (sender.tag == 2) {
+        // 最大化/重置逻辑也同步触发
+        [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.8 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+            CGSize maxSize = [self calculateMaxPanelSize];
+            CGFloat targetW = MIN(CV3Style.panelW, maxSize.width);
+            CGFloat targetH = MIN(CV3Style.panelH, maxSize.height);
+            targetH = MAX(targetH, CV3Style.minHeight);
+            
+            self.panelContainer.bounds = CGRectMake(0, 0, targetW, targetH);
+            self.panelContainer.center = [self calculateTargetCenter];
+            [self handleResize:nil];
+        } completion:nil];
+    }
+}
+
+- (void)updateResizingHandleFrame {
+    // 确保把手始终在面板的右下角
+    CGRect bounds = self.panelContainer.bounds;
+    self.resizingHandle.bounds = CGRectMake(0, 0, 40, 40);
+    self.resizingHandle.center = CGPointMake(bounds.size.width - 20, bounds.size.height - 20);
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+
+    UIEdgeInsets safe = self.safeAreaInsets;
+    CGRect bounds = self.bounds;
+    CGFloat w = bounds.size.width;
+    CGFloat h = bounds.size.height;
+
+    // 计算安全区域内的有效绘图区
+    CGPoint targetCenter = [self calculateTargetCenter];
+    self.cachedTargetCenter = targetCenter; // 建议3：实时预热缓存
+
+    // 1. 设置触发区域
+    self.edgeTriggerView.backgroundColor = [UIColor clearColor];
+    UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+
+    switch (orientation) {
+        case UIInterfaceOrientationLandscapeLeft:
+            self.systemEdgePan.edges = UIRectEdgeTop;
+            self.edgeTriggerView.frame = CGRectMake(0, 0, w, CV3Style.triggerHotzoneWidth);
+            break;
+        case UIInterfaceOrientationLandscapeRight:
+            self.systemEdgePan.edges = UIRectEdgeBottom;
+            self.edgeTriggerView.frame = CGRectMake(0, h - CV3Style.triggerHotzoneWidth, w, CV3Style.triggerHotzoneWidth);
+            break;
+        case UIInterfaceOrientationPortraitUpsideDown:
+            self.systemEdgePan.edges = UIRectEdgeLeft;
+            self.edgeTriggerView.frame = CGRectMake(0, safe.top, CV3Style.triggerHotzoneWidth, h - safe.top - CV3Style.triggerBottomOffset);
+            break;
+        case UIInterfaceOrientationPortrait:
+        default:
+            self.systemEdgePan.edges = UIRectEdgeRight;
+            self.edgeTriggerView.frame = CGRectMake(w - CV3Style.triggerHotzoneWidth, safe.top, CV3Style.triggerHotzoneWidth, h - safe.top - CV3Style.triggerBottomOffset);
+            break;
+    }
+
+    [self.rootViewController.view bringSubviewToFront:self.edgeTriggerView];
+
+    // 2. 面板容器
+    self.dimmingView.frame = bounds;
+    self.panelContainer.backgroundColor = [UIColor clearColor];
+
+    // 动态计算面板尺寸 (使用常量并确保不超出安全区域)
+    CGSize maxSize = [self calculateMaxPanelSize];
+
+    CGFloat targetW = MIN(CV3Style.panelW, maxSize.width);
+    CGFloat targetH = MIN(CV3Style.panelH, maxSize.height);
+    targetH = MAX(targetH, CV3Style.minHeight);
+
+    CGRect panelBounds = CGRectMake(0, 0, targetW, targetH);    
+    // 计算目标旋转
+    CGAffineTransform targetRotation = CV3RotationTransformForInterfaceOrientation(orientation);
+
+    // 更新基础变换属性
+    self.baseRotationTransform = targetRotation;
+    
+    // 只有在未拖动过且非正在动画时，或者旋转方向改变时，才强制同步 bounds
+    BOOL orientationChanged = !CGAffineTransformEqualToTransform(self.panelContainer.transform, targetRotation);
+    BOOL shouldForceLayout = (!self.hasBeenMoved && !self.isAnimating) || orientationChanged;
+
+    if (shouldForceLayout && (!CGRectEqualToRect(self.panelContainer.bounds, panelBounds) || orientationChanged)) {
+        [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionBeginFromCurrentState animations:^{
+            // 在动画中更新基础旋转，防止重写
+            self.panelContainer.transform = targetRotation;
+            self.panelContainer.bounds = panelBounds;
+            
+            // 重置视差形变，防止修改 frame 时发生坐标跳变 (Geometry Jump)
+            self.appPanel.transform = CGAffineTransformIdentity;
+            self.trafficCapsule.transform = CGAffineTransformIdentity;
+            self.resizingHandle.transform = CGAffineTransformIdentity;
+
+            // 调整子组件大小以匹配容器
+            self.appPanel.frame = self.panelContainer.bounds;
+            
+            UIView *searchContainer = self.searchField.superview;
+            searchContainer.frame = CGRectMake(15, 50, targetW - 30, 36);
+            self.searchField.frame = CGRectInset(searchContainer.bounds, 10, 0);
+            self.searchBackground.frame = searchContainer.bounds;
+            self.searchBackground.path = [UIBezierPath bezierPathWithRoundedRect:searchContainer.bounds cornerRadius:10].CGPath;
+
+            self.categoryBar.frame = CGRectMake(15, 96, targetW - 30, 40);
+            self.collectionView.frame = CGRectMake(0, 140, targetW, targetH - 140);
+            self.noResultsLabel.frame = CGRectMake(0, 150, targetW, 40);
+            
+            self.trafficCapsule.frame = CGRectMake(16, 14, CV3Style.trafficCapsuleW, CV3Style.trafficCapsuleH);
+            [self updateResizingHandleFrame];
+            
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            self.contrastBackdrop.frame = self.appPanel.bounds;
+            self.whiteFilter.frame = self.appPanel.bounds;
+            self.innerGlowLayer.frame = self.appPanel.bounds;
+            self.dispersionContainer.frame = self.appPanel.bounds;
+            self.specularHighlight.frame = self.appPanel.bounds;
+            self.cyanLayer.frame = CGRectInset(self.appPanel.bounds, -0.3, -0.3);
+            self.magentaLayer.frame = CGRectInset(self.appPanel.bounds, 0.3, 0.3);
+            [CATransaction commit];
+
+            [self.collectionView.collectionViewLayout invalidateLayout];
+            
+            if (!self.hasBeenMoved) {
+                if (CGPointDistance(self.panelContainer.center, targetCenter) > 0.5) {
+                    self.panelContainer.center = targetCenter;
+                }
+            }
+        } completion:nil];
+    } else {
+        // 如果已经拖动过，仅在旋转时更新 transform
+        if (orientationChanged && !self.isAnimating) {
+             [UIView animateWithDuration:0.35 animations:^{
+                self.panelContainer.transform = targetRotation;
+             }];
+        }
+        
+        if (!self.isAnimating && !self.hasBeenMoved) {
+            // 建议1：锚点平滑补偿 (Anchor Smoothing)
+            if (CGPointDistance(self.panelContainer.center, targetCenter) > 0.5) {
+                [UIView animateWithDuration:0.15 delay:0 options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState animations:^{
+                    self.panelContainer.center = targetCenter;
+                } completion:nil];
+            }
+        } else if (self.isPanelShowing && !self.isAnimating) {
+            // 保持在屏幕内的钳位逻辑
+            CGPoint currentCenter = self.panelContainer.center;
+            CGRect currentBounds = self.panelContainer.bounds;
+            
+            // 考虑旋转后的实际尺寸
+            CGSize sizeInRoot = CGRectApplyAffineTransform(currentBounds, self.panelContainer.transform).size;
+            CGFloat rootHalfW = sizeInRoot.width / 2.0;
+            CGFloat rootHalfH = sizeInRoot.height / 2.0;
+
+            CGFloat clampedX = MAX(rootHalfW, MIN(w - rootHalfW, currentCenter.x));
+            CGFloat clampedY = MAX(rootHalfH, MIN(h - rootHalfH, currentCenter.y));
+            
+            if (fabs(currentCenter.x - clampedX) > 0.5 || fabs(currentCenter.y - clampedY) > 0.5) {
+                self.panelContainer.center = CGPointMake(clampedX, clampedY);
+            }
+        }
+    }
+
+    // 3. 特效层
+    self.bezierContainer.frame = bounds; // 覆盖全屏以实现贝塞尔绘制
+    self.bezierBlur.frame = self.bezierContainer.bounds;
+    self.bezierContainer.backgroundColor = [UIColor clearColor];
+    
+    // 4. 面板主体
+    self.appPanel.backgroundColor = [UIColor clearColor];
+
+    // 5. 辅助视图
+    self.trafficCapsule.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.08];
+    self.resizingHandle.backgroundColor = [UIColor clearColor];
+    
+    for (UIView *subview in self.appPanel.subviews) {
+        if ([NSStringFromClass([subview class]) containsString:@"Backdrop"]) {
+            subview.transform = CGAffineTransformMakeScale(1.15, 1.15);
+        }
+    }
+}
+
+
+
+- (void)handleEdgeInteraction:(UIPanGestureRecognizer *)gesture {
+    // 使用 locationInView:nil 获取绝对屏幕坐标，规避旋转后的坐标系偏移风险
+    CGPoint location = [gesture locationInView:nil];
+    CGPoint translation = [gesture translationInView:nil];
+    CGPoint velocity = [gesture velocityInView:nil];
+
+#pragma mark - 动态方向感知拉伸计算
+    UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+    CGFloat stretch = 0;
+    CGFloat vel = 0;
+
+    switch (orientation) {
+        case UIInterfaceOrientationLandscapeLeft:
+            stretch = translation.y; // 下划
+            vel = velocity.y;
+            break;
+        case UIInterfaceOrientationLandscapeRight:
+            stretch = -translation.y; // 上划
+            vel = -velocity.y;
+            break;
+        case UIInterfaceOrientationPortraitUpsideDown:
+            stretch = translation.x; // 右划 (左边缘)
+            vel = velocity.x;
+            break;
+        case UIInterfaceOrientationPortrait:
+        default:
+            stretch = -translation.x; // 左划 (右边缘)
+            vel = -velocity.x;
+            break;
+    }
+
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        // 1. 手势预警效果 (Trigger Preview Flare)
+        [CATransaction begin];
+        [CATransaction setAnimationDuration:0.2];
+        self.triggerPreviewLayer.frame = CGRectMake(location.x - 75, location.y - 75, 150, 150);
+        self.triggerPreviewLayer.opacity = 1.0;
+        [CATransaction commit];
+
+        // 建议3：布局预热 (Layout Pre-warming)
+        self.cachedTargetCenter = [self calculateTargetCenter];
+
+        if (!self.isPanelShowing) {
+            [self.feedback impactOccurred];
+            [self.selectionFeedback prepare];
+            self.lastHapticX = 0;
+            self.bezierContainer.alpha = 1.0;
+            
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            self.bezierLayer.path = [self pathForStretch:0 atPoint:location velocity:CGPointZero orientation:orientation].CGPath;
+            [CATransaction commit];
+            
+            self.bezierLayer.shadowOpacity = 0.0;
+        }
+    } else if (gesture.state == UIGestureRecognizerStateChanged) {
+        // 动态同步预警层位置
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        self.triggerPreviewLayer.position = location;
+        [CATransaction commit];
+
+        if (self.bezierContainer.alpha > 0) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            self.bezierLayer.path = [self pathForStretch:MAX(0, stretch) atPoint:location velocity:velocity orientation:orientation].CGPath;
+            [CATransaction commit];
+
+            // 仅进行手势拉伸图形绘制，延迟 dimmingView 等呈现准备工作至阈值触发后
+            // 建议 3：Tactile Granularity (触觉颗粒感)
+            CGFloat hapticInterval = MAX(8.0, 20.0 - (stretch / 45.0) * 12.0);
+            if (fabs(stretch - self.lastHapticX) > hapticInterval) {
+                UIImpactFeedbackGenerator *rigid = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid];
+                [rigid impactOccurredWithIntensity:0.3 + (stretch / 45.0) * 0.4];
+                
+                AudioServicesPlaySystemSound(1104); 
+                self.lastHapticX = stretch;
+            }
+
+            if (stretch > 45) { 
+                [self animateSpotlight:YES fromPoint:location velocity:vel]; 
+                gesture.enabled = NO; gesture.enabled = YES; 
+            }
+        }
+    } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        // 移除预警效果
+        [CATransaction begin];
+        [CATransaction setAnimationDuration:0.3];
+        self.triggerPreviewLayer.opacity = 0;
+        [CATransaction commit];
+
+        if (self.bezierContainer.alpha > 0 && !self.isPanelShowing && vel > 300 && gesture.state != UIGestureRecognizerStateCancelled) {
+            [self animateSpotlight:YES fromPoint:location velocity:vel];
+        } else if (!self.isPanelShowing) {
+            // 修复：确保中断时重置所有状态
+            [UIView animateWithDuration:0.4 animations:^{
+                self.panelContainer.hidden = YES;
+                self.panelContainer.alpha = 0;
+                self.dimmingView.alpha = 0;
+                self.isAnimating = NO;
+            }];
+            
+            // Jelly Physics for Exit
+            CASpringAnimation *spring = [CASpringAnimation animationWithKeyPath:@"path"];
+            spring.damping = 12;
+            spring.stiffness = 300;
+            spring.mass = 1.0;
+            spring.duration = spring.settlingDuration;
+            spring.fromValue = (id)self.bezierLayer.path;
+            spring.toValue = (id)[self pathForStretch:0 atPoint:location velocity:CGPointZero orientation:orientation].CGPath;
+            [self.bezierLayer addAnimation:spring forKey:@"bounceBack"];
+            
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            self.bezierLayer.path = [self pathForStretch:0 atPoint:location velocity:CGPointZero orientation:orientation].CGPath;
+            [CATransaction commit];
+        }
+        [UIView animateWithDuration:0.5 delay:0.15 options:UIViewAnimationOptionCurveEaseInOut animations:^{ 
+            self.bezierContainer.alpha = 0; 
+            if (!self.isPanelShowing) self.dimmingView.alpha = 0;
+        } completion:nil];
+    }
+}
+
+
+- (UIBezierPath *)pathForStretch:(CGFloat)stretch atPoint:(CGPoint)point velocity:(CGPoint)velocity orientation:(UIInterfaceOrientation)orientation {
+    CGFloat s = MIN(stretch * 0.7, 95); 
+    CGFloat baseW = 130 + stretch * 0.2;
+    CGFloat cp1Offset = 65 + stretch * 0.5;
+    CGFloat cp2Offset = 45 + stretch * 0.2;
+    
+    UIBezierPath *path = [UIBezierPath bezierPath];
+
+    CGRect b = self.bounds;
+
+    if (orientation == UIInterfaceOrientationLandscapeLeft) {
+        // 顶部拉伸 (LandscapeLeft, Home在右)
+        CGFloat leftX = point.x - baseW;
+        CGFloat rightX = point.x + baseW;
+        CGFloat peakY = s;
+        [path moveToPoint:CGPointMake(0, 0)]; // 从左上角开始
+        [path addLineToPoint:CGPointMake(leftX, 0)]; // 直线到左边起点
+        [path addCurveToPoint:CGPointMake(point.x, peakY) controlPoint1:CGPointMake(point.x - cp1Offset, 0) controlPoint2:CGPointMake(point.x - cp2Offset, peakY)];
+        [path addCurveToPoint:CGPointMake(rightX, 0) controlPoint1:CGPointMake(point.x + cp2Offset, peakY) controlPoint2:CGPointMake(point.x + cp1Offset, 0)];
+        [path addLineToPoint:CGPointMake(b.size.width, 0)]; // 直线到右上角
+        [path addLineToPoint:CGPointMake(0, 0)]; // 闭合
+    } else if (orientation == UIInterfaceOrientationLandscapeRight) {
+        // 底部拉伸 (LandscapeRight, Home在左)
+        CGFloat leftX = point.x - baseW;
+        CGFloat rightX = point.x + baseW;
+        CGFloat peakY = b.size.height - s;
+        [path moveToPoint:CGPointMake(0, b.size.height)]; // 左下角
+        [path addLineToPoint:CGPointMake(leftX, b.size.height)];
+        [path addCurveToPoint:CGPointMake(point.x, peakY) controlPoint1:CGPointMake(point.x - cp1Offset, b.size.height) controlPoint2:CGPointMake(point.x - cp2Offset, peakY)];
+        [path addCurveToPoint:CGPointMake(rightX, b.size.height) controlPoint1:CGPointMake(point.x + cp2Offset, peakY) controlPoint2:CGPointMake(point.x + cp1Offset, b.size.height)];
+        [path addLineToPoint:CGPointMake(b.size.width, b.size.height)]; // 右下角
+        [path addLineToPoint:CGPointMake(0, b.size.height)]; // 闭合
+    } else if (orientation == UIInterfaceOrientationPortraitUpsideDown) {
+        // 左边缘拉伸
+        CGFloat topY = point.y - baseW;
+        CGFloat bottomY = point.y + baseW;
+        CGFloat peakX = s;
+        [path moveToPoint:CGPointMake(0, 0)]; // 左上角
+        [path addLineToPoint:CGPointMake(0, topY)];
+        [path addCurveToPoint:CGPointMake(peakX, point.y) controlPoint1:CGPointMake(0, point.y - cp1Offset) controlPoint2:CGPointMake(peakX, point.y - cp2Offset)];
+        [path addCurveToPoint:CGPointMake(0, bottomY) controlPoint1:CGPointMake(peakX, point.y + cp2Offset) controlPoint2:CGPointMake(0, point.y + cp1Offset)];
+        [path addLineToPoint:CGPointMake(0, b.size.height)]; // 左下角
+        [path addLineToPoint:CGPointMake(0, 0)]; // 闭合
+    } else {
+        // 右边缘拉伸 (Portrait)
+        CGFloat topY = point.y - baseW;
+        CGFloat bottomY = point.y + baseW;
+        CGFloat peakX = b.size.width - s;
+        [path moveToPoint:CGPointMake(b.size.width, 0)]; // 右上角
+        [path addLineToPoint:CGPointMake(b.size.width, topY)];
+        [path addCurveToPoint:CGPointMake(peakX, point.y) controlPoint1:CGPointMake(b.size.width, point.y - cp1Offset) controlPoint2:CGPointMake(peakX, point.y - cp2Offset)];
+        [path addCurveToPoint:CGPointMake(b.size.width, bottomY) controlPoint1:CGPointMake(peakX, point.y + cp2Offset) controlPoint2:CGPointMake(b.size.width, point.y + cp1Offset)];
+        [path addLineToPoint:CGPointMake(b.size.width, b.size.height)]; // 右下角
+        [path addLineToPoint:CGPointMake(b.size.width, 0)]; // 闭合
+    }
+
+    [path closePath];
+    return path;
+}
+
+- (void)updateTrafficLightsFocus:(BOOL)active {
+    NSArray *tc = @[[UIColor colorWithRed:1.00 green:0.37 blue:0.33 alpha:1.0], [UIColor colorWithRed:1.00 green:0.75 blue:0.18 alpha:1.0], [UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:1.0]];
+    UIColor *gray = [[UIColor labelColor] colorWithAlphaComponent:0.2];
+    
+    // 移除嵌套动画，改为直接设置颜色或使用极简动画，防止阻塞主线程交互
+    for (int i = 0; i < self.trafficDots.count; i++) {
+        self.trafficDots[i].backgroundColor = active ? tc[i] : gray;
+    }
+}
+
+- (void)animateSpotlight:(BOOL)visible fromPoint:(CGPoint)point velocity:(CGFloat)velocity {
+    if (self.isAnimating) return;
+    self.isPanelShowing = visible; self.isAnimating = YES;
+    if (visible) {
+        self.searchField.text = @"";
+        self.selectedCategory = @"全部";
+        [self filterApps];
+        self.dimmingView.alpha = 1.0; // 阈值触发时同步显示遮罩
+        self.lastTriggerPoint = point;
+        self.hasCapturedBaseline = NO; // 重置基准姿态捕获标志
+        [self loadAppsAsync];
+        [self updateTrafficLightsFocus:YES];
+        self.dimmingView.userInteractionEnabled = YES; // 显示时开启拦截
+        self.panelContainer.hidden = NO; self.panelContainer.center = point;
+        
+        // 恢复所有高开销特效图层的显示
+        self.dispersionContainer.hidden = NO;
+        self.cyanLayer.hidden = NO;
+        self.magentaLayer.hidden = NO;
+        self.innerGlowLayer.hidden = NO;
+        self.contrastBackdrop.hidden = NO;
+        self.whiteFilter.hidden = NO;
+        self.specularHighlight.hidden = NO;
+
+        // 预先应用正确的旋转变换和尺寸
+        CGAffineTransform initialRotation = CGAffineTransformIdentity;
+        UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+        switch (orientation) {
+            case UIInterfaceOrientationLandscapeLeft: initialRotation = CGAffineTransformMakeRotation(-M_PI_2); break;
+            case UIInterfaceOrientationLandscapeRight: initialRotation = CGAffineTransformMakeRotation(M_PI_2); break;
+            case UIInterfaceOrientationPortraitUpsideDown: initialRotation = CGAffineTransformMakeRotation(M_PI); break;
+            default: initialRotation = CGAffineTransformIdentity; break;
+        }
+
+        // 根据速度计算非对称形变 (Squash & Stretch)
+        CGAffineTransform squashTransform = CGAffineTransformIdentity;
+        if (fabs(velocity) > 0) {
+            CGFloat stretchAmount = MIN(fabs(velocity) / 2500.0, 0.35); // 最大 35% 拉伸
+            // X轴拉伸，Y轴挤压，方向由 velocity 符号决定（如果是向内拉出则 X 拉伸）
+            squashTransform = CGAffineTransformMakeScale(1.0 + stretchAmount, 1.0 - stretchAmount * 0.5);
+        }
+
+        CGAffineTransform startTransform = CGAffineTransformConcat(squashTransform, initialRotation);
+
+        // 计算当前环境下合法的尺寸 (同步 layoutSubviews 逻辑)
+        CGSize maxSize = [self calculateMaxPanelSize];        
+        CGFloat targetW = MIN(CV3Style.panelW, maxSize.width);
+        CGFloat targetH = MIN(CV3Style.panelH, maxSize.height);
+        targetH = MAX(targetH, CV3Style.minHeight);
+        
+        // 重置视差形变，防止修改 frame 时发生坐标跳变 (Geometry Jump)
+        self.appPanel.transform = CGAffineTransformIdentity;
+        self.trafficCapsule.transform = CGAffineTransformIdentity;
+        self.resizingHandle.transform = CGAffineTransformIdentity;
+
+        // 设置初始 bounds 和子组件大小，防止在 layoutSubviews 锁定期间出现错位
+        self.panelContainer.bounds = CGRectMake(0, 0, targetW, targetH);
+        self.appPanel.frame = self.panelContainer.bounds;
+        
+        UIView *searchContainer = self.searchField.superview;
+        searchContainer.frame = CGRectMake(15, 50, targetW - 30, 36);
+        self.searchField.frame = CGRectInset(searchContainer.bounds, 10, 0);
+        self.searchBackground.frame = searchContainer.bounds;
+        self.searchBackground.path = [UIBezierPath bezierPathWithRoundedRect:searchContainer.bounds cornerRadius:10].CGPath;
+
+        self.categoryBar.frame = CGRectMake(15, 96, targetW - 30, 40);
+        self.collectionView.frame = CGRectMake(0, 140, targetW, targetH - 140);
+        self.noResultsLabel.frame = CGRectMake(0, 150, targetW, 40);
+        
+        self.trafficCapsule.frame = CGRectMake(16, 14, CV3Style.trafficCapsuleW, CV3Style.trafficCapsuleH);
+        [self updateResizingHandleFrame];
+        self.contrastBackdrop.frame = self.appPanel.bounds;
+        self.innerGlowLayer.frame = self.appPanel.bounds;
+        self.specularHighlight.frame = self.appPanel.bounds;
+        self.cyanLayer.frame = CGRectInset(self.appPanel.bounds, -0.3, -0.3);
+        self.magentaLayer.frame = CGRectInset(self.appPanel.bounds, 0.3, 0.3);
+        [self.collectionView.collectionViewLayout invalidateLayout];
+
+        self.panelContainer.transform = CGAffineTransformScale(startTransform, 0.4, 0.4);
+        self.panelContainer.alpha = 0;
+
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        // 建议 4：初始状态强制背景层放大，模拟凝聚感
+        for (UIView *subview in self.appPanel.subviews) {
+            if ([NSStringFromClass([subview class]) containsString:@"Backdrop"]) {
+                subview.transform = CGAffineTransformMakeScale(1.5, 1.5);
+            }
+        }
+        [CATransaction commit];
+
+        // 建议3：使用预热缓存的中心点 (Layout Pre-warming)
+        CGPoint targetCenter = (self.cachedTargetCenter.x > 0) ? self.cachedTargetCenter : [self calculateTargetCenter];
+
+        [UIView animateWithDuration:0.75 delay:0 usingSpringWithDamping:0.65 initialSpringVelocity:1.2 options:0 animations:^{
+            self.dimmingView.alpha = 1.0;
+            self.panelContainer.center = targetCenter;
+            self.panelContainer.transform = initialRotation;
+            self.panelContainer.alpha = 1;
+            
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            // 模糊层回缩，创造液态归位视觉
+            for (UIView *subview in self.appPanel.subviews) {
+                if ([NSStringFromClass([subview class]) containsString:@"Backdrop"]) {
+                    subview.transform = CGAffineTransformMakeScale(1.15, 1.15);
+                }
+            }
+            [CATransaction commit];
+            
+            // 实时汲取当前活跃 App 的色调注入遮罩
+            CV3UpdateAdaptiveTint([self currentActiveBundleID]);
+        } completion:^(BOOL f){ 
+            self.isAnimating = NO; 
+            [self startLiquidMotion]; 
+        }];
+    } else {
+        // 关键修复：不要同步收起键盘，因为 resignFirstResponder 是重度同步操作，会阻塞动画开始
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.searchField resignFirstResponder];
+        });
+
+        [self updateTrafficLightsFocus:NO];
+        [self stopLiquidMotion];
+        self.dimmingView.userInteractionEnabled = NO; // 隐藏时关闭拦截
+        
+        // 获取当前的旋转状态
+        CGAffineTransform currentRotation = self.panelContainer.transform;
+        
+        [UIView animateWithDuration:0.25 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0.5 options:0 animations:^{ 
+            self.dimmingView.alpha = 0;
+            self.panelContainer.alpha = 0; 
+            self.panelContainer.center = self.lastTriggerPoint; // 回退到存储的触发点
+            self.panelContainer.transform = CGAffineTransformScale(currentRotation, 0.5, 0.5);
+            
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            // 消失时再次放大模糊层，模拟消散
+            for (UIView *subview in self.appPanel.subviews) {
+                if ([NSStringFromClass([subview class]) containsString:@"Backdrop"]) {
+                    subview.transform = CGAffineTransformMakeScale(1.5, 1.5);
+                }
+            }
+            [CATransaction commit];
+        } completion:^(BOOL f){ 
+            self.isAnimating = NO; 
+            self.panelContainer.hidden = YES; 
+            // 显式挂起所有重度开销图层，确保 GPU 零消耗
+            self.dispersionContainer.hidden = YES;
+            self.cyanLayer.hidden = YES;
+            self.magentaLayer.hidden = YES;
+            self.innerGlowLayer.hidden = YES;
+            self.contrastBackdrop.hidden = YES;
+            self.whiteFilter.hidden = YES;
+            self.specularHighlight.hidden = YES;
+        }];
+    }
+}
+
+- (void)animateIconsStaggered {
+    NSArray *items = [self.collectionView visibleCells];
+    NSArray *sorted = [items sortedArrayUsingComparator:^NSComparisonResult(UICollectionViewCell *a, UICollectionViewCell *b) {
+        return [[self.collectionView indexPathForCell:a] compare:[self.collectionView indexPathForCell:b]];
+    }];
+    for (int i = 0; i < sorted.count; i++) {
+        UIView *v = sorted[i]; v.transform = CGAffineTransformMakeScale(0.2, 0.2); v.alpha = 0;
+        [UIView animateWithDuration:0.6 delay:i*0.015 usingSpringWithDamping:0.45 initialSpringVelocity:1.5 options:0 animations:^{ v.transform = CGAffineTransformIdentity; v.alpha = 1; } completion:nil];
+    }
+}
+
+- (void)startLiquidMotion {
+    if (!self.motionManager.isDeviceMotionAvailable) return;
+
+    // [Geek Advice] Align with 120Hz display refresh rate using CADisplayLink
+    [self.motionManager startDeviceMotionUpdates];
+
+    if (self.liquidDisplayLink) {
+        [self.liquidDisplayLink invalidate];
+    }
+
+    self.liquidDisplayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(updateLiquidMotion:)];
+    [self.liquidDisplayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+}
+
+- (void)updateLiquidMotion:(CADisplayLink *)sender {
+    CMDeviceMotion *m = self.motionManager.deviceMotion;
+    if (!m) return;
+
+    if (!self.hasCapturedBaseline) {
+        self.baseRoll = m.attitude.roll;
+        self.basePitch = m.attitude.pitch;
+        self.hasCapturedBaseline = YES;
+        // 面板显示时激活光效
+        [CATransaction begin]; [CATransaction setDisableActions:YES];
+        self.redGlow.hidden = NO; self.yellowGlow.hidden = NO; self.greenGlow.hidden = NO;
+        [CATransaction commit];
+    }
+
+    CGFloat deltaRoll = m.attitude.roll - self.baseRoll;
+    CGFloat deltaPitch = m.attitude.pitch - self.basePitch;
+
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+
+    // 建议 1：Fiber-Optic Light Leak (光纤导光实时姿态)
+    // 光束顺着倾斜方向在面板内部流动，具有更高的位移敏感度
+    CGFloat glowShift = 45.0;
+    self.redGlow.position = CGPointMake(40 + deltaRoll * glowShift, 25 + deltaPitch * glowShift);
+    self.yellowGlow.position = CGPointMake(65 + deltaRoll * glowShift, 25 + deltaPitch * glowShift);
+    self.greenGlow.position = CGPointMake(90 + deltaRoll * glowShift, 25 + deltaPitch * glowShift);
+
+    self.specularHighlight.startPoint = CGPointMake(0.5 - deltaRoll*1.5, 0.5 - deltaPitch*1.5);
+    self.specularHighlight.endPoint = CGPointMake(1.5 - deltaRoll*1.5, 1.5 - deltaPitch*1.5);
+
+    CGFloat dx = deltaRoll * 1.2;
+    CGFloat dy = deltaPitch * 1.2;
+    self.cyanLayer.transform = CATransform3DMakeTranslation(-dx, -dy, 0);
+    self.magentaLayer.transform = CATransform3DMakeTranslation(dx, dy, 0);
+
+    // 建议2：视差解耦 (Parallax Decoupling) 2.0 - 多平面深度体系
+    // 核心原理：层级越高（越靠近用户），位移系数越大
+    CGFloat panelDX = deltaRoll * CV3Style.parallaxPanelFactor;
+    CGFloat panelDY = deltaPitch * CV3Style.parallaxPanelFactor;
+    
+    // 核心修复：停止移动整个 appPanel 以避免边缘空白 (The "Gaps" Fix)
+    // 相反，我们移动内部的每一个组件，利用背景模糊层已有的 1.15x 缩放作为安全边距
+    self.appPanel.transform = CGAffineTransformIdentity; 
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    for (UIView *subview in self.appPanel.subviews) {
+        if ([NSStringFromClass([subview class]) containsString:@"Backdrop"]) {
+            // 背景层：保持 1.15x 缩放的同时增加位移，由于有 15% 的溢出，位移不会导致露底
+            subview.transform = CGAffineTransformConcat(CGAffineTransformMakeScale(1.15, 1.15), CGAffineTransformMakeTranslation(panelDX, panelDY));
+        }
+    }
+    
+    // 移动内容层 (Content Parallax)
+    CGAffineTransform contentParallax = CGAffineTransformMakeTranslation(panelDX, panelDY);
+    self.searchField.superview.transform = contentParallax;
+    self.categoryBar.transform = contentParallax;
+    self.collectionView.transform = contentParallax;
+    self.noResultsLabel.transform = contentParallax;
+    
+    // 移动特效层 (Effect Layers)
+    self.contrastBackdrop.transform = contentParallax;
+    self.whiteFilter.transform = contentParallax;
+    self.dispersionContainer.transform = contentParallax;
+    self.specularHighlight.affineTransform = contentParallax;
+    [CATransaction commit];
+
+    // 建议 3：Glow & Content Depth (发光与内容深度差)
+    // 内发光层位移略大于面板，创造玻璃边缘的折射感
+    CGFloat glowDX = panelDX * 1.15;
+    CGFloat glowDY = panelDY * 1.15;
+    self.innerGlowLayer.affineTransform = CGAffineTransformMakeTranslation(glowDX, glowDY);
+
+    // 建议 2：Gravity-Aware Icons (重力图标视差)
+    // 遍历可见 cell，应用反向视差，系数设为最高以凸显浮空感
+    NSArray *visibleCells = [self.collectionView visibleCells];
+    for (UICollectionViewCell *cell in visibleCells) {
+        if ([cell isKindOfClass:[CV3AppCell class]]) {
+            // 图标位移系数 3.5x，创造明显的层次差
+            ((CV3AppCell *)cell).iconOffset = CGPointMake(-deltaRoll * 3.5, -deltaPitch * 3.5);
+        }
+    }
+
+    // 装饰件深度视差 (Layered Decoration Parallax) + 惯性衰减 (Inertial Damping)
+    CGFloat targetDecoDX = deltaRoll * CV3Style.parallaxDecoFactor;
+    CGFloat targetDecoDY = deltaPitch * CV3Style.parallaxDecoFactor;
+
+    // 惯性平滑逻辑：使用插值 (Lerp) 实现物理质量感
+    CGFloat oldDecoDX = self.currentDecoDX;
+    CGFloat oldDecoDY = self.currentDecoDY;
+    self.currentDecoDX += (targetDecoDX - self.currentDecoDX) * CV3Style.lerpFactor;
+    self.currentDecoDY += (targetDecoDY - self.currentDecoDY) * CV3Style.lerpFactor;
+
+    // 建议：触觉阻尼 (Haptic Damping Feedback)
+    CGFloat frameDisplacement = hypot(self.currentDecoDX - oldDecoDX, self.currentDecoDY - oldDecoDY);
+    if (frameDisplacement > CV3Style.hapticThreshold) { 
+        static NSTimeInterval lastHapticTime = 0;
+        NSTimeInterval now = CACurrentMediaTime();
+        if (now - lastHapticTime > 0.1) { 
+            [self.selectionFeedback selectionChanged];
+            lastHapticTime = now;
+        }
+    }
+
+    CGAffineTransform decoParallax = CGAffineTransformMakeTranslation(self.currentDecoDX, self.currentDecoDY);
+    self.trafficCapsule.transform = decoParallax;
+    self.resizingHandle.transform = decoParallax;
+
+    // 建议：边缘折射干扰 (Edge Refraction Flicker)
+    CGFloat tilt = sqrt(m.attitude.roll * m.attitude.roll + m.attitude.pitch * m.attitude.pitch);
+    if (tilt > 1.1) { 
+        CGFloat flicker = 0.15 * sin(CACurrentMediaTime() * 18.0); 
+        CGFloat boost = (tilt - 1.1) * 0.6 + flicker;
+
+        self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:MIN(0.6, 0.12 + MAX(0, boost))].CGColor;
+        self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:MIN(0.6, 0.12 + MAX(0, boost))].CGColor;
+        self.innerGlowLayer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:MIN(1.0, 0.45 + MAX(0, boost))].CGColor;
+        self.innerGlowLayer.borderWidth = 0.3 + MAX(0, boost) * 1.5;
+    } else {
+        self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.12].CGColor;
+        self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:0.12].CGColor;
+        self.innerGlowLayer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.45].CGColor;
+        self.innerGlowLayer.borderWidth = 0.3;
+    }
+
+    [CATransaction commit];
+}
+
+- (void)stopLiquidMotion {
+    [self.motionManager stopDeviceMotionUpdates];
+
+    if (self.liquidDisplayLink) {
+        [self.liquidDisplayLink invalidate];
+        self.liquidDisplayLink = nil;
+    }
+
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    self.redGlow.hidden = YES; self.yellowGlow.hidden = YES; self.greenGlow.hidden = YES;
+    [CATransaction commit];
+}
+
+// 建议 1：微流体记忆 (Viscous Residue Memory)
+- (void)showTrailingResidueFromPoint:(CGPoint)startPoint toPoint:(CGPoint)endPoint {
+    UIBezierPath *path = [UIBezierPath bezierPath];
+    [path moveToPoint:startPoint];
+    [path addQuadCurveToPoint:endPoint controlPoint:CGPointMake((startPoint.x + endPoint.x)/2, startPoint.y)];
+    self.trailLayer.path = path.CGPath;
+    
+    [UIView animateWithDuration:0.5 animations:^{ self.trailLayer.opacity = 0; } completion:^(BOOL f) {
+        self.trailLayer.path = nil; self.trailLayer.opacity = 1.0;
+    }];
+}
+
+// 建议 2：光照探测器 (Luminous Proximity)
+- (void)emitLightWaveFromPoint:(CGPoint)point {
+    UIView *wave = [[UIView alloc] initWithFrame:CGRectMake(point.x, point.y, 20, 20)];
+    wave.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3];
+    wave.layer.cornerRadius = 10;
+    [self.lightWaveView addSubview:wave];
+    [UIView animateWithDuration:0.8 animations:^{
+        wave.transform = CGAffineTransformMakeScale(20, 20);
+        wave.alpha = 0;
+    } completion:^(BOOL f){ [wave removeFromSuperview]; }];
+}
+
+
+
+// 建议 3：交互黑洞预知系统 (Black Hole Predictive System)
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesBegan:touches withEvent:event];
+    if (!self.isPanelShowing) {
+        UITouch *touch = [touches anyObject];
+        // 探测靠近边界的行为（1cm 距离阈值）
+        if ([touch locationInView:self].x > self.bounds.size.width - 50) {
+            self.isInPredictiveMode = YES;
+            // 移除 panelContainer.hidden = NO 和 alpha 设置
+        }
+    }
+}
+
+
+- (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView {
+    [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.6 initialSpringVelocity:0.5 options:0 animations:^{
+        self.collectionView.layer.transform = CATransform3DIdentity;
+        self.collectionView.alpha = 1.0;
+    } completion:nil];
+}
+
+- (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {
+    if (!decelerate) {
+        [self scrollViewDidEndDecelerating:scrollView];
+    }
+}
+
+- (BOOL)shouldIncludeApp:(id)appProxy {
+    // 1. 必须是用户应用
+    if (!CV3InvokeBool(appProxy, @selector(isUserApplication), YES)) {
+        return NO;
+    }
+    
+    // 2. 必须有图标
+    NSString *bundleId = CV3InvokeObject(appProxy, @selector(bundleIdentifier));
+    UIImage *icon = [UIImage _applicationIconImageForBundleIdentifier:bundleId format:10 scale:[UIScreen mainScreen].scale];
+    if (!icon) return NO;
+
+    // 3. 排除特定系统组件（通过 Bundle ID 前缀）
+    static NSArray *excludedPrefixes = nil;
+    if (!excludedPrefixes) {
+        excludedPrefixes = @[@"com.apple.webapp", @"com.apple.tips", @"com.apple.stocks"];
+    }
+    for (NSString *prefix in excludedPrefixes) {
+        if ([bundleId hasPrefix:prefix]) return NO;
+    }
+
+    return YES;
+}
+
+- (void)loadAppsAsync {
+    NSUInteger requestedGeneration = ++self.appLoadGeneration;
+    BOOL needsFullReload = self.needsFullReload || self.apps.count == 0;
+    NSArray<CV3AppInfo *> *appsSnapshot = [self.apps copy] ?: @[];
+    NSSet *pinnedSnapshot = [self.pinnedBundleIDs copy] ?: [NSSet set];
+
+    dispatch_async(CV3AppLoadQueue(), ^{
+        @autoreleasepool {
+            NSMutableArray<CV3AppInfo *> *workingApps = [NSMutableArray arrayWithCapacity:appsSnapshot.count];
+            for (CV3AppInfo *source in appsSnapshot) {
+                CV3AppInfo *copiedInfo = CV3CopyAppInfo(source);
+                if (copiedInfo) [workingApps addObject:copiedInfo];
+            }
+
+            if (!needsFullReload && workingApps.count > 0) {
+                CV3LogToFile(@"[Debug] 命中增量更新，仅刷新置顶与排序状态 (generation=%lu)", (unsigned long)requestedGeneration);
+            } else {
+                CV3LogToFile(@"[Debug] 执行全量应用资源同步 (needsFullReload=%d, generation=%lu)", needsFullReload, (unsigned long)requestedGeneration);
+                [cv3IconCache removeAllObjects];
+
+                NSMutableArray *temp = [NSMutableArray array];
+                id iconController = [CV3ClassNamed(@"SBIconController") sharedInstance];
+                id iconModel = nil;
+                id iconManager = CV3InvokeObject(iconController, @selector(iconManager));
+                if (iconManager) iconModel = CV3InvokeObject(iconManager, @selector(model));
+                if (!iconModel) iconModel = CV3InvokeObject(iconController, @selector(model));
+                
+                if (iconModel) {
+                    id leafIcons = CV3InvokeObject(iconModel, @selector(leafIcons));
+                    for (id icon in leafIcons) {
+                        if (CV3InvokeBool(icon, @selector(isApplicationIcon), NO)) {
+                            NSString *bundleId = nil;
+                            bundleId = CV3InvokeObject(icon, @selector(applicationBundleID));
+                            if (bundleId.length == 0) bundleId = CV3InvokeObject(icon, @selector(leafIdentifier));
+                            
+                            NSString *name = nil;
+                            name = CV3InvokeObject1(icon, @selector(displayNameForLocation:), nil);
+                            if (name.length == 0) name = CV3InvokeObject(icon, @selector(displayName));
+                            
+                            if (!bundleId || !name) continue;
+                            
+                            CV3AppInfo *info = [[CV3AppInfo alloc] init];
+                            info.name = name;
+                            info.bundleId = bundleId;
+                            info.sbIcon = icon;
+                            [info generatePinyin];
+                            
+                            @try {
+                                Class LSAP = CV3ClassNamed(@"LSApplicationProxy");
+                                id proxy = nil;
+                                proxy = CV3InvokeObject1(LSAP, @selector(applicationProxyForIdentifier:), bundleId);
+                                if (!proxy) proxy = CV3InvokeObject1(LSAP, @selector(applicationProxyForBundleIdentifier:), bundleId);
+                                if (proxy) info.category = CV3InvokeObject(proxy, @selector(genre));
+                            } @catch (NSException *e) {}
+                            if (!info.category) info.category = @"其他";
+                            
+                            info.icon = [UIImage _applicationIconImageForBundleIdentifier:bundleId format:10 scale:[UIScreen mainScreen].scale];
+                            if (info.icon) {
+                                [cv3IconCache setObject:info.icon forKey:bundleId];
+                                [temp addObject:info];
+                            }
+                        }
+                    }
+                }
+                
+                if (temp.count == 0) {
+                    id ws = [CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace];
+                    for (id p in CV3InvokeObject(ws, @selector(allInstalledApplications))) {
+                        if (![self shouldIncludeApp:p]) continue;
+                        NSString *bundleId = CV3InvokeObject(p, @selector(bundleIdentifier));
+                        NSString *name = CV3InvokeObject(p, @selector(localizedName));
+                        CV3AppInfo *info = [[CV3AppInfo alloc] init];
+                        info.name = name;
+                        info.bundleId = bundleId;
+                        info.icon = [UIImage _applicationIconImageForBundleIdentifier:bundleId format:10 scale:[UIScreen mainScreen].scale];
+                        if (info.icon) {
+                            [cv3IconCache setObject:info.icon forKey:bundleId];
+                            [temp addObject:info];
+                        }
+                    }
+                }
+                workingApps = temp;
+            }
+
+            NSDictionary *usageData = [[NSUserDefaults standardUserDefaults] dictionaryForKey:@"CV3AppUsageData"];
+            NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+            NSTimeInterval sevenDaysInSeconds = 7 * 24 * 3600;
+
+            for (CV3AppInfo *info in workingApps) {
+                info.isPinned = [pinnedSnapshot containsObject:info.bundleId];
+                NSArray *ts = usageData[info.bundleId];
+                if (ts && ts.count > 0) {
+                    info.lastUsedDate = [[ts lastObject] doubleValue];
+                } else {
+                    info.lastUsedDate = 0;
+                }
+            }
+
+            [workingApps sortUsingComparator:^NSComparisonResult(CV3AppInfo *obj1, CV3AppInfo *obj2) {
+                if (obj1.isPinned != obj2.isPinned) return obj1.isPinned ? NSOrderedAscending : NSOrderedDescending;
+
+                NSArray *ts1 = usageData[obj1.bundleId];
+                NSArray *ts2 = usageData[obj2.bundleId];
+
+                double score1 = 0;
+                for (NSNumber *ts in ts1) {
+                    double diff = now - [ts doubleValue];
+                    if (diff < sevenDaysInSeconds) score1 += (1.0 / (diff / 3600.0 + 1.0));
+                }
+
+                double score2 = 0;
+                for (NSNumber *ts in ts2) {
+                    double diff = now - [ts doubleValue];
+                    if (diff < sevenDaysInSeconds) score2 += (1.0 / (diff / 3600.0 + 1.0));
+                }
+
+                if (score1 != score2) return score1 > score2 ? NSOrderedAscending : NSOrderedDescending;
+                if (obj1.lastUsedDate != obj2.lastUsedDate) return obj1.lastUsedDate > obj2.lastUsedDate ? NSOrderedAscending : NSOrderedDescending;
+                return [obj1.name localizedCaseInsensitiveCompare:obj2.name];
+            }];
+
+            NSArray<CV3AppInfo *> *sortedApps = [workingApps copy];
+
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (requestedGeneration != self.appLoadGeneration) {
+                    CV3LogToFile(@"[Debug] 丢弃过期应用列表结果 (generation=%lu, latest=%lu)",
+                                 (unsigned long)requestedGeneration,
+                                 (unsigned long)self.appLoadGeneration);
+                    return;
+                }
+
+                self.apps = [sortedApps mutableCopy];
+                if (needsFullReload) self.needsFullReload = NO;
+                self.recentlyUsedApps = [self.apps subarrayWithRange:NSMakeRange(0, MIN(12, self.apps.count))];
+                [self updateCategoryBar];
+                [self filterApps];
+            });
+        }
+    });
+}
+
+- (void)handleMemoryWarning {
+    CV3LogToFile(@"[Warning] Received Memory Warning, clearing icon cache and pausing tasks...");
+    [cv3IconCache removeAllObjects];
+    self.needsFullReload = YES; 
+}
+
+- (void)show {
+    [self attachToCurrentActiveScene];
+    self.hidden = NO;
+
+    if (!self.observersRegistered) {
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(attachToCurrentActiveScene)
+                                                     name:UISceneDidActivateNotification
+                                                   object:nil];
+
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(handleMemoryWarning)
+                                                     name:UIApplicationDidReceiveMemoryWarningNotification
+                                                   object:nil];
+
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillShow:) name:UIKeyboardWillShowNotification object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillHide:) name:UIKeyboardWillHideNotification object:nil];
+        self.observersRegistered = YES;
+    }
+                                               
+    if (!self.heartbeatTimer) {
+        self.heartbeatTimer = [NSTimer scheduledTimerWithTimeInterval:15.0 target:self selector:@selector(monitorState) userInfo:nil repeats:YES];
+        [[NSRunLoop mainRunLoop] addTimer:self.heartbeatTimer forMode:NSRunLoopCommonModes];
+    }
+}
+
+- (void)cleanupRuntimeResources {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    self.observersRegistered = NO;
+
+    if (self.heartbeatTimer) {
+        [self.heartbeatTimer invalidate];
+        self.heartbeatTimer = nil;
+    }
+
+    [self stopLiquidMotion];
+}
+
+- (void)dealloc {
+    [self cleanupRuntimeResources];
+}
+
+
+
+- (void)keyboardWillShow:(NSNotification *)notification {
+    self.isKeyboardVisible = YES;
+    
+    NSDictionary *userInfo = notification.userInfo;
+    CGRect keyboardFrame = [userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
+    double duration = [userInfo[UIKeyboardAnimationDurationUserInfoKey] doubleValue];
+    UIViewAnimationOptions options = [userInfo[UIKeyboardAnimationCurveUserInfoKey] unsignedIntegerValue] << 16;
+    
+    // 建议2：最小化键盘避让 (Minimized Displacement)
+    // 不再以面板底部为基准，而是以“搜索框 + 关键结果区”的可见性为基准
+    UIView *searchContainer = self.searchField.superview;
+    // 计算搜索框底部在屏幕坐标系中的位置 (额外预留 60pt 给顶部几条搜索结果)
+    CGRect searchFrameInScreen = [searchContainer.superview convertRect:searchContainer.frame toView:nil];
+    CGFloat criticalBottom = CGRectGetMaxY(searchFrameInScreen) + 60.0;
+    CGFloat keyboardTop = keyboardFrame.origin.y;
+    
+    CGFloat overlap = criticalBottom - keyboardTop;
+    
+    if (overlap > 0) { // 仅当搜索框或关键区域被遮挡时才移动
+        CGFloat offset = overlap + 10.0; // 仅推移刚好避开的距离，增加 10pt 呼吸间距
+        
+        [UIView animateWithDuration:duration delay:0 options:options animations:^{
+            CGPoint center = self.panelContainer.center;
+            UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+            
+            switch (orientation) {
+                case UIInterfaceOrientationLandscapeLeft: center.x += offset; break;
+                case UIInterfaceOrientationLandscapeRight: center.x -= offset; break;
+                case UIInterfaceOrientationPortraitUpsideDown: center.y += offset; break;
+                case UIInterfaceOrientationPortrait:
+                default: center.y -= offset; break;
+            }
+            self.panelContainer.center = center;
+        } completion:nil];
+    }
+}
+
+- (void)keyboardWillHide:(NSNotification *)notification {
+    self.isKeyboardVisible = NO;
+    
+    NSDictionary *userInfo = notification.userInfo;
+    double duration = [userInfo[UIKeyboardAnimationDurationUserInfoKey] doubleValue];
+    UIViewAnimationOptions options = [userInfo[UIKeyboardAnimationCurveUserInfoKey] unsignedIntegerValue] << 16;
+    
+    [UIView animateWithDuration:duration delay:0 options:options animations:^{
+        // 自动回弹至由安全区域决定的目标中心（除非用户手动大幅挪动过）
+        if (!self.hasBeenMoved) {
+            self.panelContainer.center = [self calculateTargetCenter];
+        } else {
+            // 如果用户手动挪动过，则尝试执行反向推回逻辑，或者保持现状（这里选择回弹钳位以保证可用性）
+            [self setNeedsLayout];
+            [self layoutIfNeeded];
+        }
+    } completion:nil];
+}
+
+- (void)monitorState {
+    @try {
+        if ([self isSystemUIActive]) return;
+
+        BOOL launcherNeedsRecovery = (self.windowScene == nil || self.hidden);
+        BOOL floatingNeedsRecovery = NO;
+
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if (![win isKindOfClass:[CV3FloatingAppWindow class]] || win.isClosing || win.isStashed) continue;
+            BOOL hostDisconnected = (win.windowScene == nil || win.targetScene == nil || win.hostView == nil);
+            BOOL visibilityDrift = win.hidden;
+            if (hostDisconnected || visibilityDrift) {
+                floatingNeedsRecovery = YES;
+                break;
+            }
+        }
+
+        if (!launcherNeedsRecovery && !floatingNeedsRecovery && !self.isPanelShowing) {
+            return;
+        }
+
+        if (launcherNeedsRecovery || self.isPanelShowing) {
+            [self attachToCurrentActiveScene];
+        }
+
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if ([win isKindOfClass:[CV3FloatingAppWindow class]] &&
+                !win.isClosing &&
+                !win.isStashed &&
+                (floatingNeedsRecovery || win.windowScene == nil || win.targetScene == nil || win.hostView == nil || win.hidden) &&
+                [win respondsToSelector:@selector(attachToCurrentActiveScene)]) {
+                [win attachToCurrentActiveScene];
+            }
+        }
+    } @catch (NSException *e) {
+    }
+}
+
+- (BOOL)_shouldAutorotateToInterfaceOrientation:(long long)orientation { return NO; }
+
+- (BOOL)isSystemUIActive {
+    @try {
+        id cc = CV3InvokeObject(CV3ClassNamed(@"SBControlCenterController"), @selector(sharedInstance));
+        if (cc && CV3InvokeBool(cc, @selector(isPresented), NO)) {
+            return YES;
+        }
+        
+        id cs = CV3InvokeObject(CV3ClassNamed(@"SBCoverSheetPresentationManager"), @selector(sharedInstance));
+        if (cs && CV3InvokeBool(cs, @selector(isAnyCoverSheetVisible), NO)) {
+            return YES;
+        }
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Error] isSystemUIActive 检查失败: %@", e);
+    }
+    return NO;
+}
+
+- (void)attachToCurrentActiveScene {
+    // 异步确保不在敏感的系统转换周期内执行同步 UI 操作
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // 增加内部保护，防止异步任务堆叠
+        if (self.isProcessing) return;
+        self.isProcessing = YES;
+
+        @try {
+            UIWindowScene *targetScene = nil;
+            targetScene = CV3InvokeObject(CV3ClassNamed(@"SBWindowScene"), @selector(mainDisplayWindowScene));
+            if (targetScene) {
+                NSString *role = targetScene.session.role;
+                if ([role isEqualToString:@"SBWindowSceneSessionRoleSystemAperture"] ||
+                    [role isEqualToString:@"SBWindowSceneSessionRoleSystemApertureCurtain"] ||
+                    [role isEqualToString:@"UISceneSessionRolePlaceholder"] ||
+                    [[role lowercaseString] containsString:@"siri"]) {
+                    targetScene = nil;
+                }
+            }
+            
+            if (!targetScene) {
+                for (UIScene *scene in [[UIApplication sharedApplication].connectedScenes allObjects]) {
+                    if ([scene isKindOfClass:[UIWindowScene class]]) {
+                        NSString *role = scene.session.role;
+                        if ([role isEqualToString:@"SBWindowSceneSessionRoleSystemAperture"] ||
+                            [role isEqualToString:@"SBWindowSceneSessionRoleSystemApertureCurtain"] ||
+                            [role isEqualToString:@"UISceneSessionRolePlaceholder"] ||
+                            [[role lowercaseString] containsString:@"siri"]) continue;
+                        
+                        if (scene.activationState == UISceneActivationStateForegroundActive) {
+                            targetScene = (UIWindowScene *)scene;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (targetScene) {
+                BOOL needsLayoutUpdate = NO;
+                if (self.windowScene != targetScene) {
+                    self.windowScene = targetScene;
+                    needsLayoutUpdate = YES;
+                }
+                
+                CGRect targetBounds = targetScene.coordinateSpace.bounds;
+                if (!CGRectEqualToRect(self.frame, targetBounds)) {
+                    self.frame = targetBounds;
+                    needsLayoutUpdate = YES;
+                }
+
+                // 核心修复：调用 setHidden 触发重写后的压制检查
+                if (self.hidden) {
+                    self.hidden = NO;
+                    needsLayoutUpdate = YES;
+                }
+                
+                [self applyAdaptiveLevel];
+
+                if (needsLayoutUpdate) {
+                    [self setNeedsLayout];
+                }
+            }
+        } @catch (NSException *e) {}
+        self.isProcessing = NO;
+    });
+}
+
+- (void)applyAdaptiveLevel {
+    // 建议：层级对齐 (Level Alignment)
+    // 根据 GEMINI.md 规范，锁定在 panel (2099) 以确保覆盖所有第三方 App，且保持在控制中心之下
+    CGFloat targetLevel = CV3Style.panel; 
+    
+    if (self.windowLevel != targetLevel) {
+        self.windowLevel = targetLevel;
+    }
+}
+
+- (NSInteger)collectionView:(id)c numberOfItemsInSection:(NSInteger)s { return self.filteredApps.count; }
+- (id)collectionView:(id)c cellForItemAtIndexPath:(id)i {
+    CV3AppCell *cell = [c dequeueReusableCellWithReuseIdentifier:@"C" forIndexPath:i];
+    NSInteger index = [(NSIndexPath *)i item];
+    CV3AppInfo *info = self.filteredApps[index];
+    
+    // 增加首项判断逻辑，用于开启搜索首项高亮
+    BOOL isFirst = (index == 0 && self.searchField.text.length > 0);
+    [cell configureWithInfo:info searchText:self.searchField.text isFirst:isFirst];
+
+    // 应用“熵减”衰老视觉效果
+    [self applyAgingEffectToCell:cell withInfo:info];
+    
+    return cell;
+}
+
+
+- (BOOL)_canBecomeKeyWindow { return YES; }
+- (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)_ignoresHitTest { return NO; }
+- (BOOL)_shouldIsolate { return YES; }
+
+#pragma mark - 强制压制逻辑：深度抑制，防止在系统 UI 活跃时出现
+- (void)setHidden:(BOOL)hidden {
+    if (!hidden && self.isSuppressedBySystem) {
+        CV3LogToFile(@"[Debug] 拦截到非法的 unhide 请求 (当前处于系统压制状态)");
+        [super setHidden:YES];
+        self.alpha = 0;
+        self.windowLevel = CV3Style.background; // 降到最低层
+        return;
+    }
+    
+    [super setHidden:hidden];
+    
+    // 状态同步
+    if (hidden) {
+        self.alpha = 0;
+    } else {
+        self.alpha = 1.0;
+        [self applyAdaptiveLevel];
+    }
+}
+
+#pragma mark - 尝试绕过 App 级触控黑洞的私有方法
+- (BOOL)_isSecure { return YES; }
+- (BOOL)_isWindowServerHostingManaged { return YES; }
+- (BOOL)_wantsSceneAssociation { return YES; }
+
+- (UIView *)hitTest:(CGPoint)point withEvent:(id)e {
+    if (self.isPanelShowing) {
+        // 1. 优先检查搜索框及其容器（最高优先级，防止被拖拽拦截）
+        UIView *searchContainer = self.searchField.superview;
+        CGPoint pInSearch = [self convertPoint:point toView:searchContainer];
+        if (CGRectContainsPoint(searchContainer.bounds, pInSearch)) {
+            UIView *hit = [searchContainer hitTest:pInSearch withEvent:e];
+            return hit ?: searchContainer;
+        }
+
+        // 2. 检查面板区域
+        // 核心修复：移除严格的 bounds 检查，允许点击因视差（Parallax）而超出容器物理边界的组件
+        CGPoint p = [self convertPoint:point toView:self.panelContainer];
+        UIView *hit = [self.panelContainer hitTest:p withEvent:e];
+        if (hit) return hit;
+
+        // 如果点中了面板物理边界内但没有具体子视图响应，返回面板容器以便处理拖拽
+        if (CGRectContainsPoint(self.panelContainer.bounds, p)) {
+            return self.panelContainer;
+        }
+        
+        // 检查遮罩层
+        CGPoint pInDimming = [self convertPoint:point toView:self.dimmingView];
+        if (CGRectContainsPoint(self.dimmingView.bounds, pInDimming)) {
+            return self.dimmingView;
+        }
+        return nil;
+    }
+
+    // 触控透传架构: 当面板隐藏时，CV3Window 的 hitTest 返回 nil，实现完全透传，
+    // 让底层 App 窗口直接接收并处理手势，由 hostWindow 上的 systemEdgePan 触发。
+    return nil;
+}
+
+@end
