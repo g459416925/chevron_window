@@ -583,6 +583,81 @@ static UIColor *CV3AverageColorFromImage(UIImage *image) {
     return color;
 }
 
+static UIColor *CV3CurrentAdaptiveTint = nil;
+
+static UIColor *CV3NormalizedGlassAccentColor(UIColor *accentColor, CGFloat intensity, BOOL selected) {
+    UIColor *tintColor = accentColor ?: [UIColor labelColor];
+    CGFloat hue = 0, saturation = 0, brightness = 0, alpha = 0;
+    if ([tintColor getHue:&hue saturation:&saturation brightness:&brightness alpha:&alpha]) {
+        CGFloat minSaturation = selected ? 0.28 : 0.18;
+        CGFloat maxSaturation = selected ? 0.68 : 0.56;
+        CGFloat minBrightness = selected ? 0.58 : 0.44;
+        CGFloat maxBrightness = selected ? 0.98 : 0.88;
+        saturation = MIN(maxSaturation, MAX(minSaturation, saturation + intensity * 0.04));
+        brightness = MIN(maxBrightness, MAX(minBrightness, brightness + intensity * 0.05));
+        tintColor = [UIColor colorWithHue:hue saturation:saturation brightness:brightness alpha:1.0];
+    }
+    return tintColor;
+}
+
+static CAGradientLayer *CV3EnsureGlassAccentLayer(UIView *hostView) {
+    if (!hostView) return nil;
+    NSString *layerName = @"CV3GlassAccentHighlight";
+    for (CALayer *layer in hostView.layer.sublayers) {
+        if ([[layer valueForKey:@"name"] isEqualToString:layerName] && [layer isKindOfClass:[CAGradientLayer class]]) {
+            return (CAGradientLayer *)layer;
+        }
+    }
+
+    CAGradientLayer *layer = [CAGradientLayer layer];
+    [layer setValue:layerName forKey:@"name"];
+    layer.startPoint = CGPointMake(0.0, 0.0);
+    layer.endPoint = CGPointMake(1.0, 1.0);
+    [hostView.layer insertSublayer:layer atIndex:0];
+    return layer;
+}
+
+static void CV3ApplyGlassAccentStyle(UIView *surface,
+                                     UIView *tintHost,
+                                     CAGradientLayer *highlightLayer,
+                                     UIColor *accentColor,
+                                     CGFloat cornerRadius,
+                                     CGFloat intensity,
+                                     BOOL selected) {
+    if (!surface) return;
+
+    intensity = MIN(1.0, MAX(0.0, intensity));
+    UIColor *tintColor = CV3NormalizedGlassAccentColor(accentColor ?: CV3CurrentAdaptiveTint, intensity, selected);
+    CGFloat scale = [UIScreen mainScreen].scale;
+
+    surface.backgroundColor = [UIColor clearColor];
+    surface.layer.cornerRadius = cornerRadius;
+    if (@available(iOS 13.0, *)) {
+        surface.layer.cornerCurve = kCACornerCurveContinuous;
+    }
+    surface.layer.borderWidth = MAX(0.5 / scale, selected ? 1.0 / scale : 0.5 / scale);
+    surface.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:(0.16 + intensity * 0.14 + (selected ? 0.10 : 0.0))].CGColor;
+
+    UIView *resolvedTintHost = tintHost ?: surface;
+    resolvedTintHost.backgroundColor = [tintColor colorWithAlphaComponent:(0.055 + intensity * 0.115 + (selected ? 0.035 : 0.0))];
+
+    CAGradientLayer *layer = highlightLayer ?: CV3EnsureGlassAccentLayer(resolvedTintHost);
+    if (layer) {
+        CGRect layerBounds = resolvedTintHost.bounds;
+        if (CGRectIsEmpty(layerBounds)) layerBounds = surface.bounds;
+        layer.frame = layerBounds;
+        layer.cornerRadius = cornerRadius;
+        layer.startPoint = CGPointMake(0.0, 0.0);
+        layer.endPoint = CGPointMake(1.0, 1.0);
+        layer.colors = @[
+            (id)[[UIColor whiteColor] colorWithAlphaComponent:(0.18 + intensity * 0.26 + (selected ? 0.08 : 0.0))].CGColor,
+            (id)[tintColor colorWithAlphaComponent:(0.08 + intensity * 0.18)].CGColor,
+            (id)[[UIColor blackColor] colorWithAlphaComponent:(0.04 + intensity * 0.07)].CGColor
+        ];
+        layer.locations = @[@0.0, @0.52, @1.0];
+    }
+}
+
 #pragma mark - Floating App Window (MilkyWay2-style)
 static NSMutableArray *floatingWindows = nil;
 static UIInterfaceOrientation CV3LastTrustedInterfaceOrientation = UIInterfaceOrientationPortrait;
@@ -1218,7 +1293,6 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 @property (nonatomic, strong) UIVisualEffectView *bezierBlur;
 @property (nonatomic, strong) CALayer *cyanLayer;
 @property (nonatomic, strong) CALayer *magentaLayer;
-@property (nonatomic, strong) UIView *whiteFilter; 
 @property (nonatomic, strong) UIView *dispersionContainer; 
 @property (nonatomic, assign) BOOL isPanelShowing;
 @property (nonatomic, assign) BOOL isAnimating;
@@ -1296,6 +1370,8 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 - (void)updateMagneticLayout;
 - (void)emitLightWaveFromPoint:(CGPoint)point;
 - (void)applyAgingEffectToCell:(CV3AppCell *)cell withInfo:(CV3AppInfo *)info;
+- (void)refreshGlassAccentSurfaces;
+- (void)applyGlassAccentToCategoryButton:(UIButton *)button selected:(BOOL)selected suggested:(BOOL)suggested;
 @end
 
 static NSCache *cv3IconCache = nil; 
@@ -1329,6 +1405,7 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
         UIColor *avgColor = CV3AverageColorFromImage(icon);
         if (avgColor) {
             dispatch_async(dispatch_get_main_queue(), ^{
+                CV3CurrentAdaptiveTint = avgColor;
                 [sharedWindow applyBackgroundTint:avgColor];
             });
         }
@@ -1393,12 +1470,23 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
     if (self) {
         self.apps = apps;
         self.selectionHandler = handler;
+        self.clipsToBounds = YES;
         
         UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
         blur.frame = self.bounds;
+        blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        blur.clipsToBounds = YES;
         [self addSubview:blur];
+        CV3ApplyGlassAccentStyle(blur,
+                                 blur.contentView,
+                                 CV3EnsureGlassAccentLayer(blur.contentView),
+                                 CV3CurrentAdaptiveTint ?: [UIColor labelColor],
+                                 0.0,
+                                 0.52,
+                                 YES);
         
         UIScrollView *scroll = [[UIScrollView alloc] initWithFrame:self.bounds];
+        scroll.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         scroll.showsHorizontalScrollIndicator = NO;
         [self addSubview:scroll];
         
@@ -1408,6 +1496,13 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
             btn.frame = CGRectMake(x, 10, 40, 40);
             btn.layer.cornerRadius = 10;
             btn.clipsToBounds = YES;
+            CV3ApplyGlassAccentStyle(btn,
+                                     btn,
+                                     CV3EnsureGlassAccentLayer(btn),
+                                     CV3CurrentAdaptiveTint ?: [UIColor labelColor],
+                                     10.0,
+                                     0.34,
+                                     NO);
             [btn setImage:info.icon forState:UIControlStateNormal];
             btn.tag = [apps indexOfObject:info];
             [btn addTarget:self action:@selector(appTapped:) forControlEvents:UIControlEventTouchUpInside];
