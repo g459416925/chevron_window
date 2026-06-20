@@ -902,6 +902,8 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 @property (nonatomic, assign) NSInteger stashedSide; // 0: None, 1: Left, 2: Right
 @property (nonatomic, assign) CGRect preStashFrame;
 @property (nonatomic, strong) UIView *stashGrabber;
+@property (nonatomic, strong) UIVisualEffectView *stashIconBackdropView;
+@property (nonatomic, strong) CAGradientLayer *stashIconHighlightLayer;
 @property (nonatomic, strong) UIImageView *appIconMiniView;
 
 // Snap & Visual FX Enhancements
@@ -964,6 +966,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (void)refreshHostViewPresentation;
 - (void)applyStashedGrabberOrientation;
 - (void)normalizeStashedGrabberLayout;
+- (void)updateStashIconAppearance;
 - (CGRect)restorableFrameForOrientation:(UIInterfaceOrientation)orientation preferredCenter:(CGPoint)preferredCenter;
 - (CGRect)currentVisualShadowFrame;
 - (UIImage *)snapshotImageForRestoreAnimation;

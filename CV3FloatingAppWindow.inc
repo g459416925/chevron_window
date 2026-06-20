@@ -8,8 +8,8 @@ static void CV3CascadeUpdateSovereigntyAssertions(void) {
     }
 }
 static const CGFloat kCV3RotationCascadeStep = 20.0;
-static const CGFloat kCV3StashIconSize = 44.0;
-static const CGFloat kCV3StashIconInset = 4.0;
+static const CGFloat kCV3StashIconSize = 54.0;
+static const CGFloat kCV3StashIconInset = 7.0;
 
 static CGRect CV3DisplayBoundsForWindow(UIWindow *window) {
     if (window.windowScene) {
@@ -1921,13 +1921,31 @@ void CV3ToggleExposeMode(void) {
         self.stashGrabber.backgroundColor = [UIColor clearColor];
         self.stashGrabber.layer.cornerRadius = 0;
         self.stashGrabber.layer.borderWidth = 0;
+        self.stashGrabber.layer.shadowColor = [UIColor blackColor].CGColor;
+        self.stashGrabber.layer.shadowOffset = CGSizeMake(0, 10);
+        self.stashGrabber.layer.shadowOpacity = 0.26;
+        self.stashGrabber.layer.shadowRadius = 18.0;
         self.stashGrabber.alpha = 0; // 初始隐藏
         [self addSubview:self.stashGrabber];
 
+        self.stashIconBackdropView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterial]];
+        self.stashIconBackdropView.userInteractionEnabled = NO;
+        self.stashIconBackdropView.clipsToBounds = YES;
+        [self.stashGrabber addSubview:self.stashIconBackdropView];
+
+        self.stashIconHighlightLayer = [CAGradientLayer layer];
+        self.stashIconHighlightLayer.startPoint = CGPointMake(0.0, 0.0);
+        self.stashIconHighlightLayer.endPoint = CGPointMake(1.0, 1.0);
+        [self.stashIconBackdropView.contentView.layer addSublayer:self.stashIconHighlightLayer];
+
         self.appIconMiniView = [[UIImageView alloc] initWithFrame:CGRectMake(kCV3StashIconInset, kCV3StashIconInset, kCV3StashIconSize - kCV3StashIconInset * 2.0, kCV3StashIconSize - kCV3StashIconInset * 2.0)];
-        self.appIconMiniView.layer.cornerRadius = 8;
+        self.appIconMiniView.layer.cornerRadius = 10;
         self.appIconMiniView.clipsToBounds = YES;
+        self.appIconMiniView.contentMode = UIViewContentModeScaleAspectFill;
+        self.appIconMiniView.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.30].CGColor;
+        self.appIconMiniView.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;
         [self.stashGrabber addSubview:self.appIconMiniView];
+        [self updateStashIconAppearance];
 
         UITapGestureRecognizer *restoreTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleRestoreTap:)];
         [self.stashGrabber addGestureRecognizer:restoreTap];
@@ -2441,7 +2459,7 @@ void CV3ToggleExposeMode(void) {
     self.stashGrabber.bounds = CGRectMake(0, 0, kCV3StashIconSize, kCV3StashIconSize);
     self.stashGrabber.center = CGPointMake(CGRectGetMidX(targetFrameInWindow), CGRectGetMidY(targetFrameInWindow));
     [self applyStashedGrabberOrientation];
-    self.appIconMiniView.frame = CGRectInset(self.stashGrabber.bounds, kCV3StashIconInset, kCV3StashIconInset);
+    [self updateStashIconAppearance];
     self.appIconMiniView.transform = CGAffineTransformMakeScale(0.82, 0.82);
     self.appContentWrapper.alpha = 0.0;
     self.resizeHandle.alpha = 0.0;
@@ -2472,7 +2490,7 @@ void CV3ToggleExposeMode(void) {
             self.stashGrabber.bounds = CGRectMake(0, 0, kCV3StashIconSize, kCV3StashIconSize);
             self.stashGrabber.center = CGPointMake(CGRectGetMidX(targetFrameInWindow), CGRectGetMidY(targetFrameInWindow));
             [self applyStashedGrabberOrientation];
-            self.appIconMiniView.frame = CGRectInset(self.stashGrabber.bounds, kCV3StashIconInset, kCV3StashIconInset);
+            [self updateStashIconAppearance];
             self.appIconMiniView.transform = CGAffineTransformIdentity;
         }];
     } completion:nil];
@@ -2491,10 +2509,55 @@ void CV3ToggleExposeMode(void) {
     [self applyStashedGrabberOrientation];
     self.stashGrabber.alpha = 1.0;
     self.stashGrabber.userInteractionEnabled = YES;
-    self.appIconMiniView.frame = CGRectInset(self.stashGrabber.bounds, kCV3StashIconInset, kCV3StashIconInset);
+    [self updateStashIconAppearance];
     self.appIconMiniView.transform = CGAffineTransformIdentity;
     [self bringSubviewToFront:self.stashGrabber];
     [self syncWindowShadowForCurrentState];
+}
+
+- (void)updateStashIconAppearance {
+    if (!self.stashGrabber || !self.stashIconBackdropView || !self.appIconMiniView) return;
+
+    CGRect bounds = self.stashGrabber.bounds;
+    if (CGRectIsEmpty(bounds)) {
+        bounds = CGRectMake(0, 0, kCV3StashIconSize, kCV3StashIconSize);
+    }
+
+    CGRect backdropFrame = CGRectInset(bounds, 1.0, 1.0);
+    CGFloat cornerRadius = 16.0;
+    self.stashIconBackdropView.frame = backdropFrame;
+    self.stashIconBackdropView.layer.cornerRadius = cornerRadius;
+    if (@available(iOS 13.0, *)) {
+        self.stashIconBackdropView.layer.cornerCurve = kCACornerCurveContinuous;
+    }
+    self.stashIconBackdropView.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.28].CGColor;
+    self.stashIconBackdropView.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;
+
+    UIColor *tintColor = self.adaptiveAppColor ?: [UIColor labelColor];
+    CGFloat hue = 0, saturation = 0, brightness = 0, alpha = 0;
+    if ([tintColor getHue:&hue saturation:&saturation brightness:&brightness alpha:&alpha]) {
+        saturation = MIN(0.62, MAX(0.22, saturation));
+        brightness = MIN(0.96, MAX(0.54, brightness));
+        tintColor = [UIColor colorWithHue:hue saturation:saturation brightness:brightness alpha:1.0];
+    }
+
+    self.stashIconBackdropView.contentView.backgroundColor = [tintColor colorWithAlphaComponent:0.16];
+    self.stashIconHighlightLayer.frame = self.stashIconBackdropView.contentView.bounds;
+    self.stashIconHighlightLayer.cornerRadius = cornerRadius;
+    self.stashIconHighlightLayer.colors = @[
+        (id)[[UIColor whiteColor] colorWithAlphaComponent:0.42].CGColor,
+        (id)[tintColor colorWithAlphaComponent:0.18].CGColor,
+        (id)[[UIColor blackColor] colorWithAlphaComponent:0.10].CGColor
+    ];
+    self.stashIconHighlightLayer.locations = @[@0.0, @0.48, @1.0];
+
+    self.appIconMiniView.frame = CGRectInset(bounds, kCV3StashIconInset, kCV3StashIconInset);
+    self.appIconMiniView.layer.cornerRadius = 10.0;
+    self.appIconMiniView.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.30].CGColor;
+    self.appIconMiniView.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;
+
+    self.stashGrabber.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:backdropFrame cornerRadius:cornerRadius].CGPath;
+    [self.stashGrabber bringSubviewToFront:self.appIconMiniView];
 }
 
 - (void)updateAdaptiveColor {
@@ -2507,6 +2570,7 @@ void CV3ToggleExposeMode(void) {
             if (self.largeSplashIcon) {
                 self.largeSplashIcon.image = icon;
             }
+            [self updateStashIconAppearance];
             [self updateResizeHandleAppearance];
             [self updateFloatingHomeBarAppearance];
         });
