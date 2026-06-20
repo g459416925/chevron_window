@@ -1173,15 +1173,32 @@ static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
 
 static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent *event) {
     if (![selfWindow isKindOfClass:[CV3FloatingAppWindow class]]) return NO;
-    
-    if (CGRectContainsPoint(selfWindow.bounds, point)) return YES;
-    
+
     CV3FloatingAppWindow *floatingWindow = (CV3FloatingAppWindow *)selfWindow;
-    if (floatingWindow.rootTransformContainer &&
-        CGRectContainsPoint(floatingWindow.rootTransformContainer.frame, point)) {
-        return YES;
+    if (floatingWindow.hidden || floatingWindow.alpha < 0.01 || floatingWindow.isClosing) return NO;
+
+    if (floatingWindow.isStashed) {
+        return CGRectContainsPoint(selfWindow.bounds, point);
     }
-    
+
+    if (floatingWindow.homeBarView && !floatingWindow.homeBarView.hidden && floatingWindow.homeBarView.alpha > 0.01) {
+        CGRect homeBarFrame = CGRectInset([floatingWindow convertRect:floatingWindow.homeBarView.bounds
+                                                              fromView:floatingWindow.homeBarView],
+                                          -18.0,
+                                          -18.0);
+        if (CGRectContainsPoint(homeBarFrame, point)) return YES;
+    }
+
+    if (floatingWindow.stashGrabber.alpha > 0.5) {
+        CGPoint pInGrabber = [floatingWindow convertPoint:point toView:floatingWindow.stashGrabber];
+        if ([floatingWindow.stashGrabber pointInside:pInGrabber withEvent:event]) return YES;
+    }
+
+    if (floatingWindow.rootTransformContainer && !floatingWindow.rootTransformContainer.hidden && floatingWindow.rootTransformContainer.alpha > 0.01) {
+        CGPoint pInRoot = [floatingWindow convertPoint:point toView:floatingWindow.rootTransformContainer];
+        if ([floatingWindow.rootTransformContainer pointInside:pInRoot withEvent:event]) return YES;
+    }
+
     CGRect bounds = selfWindow.bounds;
     CGFloat expansion = CV3Style.resizeHandleWindowExpansion;
     CGRect resizeExtraHitBox = CGRectMake(bounds.size.width - expansion, bounds.size.height - expansion, expansion * 2, expansion * 2);
