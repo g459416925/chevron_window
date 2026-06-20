@@ -186,7 +186,7 @@ void CV3ToggleExposeMode(void) {
 }
 
 - (UIImage *)snapshotImageForRestoreAnimation {
-    UIView *view = self.appContentWrapper;
+    UIView *view = self.hostContainerProxy ?: self.clippingContainer ?: self.appContentWrapper;
     if (!view || CGRectIsEmpty(view.bounds)) return nil;
 
     UIGraphicsBeginImageContextWithOptions(view.bounds.size, NO, [UIScreen mainScreen].scale);
@@ -2416,7 +2416,8 @@ void CV3ToggleExposeMode(void) {
     stashCenter.y = MIN(MAX(stashCenter.y, minCenterY), maxCenterY);
     CGRect targetFrame = CGRectMake(stashCenter.x - stashHalf, stashCenter.y - stashHalf, kCV3StashIconSize, kCV3StashIconSize);
     CGRect targetFrameInWindow = CGRectOffset(targetFrame, -initialFrame.origin.x, -initialFrame.origin.y);
-    CGRect snapshotStartFrame = [self convertRect:self.appContentWrapper.bounds fromView:self.appContentWrapper];
+    UIView *snapshotSourceView = self.hostContainerProxy ?: self.clippingContainer ?: self.appContentWrapper;
+    CGRect snapshotStartFrame = [self convertRect:snapshotSourceView.bounds fromView:snapshotSourceView];
     self.stashedRestoreSnapshotImage = [self snapshotImageForRestoreAnimation];
     self.stashedRestoreSnapshotOrientation = self.targetOrientation;
     UIImage *genieImage = self.stashedRestoreSnapshotImage;
@@ -3160,7 +3161,8 @@ void CV3ToggleExposeMode(void) {
         self.resizeHandle.alpha = 1.0;
         self.homeBarView.alpha = 1.0;
 
-        CGRect endFrameInWindow = [self convertRect:self.appContentWrapper.bounds fromView:self.appContentWrapper];
+        UIView *snapshotSourceView = self.hostContainerProxy ?: self.clippingContainer ?: self.appContentWrapper;
+        CGRect endFrameInWindow = [self convertRect:snapshotSourceView.bounds fromView:snapshotSourceView];
         CGRect startFrameInWindow = CGRectOffset(iconFrame, -targetFrame.origin.x, -targetFrame.origin.y);
         UIImage *genieImage = self.stashedRestoreSnapshotImage ?: [self snapshotImageForRestoreAnimation];
 
