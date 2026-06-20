@@ -887,6 +887,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 @property (nonatomic, strong) UIVisualEffectView *homeBarBlurView;
 @property (nonatomic, strong) CAGradientLayer *homeBarGlowLayer;
 @property (nonatomic, assign) NSInteger homeBarPlacement;
+@property (nonatomic, assign) NSInteger homeBarResizeStartPlacement;
 @property (nonatomic, strong) UIView *resizeHandle;
 @property (nonatomic, strong) CAShapeLayer *resizeHandleLayer;
 @property (nonatomic, assign) CGSize resizeHandleVisualSize;
