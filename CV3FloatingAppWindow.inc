@@ -82,15 +82,26 @@ void CV3ToggleExposeMode(void) {
         CV3ExitExposeModeSelectingWindow(nil, NO);
     } else {
         if (!floatingWindows || floatingWindows.count == 0) return;
+
+        NSMutableArray *activeWindows = [NSMutableArray array];
+        for (id obj in floatingWindows) {
+            if (![obj isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+            CV3FloatingAppWindow *win = (CV3FloatingAppWindow *)obj;
+            if (!win.isClosing) [activeWindows addObject:win];
+        }
+        if (activeWindows.count < 2) {
+            CV3FloatingAppWindow *onlyWindow = activeWindows.firstObject;
+            if (onlyWindow) [onlyWindow setWindowFocused:YES];
+            return;
+        }
+
         // Enter Exposé
         isGlobalExposeActive = YES;
         
         UIWindowScene *scene = nil;
-        for (id obj in floatingWindows) {
-            if ([obj isKindOfClass:[CV3FloatingAppWindow class]]) {
-                scene = [(CV3FloatingAppWindow *)obj windowScene];
-                if (scene) break;
-            }
+        for (CV3FloatingAppWindow *win in activeWindows) {
+            scene = win.windowScene;
+            if (scene) break;
         }
         
         if (!globalExposeBackdrop) {
@@ -114,7 +125,7 @@ void CV3ToggleExposeMode(void) {
         globalExposeBackdrop.alpha = 0.0;
         globalExposeBackdrop.hidden = NO;
         
-        NSInteger count = floatingWindows.count;
+        NSInteger count = activeWindows.count;
         NSInteger cols = ceil(sqrt((double)count));
         NSInteger rows = ceil((double)count / cols);
         
@@ -130,9 +141,7 @@ void CV3ToggleExposeMode(void) {
             globalExposeBackdrop.alpha = 1.0;
             
             for (NSInteger i=0; i<count; i++) {
-                id obj = floatingWindows[i];
-                if (![obj isKindOfClass:[CV3FloatingAppWindow class]]) continue;
-                CV3FloatingAppWindow *win = (CV3FloatingAppWindow *)obj;
+                CV3FloatingAppWindow *win = activeWindows[i];
                 
                 // 折叠浮窗的控制菜单（如果有展开的话）
                 [win dismissMultitaskingMenu];
