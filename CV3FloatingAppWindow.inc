@@ -761,6 +761,7 @@ void CV3ToggleExposeMode(void) {
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleHomeBarTap:)];
     UILongPressGestureRecognizer *move = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleMoveLongPress:)];
     move.minimumPressDuration = 0.22;
+    move.allowableMovement = 24.0;
     move.delegate = self;
     UIPanGestureRecognizer *resizePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleHomeBarResizePan:)];
     resizePan.delegate = self;
@@ -879,6 +880,55 @@ void CV3ToggleExposeMode(void) {
     return frame;
 }
 
+- (CGPoint)homeBarCommandAxisForPlacement:(NSInteger)placement {
+    switch (placement) {
+        case 1: return CGPointMake(0.0, -1.0);
+        case 2: return CGPointMake(1.0, 0.0);
+        case 3: return CGPointMake(-1.0, 0.0);
+        case 0:
+        default:
+            return CGPointMake(0.0, 1.0);
+    }
+}
+
+- (void)startHomeBarResizeSessionIfNeeded {
+    if (self.isLiveResizing) return;
+
+    UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [gen impactOccurred];
+
+    self.isLiveResizing = YES;
+    self.layer.shadowPath = nil;
+    [self startLiquidMotion];
+    [UIView animateWithDuration:0.2 animations:^{
+        self.layer.shadowOpacity = CV3Style.shadowOpacityUnfocused * 0.5;
+        self.glassBackdrop.effect = nil;
+        self.glassBackdrop.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.2];
+    }];
+
+    if (self.hostView) {
+        self.liveResizeSnapshotView = [self.hostView snapshotViewAfterScreenUpdates:NO];
+        if (self.liveResizeSnapshotView) {
+            self.liveResizeSnapshotView.frame = self.hostContainerProxy.bounds;
+            self.liveResizeSnapshotView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            [self.hostContainerProxy addSubview:self.liveResizeSnapshotView];
+            self.hostView.alpha = 0;
+        }
+    }
+
+    if (self.targetScene) {
+        @try {
+            FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
+            if ([settings respondsToSelector:@selector(setInLiveResize:)]) {
+                [(UIMutableApplicationSceneSettings *)settings setInLiveResize:YES];
+                [self.targetScene updateSettings:settings withTransitionContext:nil];
+            }
+        } @catch (NSException *e) {
+            CV3LogToFile(@"[Critical] Failed to set home bar live resize state: %@", e);
+        }
+    }
+}
+
 - (void)updateFloatingHomeBarAppearance {
     if (!self.homeBarView || !self.homeBarBlurView) return;
 
@@ -981,40 +1031,8 @@ void CV3ToggleExposeMode(void) {
         hasTriggeredTopHaptic = NO;
         hasTriggeredBottomHaptic = NO;
         hasTriggeredSideHaptic = NO;
-
-        UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-        [gen impactOccurred];
-
-        self.isLiveResizing = YES;
-        self.layer.shadowPath = nil;
-        [self startLiquidMotion];
-        [UIView animateWithDuration:0.2 animations:^{
-            self.layer.shadowOpacity = CV3Style.shadowOpacityUnfocused * 0.5;
-            self.glassBackdrop.effect = nil;
-            self.glassBackdrop.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.2];
-        }];
-
-        if (self.hostView) {
-            self.liveResizeSnapshotView = [self.hostView snapshotViewAfterScreenUpdates:NO];
-            if (self.liveResizeSnapshotView) {
-                self.liveResizeSnapshotView.frame = self.hostContainerProxy.bounds;
-                self.liveResizeSnapshotView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-                [self.hostContainerProxy addSubview:self.liveResizeSnapshotView];
-                self.hostView.alpha = 0;
-            }
-        }
-
-        if (self.targetScene) {
-            @try {
-                FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
-                if ([settings respondsToSelector:@selector(setInLiveResize:)]) {
-                    [(UIMutableApplicationSceneSettings *)settings setInLiveResize:YES];
-                    [self.targetScene updateSettings:settings withTransitionContext:nil];
-                }
-            } @catch (NSException *e) {
-                CV3LogToFile(@"[Critical] Failed to set home bar live resize state: %@", e);
-            }
-        }
+        self.homeBarPanMode = 0;
+        self.homeBarCommandProjection = 0.0;
     }
 
     CGPoint translation = [gesture translationInView:nil];
@@ -1034,6 +1052,29 @@ void CV3ToggleExposeMode(void) {
             axis = CGPointMake(1.0, 0.0);
         }
         CGFloat dominantTranslation = translation.x * axis.x + translation.y * axis.y;
+        CGPoint commandAxis = [self homeBarCommandAxisForPlacement:self.homeBarResizeStartPlacement];
+        CGFloat commandTranslation = translation.x * commandAxis.x + translation.y * commandAxis.y;
+
+        if (self.homeBarPanMode == 0) {
+            CGFloat movement = sqrt(translation.x * translation.x + translation.y * translation.y);
+            if (movement < 8.0) return;
+
+            if (fabs(commandTranslation) > fabs(dominantTranslation) * 1.15) {
+                self.homeBarPanMode = 2;
+                self.homeBarCommandProjection = commandTranslation;
+                UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+                [gen impactOccurred];
+                return;
+            }
+
+            self.homeBarPanMode = 1;
+            [self startHomeBarResizeSessionIfNeeded];
+        }
+
+        if (self.homeBarPanMode == 2) {
+            self.homeBarCommandProjection = commandTranslation;
+            return;
+        }
 
         CGFloat initialLogicalWidth = self.initialResizeFrame.size.width;
         CGFloat targetWidth = initialLogicalWidth + dominantTranslation * 0.9;
@@ -1102,6 +1143,35 @@ void CV3ToggleExposeMode(void) {
     if (gesture.state == UIGestureRecognizerStateEnded ||
         gesture.state == UIGestureRecognizerStateCancelled ||
         gesture.state == UIGestureRecognizerStateFailed) {
+        if (self.homeBarPanMode == 2) {
+            CGPoint velocity = [gesture velocityInView:nil];
+            CGPoint commandAxis = [self homeBarCommandAxisForPlacement:self.homeBarResizeStartPlacement];
+            CGFloat commandVelocity = velocity.x * commandAxis.x + velocity.y * commandAxis.y;
+            CGFloat commandProjection = self.homeBarCommandProjection;
+            self.homeBarPanMode = 0;
+            self.homeBarCommandProjection = 0.0;
+
+            if (gesture.state == UIGestureRecognizerStateEnded &&
+                (fabs(commandProjection) > 42.0 || fabs(commandVelocity) > 520.0)) {
+                CGFloat commandSignal = fabs(commandVelocity) > 520.0 ? commandVelocity : commandProjection;
+                [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
+                if (commandSignal > 0.0) {
+                    [self activateHostedAppFullscreenAndClose];
+                } else {
+                    CV3ToggleExposeMode();
+                }
+            }
+            return;
+        }
+
+        if (self.homeBarPanMode == 0 || !self.isLiveResizing) {
+            self.homeBarPanMode = 0;
+            self.homeBarCommandProjection = 0.0;
+            return;
+        }
+
+        self.homeBarPanMode = 0;
+        self.homeBarCommandProjection = 0.0;
         [self stopLiquidMotion];
 
         if (gesture.state != UIGestureRecognizerStateEnded) {
@@ -3180,7 +3250,7 @@ void CV3ToggleExposeMode(void) {
     // 强制要求其他手势（即来自宿主 App 内部的手势）在我们自己的控制手势面前失败
     // 这可以防止拖拽或缩放/位移窗口时，底下的 App 还在疯狂滚动
     if (gestureRecognizer.view == self.homeBarView) {
-        return YES;
+        return NO;
     }
     return NO;
 }
