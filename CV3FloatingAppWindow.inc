@@ -880,17 +880,6 @@ void CV3ToggleExposeMode(void) {
     return frame;
 }
 
-- (CGPoint)homeBarCommandAxisForPlacement:(NSInteger)placement {
-    switch (placement) {
-        case 1: return CGPointMake(0.0, -1.0);
-        case 2: return CGPointMake(1.0, 0.0);
-        case 3: return CGPointMake(-1.0, 0.0);
-        case 0:
-        default:
-            return CGPointMake(0.0, 1.0);
-    }
-}
-
 - (void)startHomeBarResizeSessionIfNeeded {
     if (self.isLiveResizing) return;
 
@@ -1026,6 +1015,30 @@ void CV3ToggleExposeMode(void) {
             axis.y = -axis.y;
         }
         self.homeBarResizeAxis = axis;
+        CGPoint commandAxis = CGPointMake(-axis.y, axis.x);
+        if (self.homeBarView) {
+            UIView *container = self.homeBarView.superview ?: self.appContentWrapper ?: self;
+            CGPoint contentCenter = [container convertPoint:CGPointMake(CGRectGetMidX(container.bounds), CGRectGetMidY(container.bounds)) toView:nil];
+            CGPoint barCenter = [self.homeBarView convertPoint:CGPointMake(CGRectGetMidX(self.homeBarView.bounds), CGRectGetMidY(self.homeBarView.bounds)) toView:nil];
+            commandAxis = CGPointMake(barCenter.x - contentCenter.x, barCenter.y - contentCenter.y);
+            CGFloat commandLength = sqrt(commandAxis.x * commandAxis.x + commandAxis.y * commandAxis.y);
+            if (commandLength > 0.1) {
+                commandAxis.x /= commandLength;
+                commandAxis.y /= commandLength;
+            } else {
+                commandAxis = CGPointMake(-axis.y, axis.x);
+            }
+        }
+        CGFloat dot = commandAxis.x * axis.x + commandAxis.y * axis.y;
+        commandAxis = CGPointMake(commandAxis.x - axis.x * dot, commandAxis.y - axis.y * dot);
+        CGFloat commandAxisLength = sqrt(commandAxis.x * commandAxis.x + commandAxis.y * commandAxis.y);
+        if (commandAxisLength > 0.1) {
+            commandAxis.x /= commandAxisLength;
+            commandAxis.y /= commandAxisLength;
+        } else {
+            commandAxis = CGPointMake(-axis.y, axis.x);
+        }
+        self.homeBarCommandAxis = commandAxis;
         [gesture setTranslation:CGPointZero inView:nil];
         lastHapticOvershoot = 0;
         hasTriggeredTopHaptic = NO;
@@ -1052,7 +1065,11 @@ void CV3ToggleExposeMode(void) {
             axis = CGPointMake(1.0, 0.0);
         }
         CGFloat dominantTranslation = translation.x * axis.x + translation.y * axis.y;
-        CGPoint commandAxis = [self homeBarCommandAxisForPlacement:self.homeBarResizeStartPlacement];
+        CGPoint commandAxis = self.homeBarCommandAxis;
+        CGFloat commandAxisLength = sqrt(commandAxis.x * commandAxis.x + commandAxis.y * commandAxis.y);
+        if (commandAxisLength < 0.1) {
+            commandAxis = CGPointMake(-axis.y, axis.x);
+        }
         CGFloat commandTranslation = translation.x * commandAxis.x + translation.y * commandAxis.y;
 
         if (self.homeBarPanMode == 0) {
@@ -1145,7 +1162,14 @@ void CV3ToggleExposeMode(void) {
         gesture.state == UIGestureRecognizerStateFailed) {
         if (self.homeBarPanMode == 2) {
             CGPoint velocity = [gesture velocityInView:nil];
-            CGPoint commandAxis = [self homeBarCommandAxisForPlacement:self.homeBarResizeStartPlacement];
+            CGPoint commandAxis = self.homeBarCommandAxis;
+            CGFloat commandAxisLength = sqrt(commandAxis.x * commandAxis.x + commandAxis.y * commandAxis.y);
+            if (commandAxisLength < 0.1) {
+                CGPoint axis = self.homeBarResizeAxis;
+                CGFloat axisLength = sqrt(axis.x * axis.x + axis.y * axis.y);
+                if (axisLength < 0.1) axis = CGPointMake(1.0, 0.0);
+                commandAxis = CGPointMake(-axis.y, axis.x);
+            }
             CGFloat commandVelocity = velocity.x * commandAxis.x + velocity.y * commandAxis.y;
             CGFloat commandProjection = self.homeBarCommandProjection;
             self.homeBarPanMode = 0;
