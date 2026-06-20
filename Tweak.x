@@ -958,6 +958,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (void)applyStashedGrabberOrientation;
 - (void)normalizeStashedGrabberLayout;
 - (CGRect)restorableFrameForOrientation:(UIInterfaceOrientation)orientation preferredCenter:(CGPoint)preferredCenter;
+- (CGRect)currentVisualShadowFrame;
 - (void)updateResizeHandleAppearance;
 - (void)createFloatingHomeBarIfNeeded;
 - (void)updateFloatingHomeBarAppearance;
