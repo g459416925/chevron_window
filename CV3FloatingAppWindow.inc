@@ -784,7 +784,7 @@ void CV3ToggleExposeMode(void) {
     UIEdgeInsets safeArea = [self currentSafeAreaInsets];
     CGRect screenBounds = CV3DisplayBoundsForWindow(self);
 
-    NSInteger bestPlacement = 0;
+    NSInteger bestScreenPlacement = 0;
     CGFloat clearances[4] = {
         MAX(0.0, screenBounds.size.height - safeArea.bottom - CGRectGetMaxY(frame)),
         MAX(0.0, CGRectGetMinY(frame) - safeArea.top),
@@ -795,10 +795,35 @@ void CV3ToggleExposeMode(void) {
     for (NSInteger i = 1; i < 4; i++) {
         if (clearances[i] > largestClearance) {
             largestClearance = clearances[i];
-            bestPlacement = i;
+            bestScreenPlacement = i;
         }
     }
-    return bestPlacement;
+
+    UIInterfaceOrientation orientation = self.targetOrientation;
+    if (!CV3IsValidInterfaceOrientation(orientation)) {
+        orientation = CV3TrustedInterfaceOrientation(self.windowScene);
+    }
+
+    // Placement ids are local to appContentWrapper:
+    // 0 bottom, 1 top, 2 right, 3 left. The clearance calculation above is in
+    // screen space, so rotate the selected screen edge back into local space.
+    switch (orientation) {
+        case UIInterfaceOrientationLandscapeLeft: {
+            static const NSInteger map[4] = {3, 2, 0, 1};
+            return map[bestScreenPlacement];
+        }
+        case UIInterfaceOrientationLandscapeRight: {
+            static const NSInteger map[4] = {2, 3, 1, 0};
+            return map[bestScreenPlacement];
+        }
+        case UIInterfaceOrientationPortraitUpsideDown: {
+            static const NSInteger map[4] = {1, 0, 3, 2};
+            return map[bestScreenPlacement];
+        }
+        case UIInterfaceOrientationPortrait:
+        default:
+            return bestScreenPlacement;
+    }
 }
 
 - (void)updateFloatingHomeBarAppearance {
