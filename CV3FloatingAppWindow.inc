@@ -7,6 +7,24 @@ static void CV3CascadeUpdateSovereigntyAssertions(void) {
         }
     }
 }
+static const CGFloat kCV3RotationCascadeStep = 20.0;
+
+static CGRect CV3DisplayBoundsForWindow(UIWindow *window) {
+    if (window.windowScene) {
+        CGRect sceneBounds = window.windowScene.coordinateSpace.bounds;
+        if (!CGRectIsEmpty(sceneBounds)) {
+            return sceneBounds;
+        }
+    }
+    if (window.screen) {
+        CGRect screenBounds = window.screen.bounds;
+        if (!CGRectIsEmpty(screenBounds)) {
+            return screenBounds;
+        }
+    }
+    return [UIScreen mainScreen].bounds;
+}
+
 static BOOL isGlobalExposeActive = NO;
 static UIWindow *globalExposeBackdrop = nil;
 
@@ -183,7 +201,7 @@ void CV3ToggleExposeMode(void) {
     CGPoint oldCenter = self.center;
     CGSize newSize;
     
-    CGRect screenBounds = [UIScreen mainScreen].bounds;
+    CGRect screenBounds = CV3DisplayBoundsForWindow(self);
     CGFloat portraitW = MIN(screenBounds.size.width, screenBounds.size.height);
     CGFloat portraitH = MAX(screenBounds.size.width, screenBounds.size.height);
     CGFloat screenScale = portraitH / portraitW; // 真机物理分辨率长宽比例
@@ -221,14 +239,15 @@ void CV3ToggleExposeMode(void) {
             index = [floatingWindows indexOfObject:self];
             if (index == NSNotFound) index = 0;
         }
-        CGFloat cascade = index * 20.0;
+        CGFloat cascade = index * kCV3RotationCascadeStep;
+        CGRect displayBounds = CV3DisplayBoundsForWindow(self);
         [UIView animateWithDuration:0.55
                               delay:0
              usingSpringWithDamping:0.48 // 果冻物理阻尼系数
               initialSpringVelocity:0.6
                             options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionBeginFromCurrentState
                          animations:^{
-            self.center = CGPointMake([UIScreen mainScreen].bounds.size.width / 2.0 + cascade, [UIScreen mainScreen].bounds.size.height / 2.0 + cascade);
+            self.center = CGPointMake(CGRectGetMidX(displayBounds) + cascade, CGRectGetMidY(displayBounds) + cascade);
             [self clampToScreenBounds];
         } completion:nil];
     }
@@ -722,7 +741,7 @@ void CV3ToggleExposeMode(void) {
 
 - (NSInteger)preferredHomeBarPlacementForScreenFrame:(CGRect)frame {
     UIEdgeInsets safeArea = [self currentSafeAreaInsets];
-    CGRect screenBounds = [UIScreen mainScreen].bounds;
+    CGRect screenBounds = CV3DisplayBoundsForWindow(self);
 
     CGFloat topSpace = CGRectGetMinY(frame) - safeArea.top;
     CGFloat bottomSpace = screenBounds.size.height - safeArea.bottom - CGRectGetMaxY(frame);
@@ -1173,7 +1192,7 @@ void CV3ToggleExposeMode(void) {
     }
     
     if (self) {
-        CGRect screen = [UIScreen mainScreen].bounds;
+        CGRect screen = CV3DisplayBoundsForWindow(self);
         // 始终获取竖屏比例作为基准计算，确保弹出的窗口比例正确
         CGFloat portraitW = MIN(screen.size.width, screen.size.height);
         CGFloat portraitH = MAX(screen.size.width, screen.size.height);
@@ -1785,7 +1804,7 @@ void CV3ToggleExposeMode(void) {
     UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [gen impactOccurred];
 
-    CGRect screen = [UIScreen mainScreen].bounds;
+    CGRect screen = CV3DisplayBoundsForWindow(self);
     BOOL isNearLeft = (self.center.x < screen.size.width / 2.0);
     CGRect initialFrame = self.frame;
     CGFloat targetX = isNearLeft ? 0 : screen.size.width - 44;
@@ -2132,7 +2151,7 @@ void CV3ToggleExposeMode(void) {
     if (self.isStashed) return; // 隐藏状态下跳过钳位，允许 origin.x 超出屏幕
     
     UIEdgeInsets safeArea = [self currentSafeAreaInsets];
-    CGRect screenBounds = [UIScreen mainScreen].bounds;
+    CGRect screenBounds = CV3DisplayBoundsForWindow(self);
     
     CGRect frame = self.frame;
     CGFloat breath = CV3Style.safeAreaBreath;
@@ -2341,7 +2360,7 @@ void CV3ToggleExposeMode(void) {
     static NSTimeInterval lastTime;
     
     CGPoint currentPoint = [gesture locationInView:nil];
-    CGRect screen = [UIScreen mainScreen].bounds;
+    CGRect screen = CV3DisplayBoundsForWindow(self);
     
     if (gesture.state == UIGestureRecognizerStateBegan) {
         CV3LogToFile(@"[MoveGesture] handleMoveLongPress state began. Dismissing multitaskingMenu");
@@ -2530,7 +2549,7 @@ void CV3ToggleExposeMode(void) {
         CGRect iconFrame = self.frame;
         CGRect targetFrame = self.preStashFrame;
         UIEdgeInsets safeArea = [self currentSafeAreaInsets];
-        CGRect screenBounds = [UIScreen mainScreen].bounds;
+        CGRect screenBounds = CV3DisplayBoundsForWindow(self);
         CGFloat breath = CV3Style.safeAreaBreath;
         CGFloat minX = safeArea.left + breath;
         CGFloat minY = safeArea.top + breath;
@@ -2708,7 +2727,7 @@ void CV3ToggleExposeMode(void) {
     if (!self.isStashed) return;
     
     CGPoint translation = [gesture translationInView:nil];
-    CGRect screen = [UIScreen mainScreen].bounds;
+    CGRect screen = CV3DisplayBoundsForWindow(self);
     
     if (gesture.state == UIGestureRecognizerStateBegan) {
         [UIView animateWithDuration:0.2 animations:^{
@@ -2937,7 +2956,7 @@ void CV3ToggleExposeMode(void) {
     CGPoint translation = [gesture translationInView:nil];
     
     if (gesture.state == UIGestureRecognizerStateChanged) {
-        CGRect screenBounds = [UIScreen mainScreen].bounds;
+        CGRect screenBounds = CV3DisplayBoundsForWindow(self);
         CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
         CGFloat longSide = MAX(screenBounds.size.width, screenBounds.size.height);
         CGFloat aspect = longSide / MAX(shortSide, 1.0);
@@ -3055,7 +3074,7 @@ void CV3ToggleExposeMode(void) {
             } completion:nil];
         }
         
-        CGRect screenBounds = [UIScreen mainScreen].bounds;
+        CGRect screenBounds = CV3DisplayBoundsForWindow(self);
         CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
         CGFloat longSide = MAX(screenBounds.size.width, screenBounds.size.height);
         CGFloat aspect = longSide / MAX(shortSide, 1.0);
