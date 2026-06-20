@@ -2204,31 +2204,9 @@ void CV3ToggleExposeMode(void) {
         RBSProcessIdentity *identity = [CV3ClassNamed(@"RBSProcessIdentity") identityForEmbeddedApplicationIdentifier:self.bundleID];
         RBSTarget *target = [CV3ClassNamed(@"RBSTarget") targetWithProcessIdentity:identity];
         
-        // Z-Order 能效调度算法：
-        // 1. 如果窗口被 Stash，直接为 UserInitiated
-        // 2. 如果窗口可见且未 Stash：
-        //    - 如果是 Focused (聚焦窗口) 或处于数组末尾的最顶层 2 个可见窗口之一，为 UserInteractive
-        //    - 其他更底层的窗口降级为 UserInitiated，配合系统能耗优化并防止 CPU 抢占
-        BOOL isTopWindow = YES;
-        if (!self.isStashed && floatingWindows && floatingWindows.count > 2) {
-            NSMutableArray *activeWindows = [NSMutableArray array];
-            for (CV3FloatingAppWindow *win in floatingWindows) {
-                if ([win isKindOfClass:[CV3FloatingAppWindow class]] && !win.isStashed && !win.isClosing) {
-                    [activeWindows addObject:win];
-                }
-            }
-            NSInteger myIdx = [activeWindows indexOfObject:self];
-            if (myIdx != NSNotFound && activeWindows.count - myIdx > 2) {
-                isTopWindow = NO;
-            }
-        }
-
-        NSString *attributeName = @"UserInteractive";
-        if (self.isStashed) {
-            attributeName = @"UserInitiated";
-        } else if (!self.isFocused && !isTopWindow) {
-            attributeName = @"UserInitiated";
-        }
+        // 所有可见分屏都必须维持 UserInteractive。否则 SpringBoard/RunningBoard
+        // 会把非最后聚焦的托管 App 当后台进程降级，表现为画面存在但触控/刷新冻结。
+        NSString *attributeName = self.isStashed ? @"UserInitiated" : @"UserInteractive";
         
         RBSDomainAttribute *attr = [CV3ClassNamed(@"RBSDomainAttribute") attributeWithDomain:@"com.apple.common" name:attributeName];
         
@@ -3384,25 +3362,39 @@ void CV3ToggleExposeMode(void) {
     if (self.homeBarView && !self.homeBarView.hidden && self.homeBarView.alpha > 0.01) {
         CGRect homeBarFrame = CGRectInset([self convertRect:self.homeBarView.bounds fromView:self.homeBarView], -18.0, -18.0);
         if (CGRectContainsPoint(homeBarFrame, point)) {
+            if (!self.isFocused) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self setWindowFocused:YES];
+                });
+            }
             CGPoint pInHomeBar = [self convertPoint:point toView:self.homeBarView];
             UIView *homeBarHit = [self.homeBarView hitTest:pInHomeBar withEvent:event];
             return homeBarHit ?: self.homeBarView;
         }
     }
-    
-    CGRect visibleFrame = [self visiblePortraitContentFrame];
-    if (!CGRectContainsPoint(visibleFrame, point)) return nil;
 
     // 2. 检查侧边 Stash 区域 (仅在 Stashed 时，但此处主要处理 Active 状态)
     if (self.stashGrabber.alpha > 0.5) {
         CGPoint pInGrabber = [self convertPoint:point toView:self.stashGrabber];
         if ([self.stashGrabber pointInside:pInGrabber withEvent:event]) {
+            if (!self.isFocused) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self setWindowFocused:YES];
+                });
+            }
             return self.stashGrabber;
         }
     }
 
     CGPoint pInRoot = [self convertPoint:point toView:self.rootTransformContainer];
     UIView *rootHit = [self.rootTransformContainer hitTest:pInRoot withEvent:event];
+    if (!rootHit && ![self.rootTransformContainer pointInside:pInRoot withEvent:event]) return nil;
+
+    if (!self.isFocused) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self setWindowFocused:YES];
+        });
+    }
     if (rootHit) return rootHit;
 
     UIView *hit = [super hitTest:point withEvent:event];
