@@ -887,10 +887,10 @@ void CV3ToggleExposeMode(void) {
     [gen impactOccurred];
 
     self.isLiveResizing = YES;
-    self.layer.shadowPath = nil;
+    [self visualShadowLayer].shadowPath = nil;
     [self startLiquidMotion];
     [UIView animateWithDuration:0.2 animations:^{
-        self.layer.shadowOpacity = CV3Style.shadowOpacityUnfocused * 0.5;
+        [self visualShadowLayer].shadowOpacity = CV3Style.shadowOpacityUnfocused * 0.5;
         self.glassBackdrop.effect = nil;
         self.glassBackdrop.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.2];
     }];
@@ -1202,7 +1202,7 @@ void CV3ToggleExposeMode(void) {
             self.isLiveResizing = NO;
             CGFloat minEdge = MIN(self.bounds.size.width, self.bounds.size.height);
             CGFloat finalRadius = MAX(CV3Style.adaptiveCornerRadiusMin, MIN(CV3Style.adaptiveCornerRadiusMax, minEdge * CV3Style.adaptiveCornerRadiusRatio));
-            self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:finalRadius].CGPath;
+            [self visualShadowLayer].shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:finalRadius].CGPath;
             [self animateFocusShadow:self.isFocused];
             [UIView animateWithDuration:0.4 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
                 self.glassBackdrop.effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial];
@@ -1292,7 +1292,7 @@ void CV3ToggleExposeMode(void) {
                 self.isLiveResizing = NO;
                 CGFloat minEdge = MIN(self.bounds.size.width, self.bounds.size.height);
                 CGFloat finalRadius = MAX(CV3Style.adaptiveCornerRadiusMin, MIN(CV3Style.adaptiveCornerRadiusMax, minEdge * CV3Style.adaptiveCornerRadiusRatio));
-                self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:finalRadius].CGPath;
+                [self visualShadowLayer].shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:finalRadius].CGPath;
                 [UIView animateWithDuration:0.4 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
                     self.glassBackdrop.effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial];
                     self.glassBackdrop.backgroundColor = [UIColor clearColor];
@@ -1645,10 +1645,10 @@ void CV3ToggleExposeMode(void) {
         self.backgroundColor = [UIColor clearColor];
         self.alpha = 1.0;
         
-        self.layer.shadowColor = [UIColor blackColor].CGColor;
-        self.layer.shadowOffset = CGSizeMake(0, 10);
-        self.layer.shadowOpacity = 0.16;
-        self.layer.shadowRadius = 24.0;
+        [self visualShadowLayer].shadowColor = [UIColor blackColor].CGColor;
+        [self visualShadowLayer].shadowOffset = CGSizeMake(0, 10);
+        [self visualShadowLayer].shadowOpacity = 0.16;
+        [self visualShadowLayer].shadowRadius = 24.0;
         self.layer.cornerRadius = CV3Style.floatingChromeCornerRadius;
         if (@available(iOS 13.0, *)) {
             self.layer.cornerCurve = kCACornerCurveContinuous;
@@ -1665,6 +1665,8 @@ void CV3ToggleExposeMode(void) {
         self.appContentWrapper = [[UIView alloc] initWithFrame:self.rootTransformContainer.bounds];
         self.appContentWrapper.backgroundColor = [UIColor clearColor];
         [self.rootTransformContainer addSubview:self.appContentWrapper];
+        [self clearOuterWindowShadow];
+        [self syncWindowShadowForCurrentState];
 
         [self createFloatingHomeBarIfNeeded];
 
@@ -2057,9 +2059,12 @@ void CV3ToggleExposeMode(void) {
         return;
     }
 
-    [self.layer removeAnimationForKey:@"shadowRadius"];
-    [self.layer removeAnimationForKey:@"shadowOpacity"];
-    [self.layer removeAnimationForKey:@"shadowOffset"];
+    CALayer *shadowLayer = [self visualShadowLayer];
+    [self clearOuterWindowShadow];
+    shadowLayer.shadowColor = [UIColor blackColor].CGColor;
+    [shadowLayer removeAnimationForKey:@"shadowRadius"];
+    [shadowLayer removeAnimationForKey:@"shadowOpacity"];
+    [shadowLayer removeAnimationForKey:@"shadowOffset"];
     
     CGFloat startRadius = focused ? CV3Style.shadowRadiusUnfocused : CV3Style.shadowRadiusFocused;
     CGFloat peakRadius = focused ? CV3Style.shadowRadiusPeak : (CV3Style.shadowRadiusUnfocused - 4.0);
@@ -2078,16 +2083,16 @@ void CV3ToggleExposeMode(void) {
     radiusAnim.keyTimes = @[@0.0, @0.4, @1.0];
     radiusAnim.duration = CV3Style.durationMedium;
     radiusAnim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-    [self.layer addAnimation:radiusAnim forKey:@"shadowRadius"];
-    self.layer.shadowRadius = endRadius;
+    [shadowLayer addAnimation:radiusAnim forKey:@"shadowRadius"];
+    shadowLayer.shadowRadius = endRadius;
     
     CAKeyframeAnimation *opacityAnim = [CAKeyframeAnimation animationWithKeyPath:@"shadowOpacity"];
     opacityAnim.values = @[@(startOpacity), @(peakOpacity), @(endOpacity)];
     opacityAnim.keyTimes = @[@0.0, @0.4, @1.0];
     opacityAnim.duration = CV3Style.durationMedium;
     opacityAnim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-    [self.layer addAnimation:opacityAnim forKey:@"shadowOpacity"];
-    self.layer.shadowOpacity = endOpacity;
+    [shadowLayer addAnimation:opacityAnim forKey:@"shadowOpacity"];
+    shadowLayer.shadowOpacity = endOpacity;
     
     CAKeyframeAnimation *offsetAnim = [CAKeyframeAnimation animationWithKeyPath:@"shadowOffset"];
     offsetAnim.values = @[
@@ -2098,8 +2103,8 @@ void CV3ToggleExposeMode(void) {
     offsetAnim.keyTimes = @[@0.0, @0.4, @1.0];
     offsetAnim.duration = CV3Style.durationMedium;
     offsetAnim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-    [self.layer addAnimation:offsetAnim forKey:@"shadowOffset"];
-    self.layer.shadowOffset = CGSizeMake(0, endOffsetY);
+    [shadowLayer addAnimation:offsetAnim forKey:@"shadowOffset"];
+    shadowLayer.shadowOffset = CGSizeMake(0, endOffsetY);
 }
 
 - (void)setWindowFocused:(BOOL)focused {
@@ -2249,9 +2254,9 @@ void CV3ToggleExposeMode(void) {
     UIView *minimizeContainer = [[UIView alloc] initWithFrame:snapshotStartFrame];
     minimizeContainer.backgroundColor = [UIColor clearColor];
     minimizeContainer.layer.shadowColor = [UIColor blackColor].CGColor;
-    minimizeContainer.layer.shadowOffset = self.layer.shadowOffset;
-    minimizeContainer.layer.shadowOpacity = MIN(0.14, MAX(0.08, self.layer.shadowOpacity));
-    minimizeContainer.layer.shadowRadius = MIN(18.0, MAX(10.0, self.layer.shadowRadius * 0.65));
+    minimizeContainer.layer.shadowOffset = [self visualShadowLayer].shadowOffset;
+    minimizeContainer.layer.shadowOpacity = MIN(0.14, MAX(0.08, [self visualShadowLayer].shadowOpacity));
+    minimizeContainer.layer.shadowRadius = MIN(18.0, MAX(10.0, [self visualShadowLayer].shadowRadius * 0.65));
     minimizeContainer.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:minimizeContainer.bounds cornerRadius:self.clippingContainer.layer.cornerRadius].CGPath;
     minimizeContainer.layer.shouldRasterize = YES;
     minimizeContainer.layer.rasterizationScale = [UIScreen mainScreen].scale;
@@ -2320,10 +2325,10 @@ void CV3ToggleExposeMode(void) {
     } completion:^(BOOL finished) {
         [minimizeContainer removeFromSuperview];
         self.frame = targetFrame;
-        self.layer.shadowOpacity = 0.0;
-        self.layer.shadowRadius = 0.0;
-        self.layer.shadowOffset = CGSizeZero;
-        self.layer.shadowPath = nil;
+        [self visualShadowLayer].shadowOpacity = 0.0;
+        [self visualShadowLayer].shadowRadius = 0.0;
+        [self visualShadowLayer].shadowOffset = CGSizeZero;
+        [self visualShadowLayer].shadowPath = nil;
         self.appContentWrapper.transform = CGAffineTransformIdentity;
         self.appContentWrapper.alpha = 0.0;
         [self.hostView removeFromSuperview];
@@ -2396,36 +2401,43 @@ void CV3ToggleExposeMode(void) {
     self.rootTransformContainer.transform = transform;
 }
 
+- (CALayer *)visualShadowLayer {
+    return self.appContentWrapper ? self.appContentWrapper.layer : self.layer;
+}
+
+- (void)clearOuterWindowShadow {
+    self.layer.shadowPath = nil;
+    self.layer.shadowOpacity = 0.0;
+    self.layer.shadowRadius = 0.0;
+    self.layer.shadowOffset = CGSizeZero;
+}
+
 - (CGRect)currentVisualShadowFrame {
-    CGRect logicalBounds = self.rootTransformContainer ? self.rootTransformContainer.bounds : self.bounds;
-    CGRect transformedBounds = CGRectApplyAffineTransform(logicalBounds, self.rootTransformContainer ? self.rootTransformContainer.transform : self.baseRotationTransform);
-    CGFloat visualW = fabs(transformedBounds.size.width);
-    CGFloat visualH = fabs(transformedBounds.size.height);
-    return CGRectMake((self.bounds.size.width - visualW) * 0.5,
-                      (self.bounds.size.height - visualH) * 0.5,
-                      visualW,
-                      visualH);
+    return self.appContentWrapper ? self.appContentWrapper.bounds : self.bounds;
 }
 
 - (void)syncWindowShadowForCurrentState {
-    [self.layer removeAnimationForKey:@"shadowRadius"];
-    [self.layer removeAnimationForKey:@"shadowOpacity"];
-    [self.layer removeAnimationForKey:@"shadowOffset"];
+    CALayer *shadowLayer = [self visualShadowLayer];
+    [self clearOuterWindowShadow];
+    [shadowLayer removeAnimationForKey:@"shadowRadius"];
+    [shadowLayer removeAnimationForKey:@"shadowOpacity"];
+    [shadowLayer removeAnimationForKey:@"shadowOffset"];
+    shadowLayer.shadowColor = [UIColor blackColor].CGColor;
 
     if (self.isStashed) {
-        self.layer.shadowPath = nil;
-        self.layer.shadowOpacity = 0.0;
-        self.layer.shadowRadius = 0.0;
-        self.layer.shadowOffset = CGSizeZero;
+        shadowLayer.shadowPath = nil;
+        shadowLayer.shadowOpacity = 0.0;
+        shadowLayer.shadowRadius = 0.0;
+        shadowLayer.shadowOffset = CGSizeZero;
         return;
     }
 
     CGFloat minEdge = MIN(self.bounds.size.width, self.bounds.size.height);
     CGFloat adaptiveRadius = MAX(CV3Style.adaptiveCornerRadiusMin, MIN(CV3Style.adaptiveCornerRadiusMax, minEdge * CV3Style.adaptiveCornerRadiusRatio));
-    self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:adaptiveRadius].CGPath;
-    self.layer.shadowOpacity = self.isFocused ? CV3Style.shadowOpacityFocused : CV3Style.shadowOpacityUnfocused;
-    self.layer.shadowRadius = self.isFocused ? CV3Style.shadowRadiusFocused : CV3Style.shadowRadiusUnfocused;
-    self.layer.shadowOffset = CGSizeMake(0, self.isFocused ? CV3Style.shadowOffsetFocusedY : CV3Style.shadowOffsetUnfocusedY);
+    shadowLayer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:adaptiveRadius].CGPath;
+    shadowLayer.shadowOpacity = self.isFocused ? CV3Style.shadowOpacityFocused : CV3Style.shadowOpacityUnfocused;
+    shadowLayer.shadowRadius = self.isFocused ? CV3Style.shadowRadiusFocused : CV3Style.shadowRadiusUnfocused;
+    shadowLayer.shadowOffset = CGSizeMake(0, self.isFocused ? CV3Style.shadowOffsetFocusedY : CV3Style.shadowOffsetUnfocusedY);
 }
 
 - (void)layoutSubviews {
@@ -2565,7 +2577,7 @@ void CV3ToggleExposeMode(void) {
     }
     
     if (!self.isLiveResizing) {
-        self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:adaptiveRadius].CGPath;
+        [self visualShadowLayer].shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:adaptiveRadius].CGPath;
     }
     
     self.isInLayout = NO;
@@ -2807,10 +2819,10 @@ void CV3ToggleExposeMode(void) {
         
         CGFloat minEdge = MIN(self.bounds.size.width, self.bounds.size.height);
         CGFloat adaptiveRadius = MAX(CV3Style.adaptiveCornerRadiusMin, MIN(CV3Style.adaptiveCornerRadiusMax, minEdge * CV3Style.adaptiveCornerRadiusRatio));
-        self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.bounds cornerRadius:adaptiveRadius].CGPath;
+        [self visualShadowLayer].shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:adaptiveRadius].CGPath;
         [UIView animateWithDuration:0.3 animations:^{
-            self.layer.shadowOpacity = CV3Style.shadowOpacityPeak;
-            self.layer.shadowRadius = CV3Style.shadowRadiusPeak;
+            [self visualShadowLayer].shadowOpacity = CV3Style.shadowOpacityPeak;
+            [self visualShadowLayer].shadowRadius = CV3Style.shadowRadiusPeak;
             [self applyCurrentTransformWithScale:1.05];
         }];
         
@@ -2845,9 +2857,9 @@ void CV3ToggleExposeMode(void) {
         
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
-        self.layer.shadowRadius = CV3Style.shadowRadiusPeak + elevationBoost;
-        self.layer.shadowOpacity = CV3Style.shadowOpacityPeak - elevationBoost * 0.005;
-        self.layer.shadowOffset = CGSizeMake(dx, dy);
+        [self visualShadowLayer].shadowRadius = CV3Style.shadowRadiusPeak + elevationBoost;
+        [self visualShadowLayer].shadowOpacity = CV3Style.shadowOpacityPeak - elevationBoost * 0.005;
+        [self visualShadowLayer].shadowOffset = CGSizeMake(dx, dy);
         [CATransaction commit];
         
         // --- Magnetic Window Alignment ---
@@ -3025,10 +3037,10 @@ void CV3ToggleExposeMode(void) {
         self.resizeHandle.alpha = 0.0;
         self.homeBarView.alpha = 0.0;
         [self syncWindowShadowForCurrentState];
-        self.layer.shadowOpacity = 0.0;
-        self.layer.shadowRadius = 0.0;
-        self.layer.shadowOffset = CGSizeZero;
-        self.layer.shadowPath = nil;
+        [self visualShadowLayer].shadowOpacity = 0.0;
+        [self visualShadowLayer].shadowRadius = 0.0;
+        [self visualShadowLayer].shadowOffset = CGSizeZero;
+        [self visualShadowLayer].shadowPath = nil;
 
         if (!restoreSnapshot) {
             self.appContentWrapper.alpha = 1.0;
@@ -3151,8 +3163,8 @@ void CV3ToggleExposeMode(void) {
     if (gesture.state == UIGestureRecognizerStateBegan) {
         [UIView animateWithDuration:0.2 animations:^{
             [self applyCurrentTransformWithScale:1.0];
-            self.layer.shadowOpacity = 0;
-            self.layer.shadowRadius = 0;
+            [self visualShadowLayer].shadowOpacity = 0;
+            [self visualShadowLayer].shadowRadius = 0;
         }];
         UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
         [gen impactOccurred];
@@ -3163,8 +3175,8 @@ void CV3ToggleExposeMode(void) {
     } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
         [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
             [self applyCurrentTransformWithScale:1.0];
-            self.layer.shadowOpacity = 0;
-            self.layer.shadowRadius = 0;
+            [self visualShadowLayer].shadowOpacity = 0;
+            [self visualShadowLayer].shadowRadius = 0;
             
             // 自由拖动位置：保持在安全区域内，但不强制吸附至侧边
             UIEdgeInsets safeArea = [self currentSafeAreaInsets];
@@ -3306,10 +3318,10 @@ void CV3ToggleExposeMode(void) {
         [gen impactOccurred];
 
         self.isLiveResizing = YES;
-        self.layer.shadowPath = nil;
+        [self visualShadowLayer].shadowPath = nil;
         [self startLiquidMotion];
         [UIView animateWithDuration:0.2 animations:^{
-            self.layer.shadowOpacity = CV3Style.shadowOpacityUnfocused * 0.5;
+            [self visualShadowLayer].shadowOpacity = CV3Style.shadowOpacityUnfocused * 0.5;
             self.glassBackdrop.effect = nil;
             self.glassBackdrop.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.2];
         }];
@@ -3450,7 +3462,7 @@ void CV3ToggleExposeMode(void) {
             self.isLiveResizing = NO;
             CGFloat minEdge = MIN(self.bounds.size.width, self.bounds.size.height);
             CGFloat finalRadius = MAX(CV3Style.adaptiveCornerRadiusMin, MIN(CV3Style.adaptiveCornerRadiusMax, minEdge * CV3Style.adaptiveCornerRadiusRatio));
-            self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.bounds cornerRadius:finalRadius].CGPath;
+            [self visualShadowLayer].shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:finalRadius].CGPath;
             [self animateFocusShadow:self.isFocused];
             
             [UIView animateWithDuration:0.4 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
@@ -3566,7 +3578,7 @@ void CV3ToggleExposeMode(void) {
                 self.isLiveResizing = NO;
                 CGFloat minEdge = MIN(self.bounds.size.width, self.bounds.size.height);
                 CGFloat finalRadius = MAX(CV3Style.adaptiveCornerRadiusMin, MIN(CV3Style.adaptiveCornerRadiusMax, minEdge * CV3Style.adaptiveCornerRadiusRatio));
-                self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.bounds cornerRadius:finalRadius].CGPath;
+                [self visualShadowLayer].shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:finalRadius].CGPath;
                 
                 [UIView animateWithDuration:0.4 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
                     self.glassBackdrop.effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial];
