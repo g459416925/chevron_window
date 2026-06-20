@@ -826,8 +826,23 @@ void CV3ToggleExposeMode(void) {
     }
 }
 
-- (void)homeBarResizeLimitsForAspect:(CGFloat)aspect minWidth:(CGFloat *)minWidth maxWidth:(CGFloat *)maxWidth {
+- (CGRect)orientedDisplayBoundsForCurrentOrientation {
     CGRect screenBounds = CV3DisplayBoundsForWindow(self);
+    CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
+    CGFloat longSide = MAX(screenBounds.size.width, screenBounds.size.height);
+    UIInterfaceOrientation orientation = self.targetOrientation;
+    if (!CV3IsValidInterfaceOrientation(orientation)) {
+        orientation = CV3TrustedInterfaceOrientation(self.windowScene);
+    }
+
+    CGSize orientedSize = UIInterfaceOrientationIsLandscape(orientation)
+        ? CGSizeMake(longSide, shortSide)
+        : CGSizeMake(shortSide, longSide);
+    return CGRectMake(0, 0, orientedSize.width, orientedSize.height);
+}
+
+- (void)homeBarResizeLimitsForAspect:(CGFloat)aspect minWidth:(CGFloat *)minWidth maxWidth:(CGFloat *)maxWidth {
+    CGRect screenBounds = [self orientedDisplayBoundsForCurrentOrientation];
     UIEdgeInsets safeArea = [self currentSafeAreaInsets];
     CGFloat breath = CV3Style.safeAreaBreath;
     CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
@@ -845,7 +860,7 @@ void CV3ToggleExposeMode(void) {
 }
 
 - (CGRect)constrainedFloatingFrameForSize:(CGSize)size preferredCenter:(CGPoint)center {
-    CGRect screenBounds = CV3DisplayBoundsForWindow(self);
+    CGRect screenBounds = [self orientedDisplayBoundsForCurrentOrientation];
     UIEdgeInsets safeArea = [self currentSafeAreaInsets];
     CGFloat breath = CV3Style.safeAreaBreath;
     CGRect frame = CGRectMake(center.x - size.width * 0.5,
@@ -1005,7 +1020,7 @@ void CV3ToggleExposeMode(void) {
     CGPoint translation = [gesture translationInView:nil];
 
     if (gesture.state == UIGestureRecognizerStateChanged) {
-        CGRect screenBounds = CV3DisplayBoundsForWindow(self);
+        CGRect screenBounds = [self orientedDisplayBoundsForCurrentOrientation];
         CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
         CGFloat longSide = MAX(screenBounds.size.width, screenBounds.size.height);
         CGFloat aspect = longSide / MAX(shortSide, 1.0);
@@ -1101,7 +1116,7 @@ void CV3ToggleExposeMode(void) {
             } completion:nil];
         }
 
-        CGRect screenBounds = CV3DisplayBoundsForWindow(self);
+        CGRect screenBounds = [self orientedDisplayBoundsForCurrentOrientation];
         CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
         CGFloat longSide = MAX(screenBounds.size.width, screenBounds.size.height);
         CGFloat aspect = longSide / MAX(shortSide, 1.0);

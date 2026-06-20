@@ -966,6 +966,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (void)updateFloatingHomeBarAppearance;
 - (void)layoutFloatingHomeBarForBounds:(CGRect)bounds;
 - (NSInteger)preferredHomeBarPlacementForScreenFrame:(CGRect)frame;
+- (CGRect)orientedDisplayBoundsForCurrentOrientation;
 - (void)homeBarResizeLimitsForAspect:(CGFloat)aspect minWidth:(CGFloat *)minWidth maxWidth:(CGFloat *)maxWidth;
 - (CGRect)constrainedFloatingFrameForSize:(CGSize)size preferredCenter:(CGPoint)center;
 - (void)handleHomeBarTap:(UITapGestureRecognizer *)gesture;
