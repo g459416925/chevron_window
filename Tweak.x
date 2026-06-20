@@ -943,6 +943,8 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 @property (nonatomic, assign) NSTimeInterval collisionReleaseTime;
 @property (nonatomic, assign) CGFloat collisionReleaseValue;
 @property (nonatomic, assign) NSInteger collisionReleaseAxis;
+@property (nonatomic, strong) UIImage *stashedRestoreSnapshotImage;
+@property (nonatomic, assign) UIInterfaceOrientation stashedRestoreSnapshotOrientation;
 
 + (CMMotionManager *)sharedMotionManager;
 - (void)startLiquidMotion;
@@ -964,6 +966,13 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (void)normalizeStashedGrabberLayout;
 - (CGRect)restorableFrameForOrientation:(UIInterfaceOrientation)orientation preferredCenter:(CGPoint)preferredCenter;
 - (CGRect)currentVisualShadowFrame;
+- (UIImage *)snapshotImageForRestoreAnimation;
+- (void)updateStashedRestoreSnapshotForOrientation:(UIInterfaceOrientation)orientation;
+- (void)animateGenieSurfaceImage:(UIImage *)image
+                      sourceFrame:(CGRect)sourceFrame
+                        iconFrame:(CGRect)iconFrame
+                       presenting:(BOOL)presenting
+                       completion:(void (^)(void))completion;
 - (void)updateResizeHandleAppearance;
 - (void)createFloatingHomeBarIfNeeded;
 - (void)updateFloatingHomeBarAppearance;
