@@ -30,30 +30,56 @@ static CGRect CV3DisplayBoundsForWindow(UIWindow *window) {
 static BOOL isGlobalExposeActive = NO;
 static UIWindow *globalExposeBackdrop = nil;
 
+static void CV3ExitExposeModeSelectingWindow(CV3FloatingAppWindow *selectedWindow, BOOL focusSelected) {
+    if (!isGlobalExposeActive) {
+        if (focusSelected && selectedWindow && !selectedWindow.isClosing) {
+            [selectedWindow setWindowFocused:YES];
+        }
+        return;
+    }
+
+    isGlobalExposeActive = NO;
+    NSArray *windowsSnapshot = [floatingWindows copy];
+    UIWindow *backdrop = globalExposeBackdrop;
+
+    if (focusSelected && selectedWindow && !selectedWindow.isClosing) {
+        [selectedWindow promoteFloatingWindowInZOrder];
+    }
+
+    [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.86 initialSpringVelocity:0.0 options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionAllowUserInteraction animations:^{
+        for (id obj in windowsSnapshot) {
+            if (![obj isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+            CV3FloatingAppWindow *win = (CV3FloatingAppWindow *)obj;
+            if (!win.isClosing && !CGRectIsEmpty(win.preExposeFrame)) {
+                win.transform = win.preExposeTransform;
+                win.frame = win.preExposeFrame;
+            }
+            [win.exposeOverlayView removeFromSuperview];
+            win.exposeOverlayView = nil;
+        }
+        if (backdrop) backdrop.alpha = 0.0;
+    } completion:^(BOOL finished) {
+        for (id obj in windowsSnapshot) {
+            if (![obj isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+            CV3FloatingAppWindow *win = (CV3FloatingAppWindow *)obj;
+            [win.exposeOverlayView removeFromSuperview];
+            win.exposeOverlayView = nil;
+        }
+
+        if (backdrop) {
+            backdrop.hidden = YES;
+            if (globalExposeBackdrop == backdrop) globalExposeBackdrop = nil;
+        }
+
+        if (focusSelected && selectedWindow && !selectedWindow.isClosing) {
+            [selectedWindow setWindowFocused:YES];
+        }
+    }];
+}
+
 void CV3ToggleExposeMode(void) {
     if (isGlobalExposeActive) {
-        // Exit Exposé
-        isGlobalExposeActive = NO;
-        [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.86 initialSpringVelocity:0.0 options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionAllowUserInteraction animations:^{
-            if (floatingWindows) {
-                for (id obj in floatingWindows) {
-                    if (![obj isKindOfClass:[CV3FloatingAppWindow class]]) continue;
-                    CV3FloatingAppWindow *win = (CV3FloatingAppWindow *)obj;
-                    if (!CGRectIsEmpty(win.preExposeFrame)) {
-                        win.transform = win.preExposeTransform;
-                        win.frame = win.preExposeFrame;
-                        [win.exposeOverlayView removeFromSuperview];
-                        win.exposeOverlayView = nil;
-                    }
-                }
-            }
-            if (globalExposeBackdrop) globalExposeBackdrop.alpha = 0.0;
-        } completion:^(BOOL finished) {
-            if (globalExposeBackdrop) {
-                globalExposeBackdrop.hidden = YES;
-                globalExposeBackdrop = nil;
-            }
-        }];
+        CV3ExitExposeModeSelectingWindow(nil, NO);
     } else {
         if (!floatingWindows || floatingWindows.count == 0) return;
         // Enter Exposé
@@ -340,13 +366,11 @@ void CV3ToggleExposeMode(void) {
     return safeArea;
 }
 + (void)handleExposeBackdropTap:(UITapGestureRecognizer *)sender {
-    CV3ToggleExposeMode();
+    CV3ExitExposeModeSelectingWindow(nil, NO);
 }
 
 - (void)handleExposeSelectionTap:(UITapGestureRecognizer *)sender {
-    CV3ToggleExposeMode();
-    // 提升选中的窗口
-    [self setWindowFocused:YES];
+    CV3ExitExposeModeSelectingWindow(self, YES);
 }
 
 - (void)enforcePortraitWindowGeometry {
@@ -1356,6 +1380,7 @@ void CV3ToggleExposeMode(void) {
                 CGFloat commandSignal = fabs(commandVelocity) > 520.0 ? commandVelocity : commandProjection;
                 [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
                 if (commandSignal > 0.0) {
+                    if (isGlobalExposeActive) CV3ExitExposeModeSelectingWindow(nil, NO);
                     [self activateHostedAppFullscreenAndClose];
                 } else {
                     CV3ToggleExposeMode();
@@ -1484,6 +1509,10 @@ void CV3ToggleExposeMode(void) {
 
 - (void)activateHostedAppFullscreenAndClose {
     if (self.isClosing || self.bundleID.length == 0) return;
+
+    if (isGlobalExposeActive) {
+        CV3ExitExposeModeSelectingWindow(nil, NO);
+    }
 
     NSString *bundleID = [self.bundleID copy];
     [self closeWindow];
@@ -1728,6 +1757,9 @@ void CV3ToggleExposeMode(void) {
 
 - (void)handleFullscreenMenuAction:(id)sender {
     [self dismissMultitaskingMenu];
+    if (isGlobalExposeActive) {
+        CV3ExitExposeModeSelectingWindow(self, YES);
+    }
 
     if (self.isFullscreenMode && !CGRectIsEmpty(self.preFullscreenFrame)) {
         CGRect restoreFrame = self.preFullscreenFrame;
