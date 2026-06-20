@@ -955,6 +955,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (void)applyCurrentTransformWithScale:(CGFloat)scale;
 - (void)handleTransitionGhosting;
 - (void)refreshHostViewPresentation;
+- (void)applyStashedGrabberOrientation;
 - (void)normalizeStashedGrabberLayout;
 - (void)updateResizeHandleAppearance;
 - (void)createFloatingHomeBarIfNeeded;
