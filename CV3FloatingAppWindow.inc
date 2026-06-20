@@ -786,23 +786,17 @@ void CV3ToggleExposeMode(void) {
     UIEdgeInsets safeArea = [self currentSafeAreaInsets];
     CGRect screenBounds = CV3DisplayBoundsForWindow(self);
 
-    CGFloat topSpace = CGRectGetMinY(frame) - safeArea.top;
-    CGFloat bottomSpace = screenBounds.size.height - safeArea.bottom - CGRectGetMaxY(frame);
-    CGFloat leftSpace = CGRectGetMinX(frame) - safeArea.left;
-    CGFloat rightSpace = screenBounds.size.width - safeArea.right - CGRectGetMaxX(frame);
-
-    CGFloat scores[4] = {
-        bottomSpace + 24.0,
-        topSpace + 16.0,
-        rightSpace + 8.0,
-        leftSpace + 8.0
-    };
-
     NSInteger bestPlacement = 0;
-    CGFloat bestScore = scores[0];
+    CGFloat clearances[4] = {
+        MAX(0.0, screenBounds.size.height - safeArea.bottom - CGRectGetMaxY(frame)),
+        MAX(0.0, CGRectGetMinY(frame) - safeArea.top),
+        MAX(0.0, screenBounds.size.width - safeArea.right - CGRectGetMaxX(frame)),
+        MAX(0.0, CGRectGetMinX(frame) - safeArea.left)
+    };
+    CGFloat largestClearance = clearances[0];
     for (NSInteger i = 1; i < 4; i++) {
-        if (scores[i] > bestScore) {
-            bestScore = scores[i];
+        if (clearances[i] > largestClearance) {
+            largestClearance = clearances[i];
             bestPlacement = i;
         }
     }
