@@ -888,6 +888,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 @property (nonatomic, strong) CAGradientLayer *homeBarGlowLayer;
 @property (nonatomic, assign) NSInteger homeBarPlacement;
 @property (nonatomic, assign) NSInteger homeBarResizeStartPlacement;
+@property (nonatomic, assign) CGPoint homeBarResizeAxis;
 @property (nonatomic, strong) UIView *resizeHandle;
 @property (nonatomic, strong) CAShapeLayer *resizeHandleLayer;
 @property (nonatomic, assign) CGSize resizeHandleVisualSize;
@@ -965,6 +966,8 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (void)updateFloatingHomeBarAppearance;
 - (void)layoutFloatingHomeBarForBounds:(CGRect)bounds;
 - (NSInteger)preferredHomeBarPlacementForScreenFrame:(CGRect)frame;
+- (void)homeBarResizeLimitsForAspect:(CGFloat)aspect minWidth:(CGFloat *)minWidth maxWidth:(CGFloat *)maxWidth;
+- (CGRect)constrainedFloatingFrameForSize:(CGSize)size preferredCenter:(CGPoint)center;
 - (void)handleHomeBarTap:(UITapGestureRecognizer *)gesture;
 - (void)handleHomeBarResizePan:(UIPanGestureRecognizer *)gesture;
 - (void)activateHostedAppFullscreenAndClose;
