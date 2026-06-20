@@ -878,6 +878,7 @@ void CV3ToggleExposeMode(void) {
         self.isFullscreenMode = NO;
         self.isCompactMode = NO;
         self.initialResizeFrame = self.frame;
+        self.homeBarResizeStartPlacement = self.homeBarPlacement;
         [gesture setTranslation:CGPointZero inView:nil];
         lastHapticOvershoot = 0;
         hasTriggeredTopHaptic = NO;
@@ -930,7 +931,8 @@ void CV3ToggleExposeMode(void) {
         CGFloat maxAllowedWidth = shortSide * 0.75;
 
         CGFloat dominantTranslation = 0.0;
-        if (self.homeBarPlacement == 0 || self.homeBarPlacement == 1) {
+        NSInteger resizePlacement = self.homeBarResizeStartPlacement;
+        if (resizePlacement == 0 || resizePlacement == 1) {
             dominantTranslation = translation.x;
         } else {
             dominantTranslation = -translation.y;
@@ -1002,6 +1004,7 @@ void CV3ToggleExposeMode(void) {
         [CATransaction setDisableActions:YES];
         self.bounds = CGRectMake(0, 0, finalWidth, finalHeight);
         self.center = CGPointMake(CGRectGetMidX(newFrame), CGRectGetMidY(newFrame));
+        [self layoutFloatingHomeBarForBounds:self.appContentWrapper.bounds];
         [CATransaction commit];
         [self syncWindowBoundsToClientAndNotify:NO];
     }
@@ -1056,7 +1059,8 @@ void CV3ToggleExposeMode(void) {
         if (gesture.state == UIGestureRecognizerStateEnded) {
             CGFloat finalWidth = self.bounds.size.width;
             CGPoint velocity = [gesture velocityInView:nil];
-            CGFloat axisVelocity = (self.homeBarPlacement == 0 || self.homeBarPlacement == 1) ? velocity.x : -velocity.y;
+            NSInteger resizePlacement = self.homeBarResizeStartPlacement;
+            CGFloat axisVelocity = (resizePlacement == 0 || resizePlacement == 1) ? velocity.x : -velocity.y;
             if (fabs(axisVelocity) > 300.0) {
                 finalWidth += axisVelocity * 0.015;
             }
@@ -1100,6 +1104,9 @@ void CV3ToggleExposeMode(void) {
             [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.75 initialSpringVelocity:springVelocity options:0 animations:^{
                 self.bounds = CGRectMake(0, 0, snapFrame.size.width, snapFrame.size.height);
                 self.center = CGPointMake(CGRectGetMidX(snapFrame), CGRectGetMidY(snapFrame));
+                [self setNeedsLayout];
+                [self layoutIfNeeded];
+                [self layoutFloatingHomeBarForBounds:self.appContentWrapper.bounds];
             } completion:^(BOOL finished) {
                 self.isLiveResizing = NO;
                 CGFloat minEdge = MIN(self.bounds.size.width, self.bounds.size.height);
