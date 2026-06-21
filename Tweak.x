@@ -1626,17 +1626,6 @@ static void CV3ApplySceneRotationContextToProject(CV3SceneRotationContext contex
     static BOOL isUpdating = NO;
     if (isUpdating || (sharedWindow && self == sharedWindow)) return;
 
-    if (sharedWindow &&
-        sharedWindow.isPanelShowing &&
-        (sharedWindow.isKeyboardVisible || sharedWindow.searchField.isFirstResponder)) {
-        CV3LogToFile(@"[Warning][KeyboardDebug] skip UIWindowLayout while search input active window=%@ scene=%@ keyboardVisible=%d firstResponder=%d",
-                     self,
-                     self.windowScene,
-                     sharedWindow.isKeyboardVisible,
-                     sharedWindow.searchField.isFirstResponder);
-        return;
-    }
-
     // 仅监控处于前台且已激活的窗口场景
     if (self.windowScene && self.windowScene.activationState == UISceneActivationStateForegroundActive) {
 
@@ -1653,6 +1642,19 @@ static void CV3ApplySceneRotationContextToProject(CV3SceneRotationContext contex
         // 如果获取到了无效方向，直接忽略
         if (currentOrientation == UIInterfaceOrientationUnknown || currentOrientation == 0) {
             return;
+        }
+
+        if (sharedWindow && sharedWindow.isPanelShowing && (sharedWindow.isKeyboardVisible || sharedWindow.searchField.isFirstResponder)) {
+            if (currentOrientation != CV3LastTrustedInterfaceOrientation) {
+                CV3LogToFile(@"[Orientation] 物理旋转通知: %ld -> %ld, 正在强制收起键盘以对齐布局", (long)CV3LastTrustedInterfaceOrientation, (long)currentOrientation);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [sharedWindow.searchField resignFirstResponder];
+                    sharedWindow.isKeyboardVisible = NO;
+                });
+            } else {
+                // 方向未发生改变（例如仅键盘弹起），跳过 layout 处理以防止闪烁或坐标重写
+                return;
+            }
         }
 
         isUpdating = YES;
