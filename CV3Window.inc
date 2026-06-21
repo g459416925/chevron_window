@@ -25,6 +25,41 @@ static BOOL CV3WorkspaceObjectMatchesBundleID(id object, NSString *bundleID) {
     return NO;
 }
 
+static NSString *CV3BundleIDFromCandidateObject(id object) {
+    if (!object) return nil;
+
+    if ([object isKindOfClass:[NSString class]]) {
+        NSString *string = (NSString *)object;
+        return [string containsString:@"."] ? string : nil;
+    }
+
+    if ([object isKindOfClass:[NSArray class]] || [object isKindOfClass:[NSSet class]]) {
+        for (id child in object) {
+            NSString *bundleID = CV3BundleIDFromCandidateObject(child);
+            if (bundleID.length > 0) return bundleID;
+        }
+        return nil;
+    }
+
+    NSString *bundleID = CV3BundleIdentifierFromWorkspaceObject(object);
+    if (bundleID.length > 0) return bundleID;
+
+    NSArray<NSString *> *extraSelectors = @[
+        @"leafIdentifier",
+        @"applicationIdentifier",
+        @"applicationBundleID",
+        @"displayIdentifier",
+        @"bundleIdentifierForDisplay"
+    ];
+
+    for (NSString *selectorName in extraSelectors) {
+        NSString *value = CV3InvokeObject(object, NSSelectorFromString(selectorName));
+        if ([value isKindOfClass:[NSString class]] && value.length > 0) return value;
+    }
+
+    return nil;
+}
+
 static BOOL CV3SceneSettingsLookForeground(id settings) {
     if (!settings) return NO;
 
@@ -36,6 +71,9 @@ static NSMutableSet<NSString *> *CV3ObservedForegroundSceneIdentifiers = nil;
 static NSMutableSet<NSString *> *CV3ObservedForegroundBundleIDs = nil;
 static NSString *CV3LastObservedForegroundSceneIdentifier = nil;
 static NSString *CV3LastObservedForegroundBundleID = nil;
+static NSString *CV3LastObservedActiveSceneIdentifier = nil;
+static NSString *CV3LastDynamicFrontmostBundleID = nil;
+static NSString *CV3LastDynamicFrontmostSource = nil;
 static NSMutableDictionary<NSString *, NSNumber *> *CV3PanelStateLastDebugLogTimes = nil;
 
 static NSString *CV3ShortDebugString(id object, NSUInteger maxLength) {
@@ -47,6 +85,63 @@ static NSString *CV3ShortDebugString(id object, NSUInteger maxLength) {
     if (string.length == 0) return @"nil";
     if (string.length <= maxLength) return string;
     return [[string substringToIndex:maxLength] stringByAppendingString:@"…"];
+}
+
+static NSString *CV3TryFrontmostSelector(id target, NSString *selectorName, NSString *sourcePrefix) {
+    if (!target || selectorName.length == 0) return nil;
+
+    SEL selector = NSSelectorFromString(selectorName);
+    if (![target respondsToSelector:selector]) return nil;
+
+    id value = CV3InvokeObject(target, selector);
+    NSString *bundleID = CV3BundleIDFromCandidateObject(value);
+    if (bundleID.length > 0) {
+        CV3LastDynamicFrontmostBundleID = bundleID;
+        CV3LastDynamicFrontmostSource = [NSString stringWithFormat:@"%@.%@", sourcePrefix ?: NSStringFromClass([target class]), selectorName];
+        return bundleID;
+    }
+
+    return nil;
+}
+
+static NSString *CV3DynamicFrontmostBundleID(void) {
+    NSArray<NSString *> *selectors = @[
+        @"frontmostApplication",
+        @"foregroundApplication",
+        @"activeApplication",
+        @"displayedApplication",
+        @"applicationCurrentlyDisplayed",
+        @"_accessibilityFrontMostApplication",
+        @"frontMostApp",
+        @"topApplication",
+        @"activeDisplayItem",
+        @"activeDisplayItems"
+    ];
+
+    NSArray<NSDictionary *> *targets = @[
+        @{@"class": @"SBMainWorkspace", @"shared": @"sharedInstance"},
+        @{@"class": @"SBApplicationController", @"shared": @"sharedInstance"},
+        @{@"class": @"SBUIController", @"shared": @"sharedInstance"},
+        @{@"class": @"SBWorkspaceController", @"shared": @"sharedInstance"}
+    ];
+
+    for (NSDictionary *targetInfo in targets) {
+        id target = CV3InvokeObject(CV3ClassNamed(targetInfo[@"class"]), NSSelectorFromString(targetInfo[@"shared"]));
+        for (NSString *selectorName in selectors) {
+            NSString *bundleID = CV3TryFrontmostSelector(target, selectorName, targetInfo[@"class"]);
+            if (bundleID.length > 0) return bundleID;
+        }
+    }
+
+    id springBoard = [UIApplication sharedApplication];
+    for (NSString *selectorName in selectors) {
+        NSString *bundleID = CV3TryFrontmostSelector(springBoard, selectorName, @"SpringBoard");
+        if (bundleID.length > 0) return bundleID;
+    }
+
+    CV3LastDynamicFrontmostBundleID = nil;
+    CV3LastDynamicFrontmostSource = nil;
+    return nil;
 }
 
 static void CV3RecordApplicationForegroundState(NSString *bundleID, BOOL foreground) {
@@ -97,8 +192,39 @@ static void CV3RecordSceneForegroundState(FBScene *scene, id settings, NSString 
     }
 }
 
+static BOOL CV3SceneIdentifierBelongsToFloatingWindow(NSString *identifier) {
+    if (identifier.length == 0 || !floatingWindows) return NO;
+
+    for (CV3FloatingAppWindow *win in [floatingWindows copy]) {
+        if (![win isKindOfClass:[CV3FloatingAppWindow class]] || win.isClosing) continue;
+        if ([identifier containsString:win.bundleID]) return YES;
+    }
+
+    return NO;
+}
+
+static void CV3RecordSceneContentState(FBScene *scene, NSInteger contentState, NSString *reason) {
+    NSString *identifier = nil;
+    @try {
+        identifier = scene.identifier;
+    } @catch (NSException *e) {}
+    if (identifier.length == 0) return;
+
+    if (CV3SceneIdentifierBelongsToFloatingWindow(identifier)) return;
+
+    // contentState 2 is the stable Ready/active state on the versions this tweak targets.
+    if (contentState == 2) {
+        CV3LastObservedActiveSceneIdentifier = identifier;
+        if (sharedWindow && sharedWindow.isPanelShowing) {
+            CV3LogToFile(@"[Warning][PanelStateRecord] FBScene activeContent id=%@ reason=%@", identifier, reason ?: @"Unknown");
+        }
+    }
+}
+
 static BOOL CV3ObservedForegroundMatchesBundleID(NSString *bundleID) {
     if (bundleID.length == 0) return NO;
+
+    if ([CV3LastObservedActiveSceneIdentifier containsString:bundleID]) return YES;
 
     if ([CV3LastObservedForegroundBundleID isEqualToString:bundleID]) return YES;
     if ([CV3ObservedForegroundBundleIDs containsObject:bundleID]) return YES;
@@ -114,6 +240,7 @@ static BOOL CV3ObservedForegroundMatchesBundleID(NSString *bundleID) {
 
 static BOOL CV3ApplicationHasLiveScene(NSString *bundleID) {
     if (bundleID.length == 0) return NO;
+    if (![CV3LastObservedActiveSceneIdentifier containsString:bundleID]) return NO;
 
     @try {
         SBApplication *app = [[CV3ClassNamed(@"SBApplicationController") sharedInstance] applicationWithBundleIdentifier:bundleID];
@@ -186,6 +313,9 @@ static void CV3LogPanelStateDebugForBundleID(NSString *bundleID, CV3AppPanelProt
     BOOL observedSceneMatch = CV3ObservedForegroundMatchesBundleID(bundleID);
     NSString *lastObservedBundle = CV3LastObservedForegroundBundleID ?: @"nil";
     NSString *lastObservedScene = CV3LastObservedForegroundSceneIdentifier ?: @"nil";
+    NSString *lastActiveScene = CV3LastObservedActiveSceneIdentifier ?: @"nil";
+    NSString *dynamicFrontmost = CV3DynamicFrontmostBundleID() ?: @"nil";
+    NSString *dynamicFrontmostSource = CV3LastDynamicFrontmostSource ?: @"nil";
 
     BOOL appExists = NO;
     BOOL appBackgrounded = YES;
@@ -246,11 +376,13 @@ static void CV3LogPanelStateDebugForBundleID(NSString *bundleID, CV3AppPanelProt
         }
     } @catch (NSException *e) {}
 
-    CV3LogToFile(@"[Warning][PanelState] source=%@ target=%@ resolved=%ld currentActive=%@ activeItemClass=%@ activeItemParsed=%@ activeItemDesc=%@ activeItemsCount=%lu activeItemsMatched=%d observedBundleExact=%d observedSceneMatch=%d lastObservedBundle=%@ lastObservedScene=%@ appExists=%d appBackgrounded=%d appSuspended=%d mainSceneID=%@ mainSceneForeground=%d mainSceneSettingsForeground=%d mainSceneSettingsBackgrounded=%d fbSceneCount=%lu fbSceneMatched=%d matchedFBSceneID=%@ matchedFBSceneForeground=%d matchedFBSceneSettingsForeground=%d matchedFBSceneSettingsBackgrounded=%d",
+    CV3LogToFile(@"[Warning][PanelState] source=%@ target=%@ resolved=%ld currentActive=%@ dynamicFrontmost=%@ dynamicFrontmostSource=%@ activeItemClass=%@ activeItemParsed=%@ activeItemDesc=%@ activeItemsCount=%lu activeItemsMatched=%d observedBundleExact=%d observedSceneMatch=%d lastObservedBundle=%@ lastObservedScene=%@ lastActiveScene=%@ appExists=%d appBackgrounded=%d appSuspended=%d mainSceneID=%@ mainSceneForeground=%d mainSceneSettingsForeground=%d mainSceneSettingsBackgrounded=%d fbSceneCount=%lu fbSceneMatched=%d matchedFBSceneID=%@ matchedFBSceneForeground=%d matchedFBSceneSettingsForeground=%d matchedFBSceneSettingsBackgrounded=%d",
                  source ?: @"Unknown",
                  bundleID,
                  (long)resolvedState,
                  currentActive ?: @"nil",
+                 dynamicFrontmost,
+                 dynamicFrontmostSource,
                  activeItemClass,
                  activeItemParsed,
                  activeItemDesc,
@@ -260,6 +392,7 @@ static void CV3LogPanelStateDebugForBundleID(NSString *bundleID, CV3AppPanelProt
                  observedSceneMatch,
                  lastObservedBundle,
                  lastObservedScene,
+                 lastActiveScene,
                  appExists,
                  appBackgrounded,
                  appSuspended,
@@ -509,6 +642,13 @@ static CV3AppPanelProtectionState CV3AppPanelProtectionStateForBundleID(NSString
 
     if (CV3FloatingWindowForBundleID(bundleID) != nil) {
         state = CV3AppPanelProtectionStateSplit;
+        CV3LogPanelStateDebugForBundleID(bundleID, state, @"ProtectionState");
+        return state;
+    }
+
+    NSString *dynamicFrontmost = CV3DynamicFrontmostBundleID();
+    if ([dynamicFrontmost isEqualToString:bundleID]) {
+        state = CV3AppPanelProtectionStateForeground;
         CV3LogPanelStateDebugForBundleID(bundleID, state, @"ProtectionState");
         return state;
     }

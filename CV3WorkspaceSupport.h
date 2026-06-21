@@ -8,6 +8,8 @@ static NSString *CV3BundleIdentifierFromWorkspaceObject(id object) {
     NSArray *selectors = @[
         @"bundleIdentifier",
         @"applicationBundleIdentifier",
+        @"applicationBundleID",
+        @"displayIdentifier",
         @"bundleID",
         @"identifier"
     ];
@@ -24,6 +26,9 @@ static NSString *CV3BundleIdentifierFromWorkspaceObject(id object) {
         @"displayItem",
         @"sceneHandle",
         @"application",
+        @"app",
+        @"process",
+        @"bundle",
         @"entity"
     ];
 

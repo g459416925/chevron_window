@@ -2514,6 +2514,8 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
 }
 
 - (void)_setContentState:(NSInteger)arg1 {
+    CV3RecordSceneContentState((FBScene *)self, arg1, @"_setContentState");
+
     if (floatingWindows) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if ([self.identifier containsString:win.bundleID] && !win.isClosing) {
