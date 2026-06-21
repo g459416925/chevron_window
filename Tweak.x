@@ -1626,6 +1626,17 @@ static void CV3ApplySceneRotationContextToProject(CV3SceneRotationContext contex
     static BOOL isUpdating = NO;
     if (isUpdating || (sharedWindow && self == sharedWindow)) return;
 
+    if (sharedWindow &&
+        sharedWindow.isPanelShowing &&
+        (sharedWindow.isKeyboardVisible || sharedWindow.searchField.isFirstResponder)) {
+        CV3LogToFile(@"[Warning][KeyboardDebug] skip UIWindowLayout while search input active window=%@ scene=%@ keyboardVisible=%d firstResponder=%d",
+                     self,
+                     self.windowScene,
+                     sharedWindow.isKeyboardVisible,
+                     sharedWindow.searchField.isFirstResponder);
+        return;
+    }
+
     // 仅监控处于前台且已激活的窗口场景
     if (self.windowScene && self.windowScene.activationState == UISceneActivationStateForegroundActive) {
 
@@ -2177,6 +2188,36 @@ static void CV3ApplySceneRotationContextToProject(CV3SceneRotationContext contex
 
 static CV3PassthroughWindow *cv3_keyboardWindow = nil;
 
+static UIWindowScene *CV3KeyboardHostScene(void) {
+    if (@available(iOS 13.0, *)) {
+        if (sharedWindow.windowScene &&
+            sharedWindow.windowScene.activationState == UISceneActivationStateForegroundActive) {
+            return sharedWindow.windowScene;
+        }
+
+        UIWindowScene *fallbackScene = nil;
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+
+            UIWindowScene *windowScene = (UIWindowScene *)scene;
+            NSString *role = windowScene.session.role;
+            if ([role isEqualToString:@"SBWindowSceneSessionRoleSystemAperture"] ||
+                [role isEqualToString:@"SBWindowSceneSessionRoleSystemApertureCurtain"] ||
+                [role isEqualToString:@"UISceneSessionRolePlaceholder"] ||
+                [[role lowercaseString] containsString:@"siri"]) {
+                continue;
+            }
+
+            if (!fallbackScene) fallbackScene = windowScene;
+            if (windowScene.activationState == UISceneActivationStateForegroundActive) {
+                return windowScene;
+            }
+        }
+        return fallbackScene;
+    }
+    return nil;
+}
+
 @interface CV3SnapshotView : UIView
 @end
 @implementation CV3SnapshotView
@@ -2198,29 +2239,90 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
         }
 
         if (isKeyboardLayer) {
+            UIWindowScene *keyboardScene = nil;
+            if (@available(iOS 13.0, *)) {
+                keyboardScene = CV3KeyboardHostScene();
+            }
+
             if (!cv3_keyboardWindow) {
                 if (@available(iOS 15.0, *)) {
-                    UIWindowScene *ws = nil;
-                    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                        if ([scene isKindOfClass:[UIWindowScene class]]) {
-                            ws = (UIWindowScene *)scene;
-                            break;
-                        }
+                    if (keyboardScene) {
+                        cv3_keyboardWindow = [[CV3PassthroughWindow alloc] initWithWindowScene:keyboardScene];
+                    } else {
+                        cv3_keyboardWindow = [[CV3PassthroughWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
                     }
-                    cv3_keyboardWindow = [[CV3PassthroughWindow alloc] initWithWindowScene:ws];
                 } else {
                     cv3_keyboardWindow = [[CV3PassthroughWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
                 }
                 cv3_keyboardWindow.windowLevel = CV3Style.keyboard;
                 cv3_keyboardWindow.backgroundColor = [UIColor clearColor];
                 cv3_keyboardWindow.hidden = NO;
+            } else if (@available(iOS 13.0, *)) {
+                if (keyboardScene && cv3_keyboardWindow.windowScene != keyboardScene) {
+                    cv3_keyboardWindow.hidden = YES;
+                    cv3_keyboardWindow = [[CV3PassthroughWindow alloc] initWithWindowScene:keyboardScene];
+                    cv3_keyboardWindow.windowLevel = CV3Style.keyboard;
+                    cv3_keyboardWindow.backgroundColor = [UIColor clearColor];
+                    cv3_keyboardWindow.hidden = NO;
+                }
             }
+
+            CGRect hostBounds = CGRectZero;
+            if (@available(iOS 13.0, *)) {
+                if (keyboardScene && !CGRectIsEmpty(keyboardScene.coordinateSpace.bounds)) {
+                    hostBounds = keyboardScene.coordinateSpace.bounds;
+                }
+            }
+            if (CGRectIsEmpty(hostBounds)) {
+                hostBounds = [UIScreen mainScreen].bounds;
+            }
+            cv3_keyboardWindow.frame = hostBounds;
+
+            UIInterfaceOrientation orientation = CV3TrustedInterfaceOrientation(keyboardScene);
+            BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
+            CGAffineTransform preservedTransform = subview.transform;
+            CGRect preservedBounds = subview.bounds;
+            CGPoint preservedCenter = subview.center;
+            UIView *previousSuperview = subview.superview;
+            CV3LogToFile(@"[Warning][KeyboardDebug] keyboardLayer found class=%@ hostScene=%@ orientation=%ld isLandscape=%d hostBounds=%@ oldSuperview=%@ oldTransform=%@ oldBounds=%@ oldCenter=%@ window=%@",
+                         NSStringFromClass([subview class]),
+                         keyboardScene,
+                         (long)orientation,
+                         isLandscape,
+                         NSStringFromCGRect(hostBounds),
+                         previousSuperview,
+                         NSStringFromCGAffineTransform(preservedTransform),
+                         NSStringFromCGRect(preservedBounds),
+                         NSStringFromCGPoint(preservedCenter),
+                         cv3_keyboardWindow);
+
+            if (!isLandscape && CGAffineTransformIsIdentity(preservedTransform)) {
+                preservedBounds = CGRectMake(0, 0, hostBounds.size.width, hostBounds.size.height);
+                preservedCenter = CGPointMake(hostBounds.size.width / 2.0, hostBounds.size.height / 2.0);
+            } else if (previousSuperview && previousSuperview != cv3_keyboardWindow) {
+                preservedCenter = [previousSuperview convertPoint:preservedCenter toView:cv3_keyboardWindow];
+                CV3LogToFile(@"[Warning][KeyboardDebug] converted keyboardLayer center=%@ fromSuperview=%@ toWindow=%@",
+                             NSStringFromCGPoint(preservedCenter),
+                             previousSuperview,
+                             cv3_keyboardWindow);
+            }
+
             if (subview.superview != cv3_keyboardWindow) {
                 [subview removeFromSuperview];
                 [cv3_keyboardWindow addSubview:subview];
             }
-            subview.transform = CGAffineTransformIdentity;
-            subview.frame = [UIScreen mainScreen].bounds;
+
+            // In landscape the keyboard host view already carries UIKit's rotation
+            // geometry. Resetting it to identity moves the keyboard off-screen.
+            subview.transform = preservedTransform;
+            subview.bounds = preservedBounds;
+            subview.center = preservedCenter;
+            CV3LogToFile(@"[Warning][KeyboardDebug] keyboardLayer applied transform=%@ bounds=%@ center=%@ superview=%@ windowFrame=%@",
+                         NSStringFromCGAffineTransform(subview.transform),
+                         NSStringFromCGRect(subview.bounds),
+                         NSStringFromCGPoint(subview.center),
+                         subview.superview,
+                         NSStringFromCGRect(cv3_keyboardWindow.frame));
         }
     }
 }
