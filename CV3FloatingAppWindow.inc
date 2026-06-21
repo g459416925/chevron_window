@@ -392,32 +392,40 @@ void CV3ToggleExposeMode(void) {
     if (self.isStashed || self.isClosing) return;
 
     self.transform = CGAffineTransformIdentity;
-    UIInterfaceOrientation orientation = CV3TrustedInterfaceOrientation(self.windowScene);
-    self.targetOrientation = orientation;
-    CGAffineTransform targetRotation = CV3RotationTransformForInterfaceOrientation(orientation);
-    self.baseRotationTransform = targetRotation;
-    self.rootTransformContainer.transform = targetRotation;
+    CV3SceneRotationContext context = CV3MakeSceneRotationContext(self.windowScene);
+    self.targetOrientation = context.orientation;
+    self.baseRotationTransform = context.transform;
+    self.rootTransformContainer.transform = context.transform;
 }
 
 - (void)applyInterfaceOrientation:(UIInterfaceOrientation)orientation force:(BOOL)force {
-    if (!CV3IsValidInterfaceOrientation(orientation) || self.isClosing) return;
+    if (!CV3IsValidInterfaceOrientation(orientation)) return;
 
-    CGAffineTransform targetRotation = CV3RotationTransformForInterfaceOrientation(orientation);
-    BOOL orientationChanged = (self.lastLayoutOrientation != orientation);
-    BOOL rotationChanged = !CGAffineTransformEqualToTransform(self.baseRotationTransform, targetRotation);
-    BOOL targetIsLandscape = UIInterfaceOrientationIsLandscape(orientation);
+    CV3SceneRotationContext context = CV3MakeSceneRotationContext(self.windowScene);
+    context.orientation = orientation;
+    context.isLandscape = UIInterfaceOrientationIsLandscape(orientation);
+    context.transform = CV3RotationTransformForInterfaceOrientation(orientation);
+    [self applySceneRotationContext:context force:force];
+}
 
-    CV3LastTrustedInterfaceOrientation = orientation;
-    self.targetOrientation = orientation;
+- (void)applySceneRotationContext:(CV3SceneRotationContext)context force:(BOOL)force {
+    if (!CV3IsValidInterfaceOrientation(context.orientation) || self.isClosing) return;
+
+    BOOL orientationChanged = (self.lastLayoutOrientation != context.orientation);
+    BOOL rotationChanged = !CGAffineTransformEqualToTransform(self.baseRotationTransform, context.transform);
+    BOOL targetIsLandscape = context.isLandscape;
+
+    CV3LastTrustedInterfaceOrientation = context.orientation;
+    self.targetOrientation = context.orientation;
 
     if (self.isStashed) {
         CGPoint preferredCenter = CGRectIsEmpty(self.preStashFrame) ? self.center : CGPointMake(CGRectGetMidX(self.preStashFrame), CGRectGetMidY(self.preStashFrame));
-        self.preStashFrame = [self restorableFrameForOrientation:orientation preferredCenter:preferredCenter];
+        self.preStashFrame = [self restorableFrameForOrientation:context.orientation preferredCenter:preferredCenter];
         if (orientationChanged || !CV3IsValidInterfaceOrientation(self.stashedRestoreSnapshotOrientation)) {
-            [self updateStashedRestoreSnapshotForOrientation:orientation];
+            [self updateStashedRestoreSnapshotForOrientation:context.orientation];
         }
-        self.baseRotationTransform = targetRotation;
-        self.lastLayoutOrientation = orientation;
+        self.baseRotationTransform = context.transform;
+        self.lastLayoutOrientation = context.orientation;
         self.rootTransformContainer.transform = CGAffineTransformIdentity;
         [self normalizeStashedGrabberLayout];
         return;
@@ -430,7 +438,7 @@ void CV3ToggleExposeMode(void) {
     CGPoint oldCenter = self.center;
     CGSize newSize;
     
-    CGRect screenBounds = CV3DisplayBoundsForWindow(self);
+    CGRect screenBounds = CGRectIsEmpty(context.sceneBounds) ? CV3DisplayBoundsForWindow(self) : context.sceneBounds;
     CGFloat portraitW = MIN(screenBounds.size.width, screenBounds.size.height);
     CGFloat portraitH = MAX(screenBounds.size.width, screenBounds.size.height);
     CGFloat screenScale = portraitH / portraitW; // 真机物理分辨率长宽比例
@@ -456,8 +464,8 @@ void CV3ToggleExposeMode(void) {
     
     self.center = oldCenter;
 
-    self.baseRotationTransform = targetRotation;
-    self.rootTransformContainer.transform = targetRotation;
+    self.baseRotationTransform = context.transform;
+    self.rootTransformContainer.transform = context.transform;
     
     [CATransaction commit];
 
@@ -469,7 +477,7 @@ void CV3ToggleExposeMode(void) {
             if (index == NSNotFound) index = 0;
         }
         CGFloat cascade = index * kCV3RotationCascadeStep;
-        CGRect displayBounds = CV3DisplayBoundsForWindow(self);
+        CGRect displayBounds = CGRectIsEmpty(context.sceneBounds) ? CV3DisplayBoundsForWindow(self) : context.sceneBounds;
         [UIView animateWithDuration:0.55
                               delay:0
              usingSpringWithDamping:0.48 // 果冻物理阻尼系数
@@ -481,7 +489,7 @@ void CV3ToggleExposeMode(void) {
         } completion:nil];
     }
 
-    self.lastLayoutOrientation = orientation;
+    self.lastLayoutOrientation = context.orientation;
     [self syncHostedSceneLayoutForce:YES];
     [self setNeedsLayout];
     [self layoutIfNeeded];
@@ -2065,6 +2073,8 @@ void CV3ToggleExposeMode(void) {
             NSString *role = targetScene.session.role ?: @"Unknown";
             CV3LogToFile(@"[Scene] 成功将窗口 (%@) 挂载至主场景: %@ (Role: %@)", self.bundleID, targetScene, role);
             self.windowScene = targetScene;
+            CV3SceneRotationContext context = CV3MakeSceneRotationContext(targetScene);
+            [self applySceneRotationContext:context force:NO];
             [self setHidden:NO];
             [self setNeedsLayout];
             [self layoutIfNeeded];
