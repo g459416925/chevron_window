@@ -212,7 +212,15 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     }
     
     [self.feedback impactOccurred];
-    [self.searchField becomeFirstResponder];
+    BOOL became = [self.searchField becomeFirstResponder];
+    UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+    CV3LogToFile(@"[Warning][KeyboardDebug] doubleTap becomeFirstResponder=%d isFirstResponder=%d orientation=%ld window=%@ windowScene=%@ accessory=%@",
+                 became,
+                 self.searchField.isFirstResponder,
+                 (long)orientation,
+                 self.searchField.window,
+                 self.windowScene,
+                 self.searchField.inputAccessoryView);
 }
 
 // 统一 App 启动逻辑
@@ -337,8 +345,11 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         }
     });
 
-    // 优化：仅在必要时刷新 inputAccessoryView
-    if (!hasSearch) {
+    UIInterfaceOrientation accessoryOrientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+    BOOL accessoryAllowed = !UIInterfaceOrientationIsLandscape(accessoryOrientation);
+
+    // 优化：仅在必要时刷新 inputAccessoryView。横屏时禁用，避免键盘附件脱离主面板旋转坐标。
+    if (!hasSearch && accessoryAllowed) {
         if (!self.searchField.inputAccessoryView && self.apps.count > 0) {
             NSArray *topApps = [self.apps subarrayWithRange:NSMakeRange(0, MIN(5, self.apps.count))];
             __weak typeof(self) weakSelf = self;
@@ -356,6 +367,25 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     self.noResultsLabel.hidden = (self.filteredApps.count > 0);
 }
 
+- (BOOL)textFieldShouldBeginEditing:(UITextField *)textField {
+    if (textField == self.searchField) {
+        UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+        CGRect searchFrameInWindow = [textField.superview convertRect:textField.frame toView:self];
+        CV3LogToFile(@"[Warning][KeyboardDebug] shouldBegin searchField orientation=%ld isLandscape=%d window=%@ keyWindow=%d hidden=%d alpha=%.2f fieldWindow=%@ frameInWindow=%@ accessory=%@ inputView=%@",
+                     (long)orientation,
+                     UIInterfaceOrientationIsLandscape(orientation),
+                     self,
+                     self.isKeyWindow,
+                     self.hidden,
+                     self.alpha,
+                     textField.window,
+                     NSStringFromCGRect(searchFrameInWindow),
+                     textField.inputAccessoryView,
+                     textField.inputView);
+    }
+    return YES;
+}
+
 - (BOOL)textFieldShouldReturn:(UITextField *)textField {
     if (textField == self.searchField) {
         if (self.filteredApps.count > 0) {
@@ -371,6 +401,14 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 - (void)textFieldDidBeginEditing:(UITextField *)textField {
     if (textField == self.searchField) {
         CV3ExitExposeModeIfNeeded(nil, NO);
+        UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+        CV3LogToFile(@"[Warning][KeyboardDebug] didBegin searchField orientation=%ld isFirstResponder=%d window=%@ keyWindow=%d accessory=%@ inputView=%@",
+                     (long)orientation,
+                     textField.isFirstResponder,
+                     textField.window,
+                     self.isKeyWindow,
+                     textField.inputAccessoryView,
+                     textField.inputView);
         UIView *container = textField.superview;
         
         // 建议2：搜索框液态响应 (Liquid Search Focus)
@@ -429,6 +467,12 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 
 - (void)textFieldDidEndEditing:(UITextField *)textField {
     if (textField == self.searchField) {
+        UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+        CV3LogToFile(@"[Warning][KeyboardDebug] didEnd searchField orientation=%ld isFirstResponder=%d window=%@ keyWindow=%d",
+                     (long)orientation,
+                     textField.isFirstResponder,
+                     textField.window,
+                     self.isKeyWindow);
         UIView *container = textField.superview;
         [container.layer removeAllAnimations];
         [self.searchBackground removeAllAnimations];
@@ -1589,6 +1633,17 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     }
     if (!needsApply) return;
 
+    BOOL orientationChanged = self.targetOrientation != context.orientation;
+    if (orientationChanged) {
+        if (self.searchField.inputAccessoryView) {
+            self.searchField.inputAccessoryView = nil;
+            [self.searchField reloadInputViews];
+        }
+        if (self.searchField.isFirstResponder) {
+            [self.searchField resignFirstResponder];
+        }
+    }
+
     self.targetOrientation = context.orientation;
     self.baseRotationTransform = context.transform;
 
@@ -2371,6 +2426,27 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     CGRect keyboardFrame = [userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
     double duration = [userInfo[UIKeyboardAnimationDurationUserInfoKey] doubleValue];
     UIViewAnimationOptions options = [userInfo[UIKeyboardAnimationCurveUserInfoKey] unsignedIntegerValue] << 16;
+    UIInterfaceOrientation debugOrientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+    CV3LogToFile(@"[Warning][KeyboardDebug] keyboardWillShow orientation=%ld isLandscape=%d frameEnd=%@ duration=%.3f searchFirstResponder=%d windowScene=%@ accessory=%@",
+                 (long)debugOrientation,
+                 UIInterfaceOrientationIsLandscape(debugOrientation),
+                 NSStringFromCGRect(keyboardFrame),
+                 duration,
+                 self.searchField.isFirstResponder,
+                 self.windowScene,
+                 self.searchField.inputAccessoryView);
+
+    if (UIInterfaceOrientationIsLandscape(debugOrientation)) {
+        CV3LogToFile(@"[Warning][KeyboardDebug] skip panel keyboard avoidance in landscape center=%@ keyboardFrame=%@",
+                     NSStringFromCGPoint(self.panelContainer.center),
+                     NSStringFromCGRect(keyboardFrame));
+        if (!self.hasBeenMoved) {
+            [UIView animateWithDuration:duration delay:0 options:options animations:^{
+                self.panelContainer.center = [self calculateTargetCenter];
+            } completion:nil];
+        }
+        return;
+    }
     
     // 建议2：最小化键盘避让 (Minimized Displacement)
     // 不再以面板底部为基准，而是以“搜索框 + 关键结果区”的可见性为基准
@@ -2407,6 +2483,13 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     NSDictionary *userInfo = notification.userInfo;
     double duration = [userInfo[UIKeyboardAnimationDurationUserInfoKey] doubleValue];
     UIViewAnimationOptions options = [userInfo[UIKeyboardAnimationCurveUserInfoKey] unsignedIntegerValue] << 16;
+    CGRect keyboardFrame = [userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
+    UIInterfaceOrientation debugOrientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+    CV3LogToFile(@"[Warning][KeyboardDebug] keyboardWillHide orientation=%ld frameEnd=%@ duration=%.3f searchFirstResponder=%d",
+                 (long)debugOrientation,
+                 NSStringFromCGRect(keyboardFrame),
+                 duration,
+                 self.searchField.isFirstResponder);
     
     [UIView animateWithDuration:duration delay:0 options:options animations:^{
         // 自动回弹至由安全区域决定的目标中心（除非用户手动大幅挪动过）
@@ -2617,6 +2700,13 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         CGPoint pInSearch = [self convertPoint:point toView:searchContainer];
         if (CGRectContainsPoint(searchContainer.bounds, pInSearch)) {
             UIView *hit = [searchContainer hitTest:pInSearch withEvent:e];
+            UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+            CV3LogToFile(@"[Warning][KeyboardDebug] hitTest searchArea point=%@ pInSearch=%@ hit=%@ orientation=%ld fieldWindow=%@",
+                         NSStringFromCGPoint(point),
+                         NSStringFromCGPoint(pInSearch),
+                         hit,
+                         (long)orientation,
+                         self.searchField.window);
             return hit ?: searchContainer;
         }
 
