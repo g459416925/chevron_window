@@ -1733,6 +1733,35 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     self.resizingHandle.center = CGPointMake(bounds.size.width - 20, bounds.size.height - 20);
 }
 
+- (void)applySceneRotationContext:(CV3SceneRotationContext)context force:(BOOL)force {
+    if (!CV3IsValidInterfaceOrientation(context.orientation)) return;
+
+    BOOL currentIsLandscape = self.bounds.size.width > self.bounds.size.height;
+    BOOL needsApply = CV3SceneRotationContextNeedsApply(self.targetOrientation,
+                                                       self.baseRotationTransform,
+                                                       context,
+                                                       force) ||
+                      currentIsLandscape != context.isLandscape;
+    if (!needsApply && !CGRectIsEmpty(context.sceneBounds) && !CGRectEqualToRect(self.frame, context.sceneBounds)) {
+        needsApply = YES;
+    }
+    if (!needsApply) return;
+
+    self.targetOrientation = context.orientation;
+    self.baseRotationTransform = context.transform;
+
+    if (context.scene && self.windowScene != context.scene) {
+        self.windowScene = context.scene;
+    }
+    if (!CGRectIsEmpty(context.sceneBounds) && !CGRectEqualToRect(self.frame, context.sceneBounds)) {
+        self.frame = context.sceneBounds;
+    }
+
+    [self attachToCurrentActiveScene];
+    [self setNeedsLayout];
+    if (force) [self layoutIfNeeded];
+}
+
 - (void)layoutSubviews {
     [super layoutSubviews];
 
@@ -1748,6 +1777,10 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     // 1. 设置触发区域
     self.edgeTriggerView.backgroundColor = [UIColor clearColor];
     UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
+    CV3SceneRotationContext rotationContext = CV3MakeSceneRotationContext(self.windowScene);
+    rotationContext.orientation = orientation;
+    rotationContext.isLandscape = UIInterfaceOrientationIsLandscape(orientation);
+    rotationContext.transform = CV3RotationTransformForInterfaceOrientation(orientation);
 
     switch (orientation) {
         case UIInterfaceOrientationLandscapeLeft:
@@ -1784,7 +1817,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
     CGRect panelBounds = CGRectMake(0, 0, targetW, targetH);    
     // 计算目标旋转
-    CGAffineTransform targetRotation = CV3RotationTransformForInterfaceOrientation(orientation);
+    CGAffineTransform targetRotation = rotationContext.transform;
 
     // 更新基础变换属性
     self.baseRotationTransform = targetRotation;
@@ -2848,6 +2881,13 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
                 // 核心修复：调用 setHidden 触发重写后的压制检查
                 if (self.hidden) {
                     self.hidden = NO;
+                    needsLayoutUpdate = YES;
+                }
+
+                CV3SceneRotationContext context = CV3MakeSceneRotationContext(targetScene);
+                if (CV3SceneRotationContextNeedsApply(self.targetOrientation, self.baseRotationTransform, context, NO)) {
+                    self.targetOrientation = context.orientation;
+                    self.baseRotationTransform = context.transform;
                     needsLayoutUpdate = YES;
                 }
                 
