@@ -29,6 +29,133 @@ static CGRect CV3DisplayBoundsForWindow(UIWindow *window) {
 
 static BOOL isGlobalExposeActive = NO;
 static UIWindow *globalExposeBackdrop = nil;
+static NSArray<CV3FloatingAppWindow *> *globalExposeWindows = nil;
+static CGFloat globalExposeScrollOffset = 0.0;
+static NSInteger globalExposeSelectedIndex = 0;
+static BOOL globalExposeIsLandscape = NO;
+
+static CGFloat CV3ClampCGFloat(CGFloat value, CGFloat minValue, CGFloat maxValue) {
+    if (maxValue < minValue) return minValue;
+    return MAX(minValue, MIN(maxValue, value));
+}
+
+static CGFloat CV3ExposeMaxScrollForWindows(NSArray<CV3FloatingAppWindow *> *windows, CGRect bounds, BOOL landscape) {
+    NSInteger count = windows.count;
+    if (count <= 0 || CGRectIsEmpty(bounds)) return 0.0;
+
+    CGFloat padding = 24.0;
+    if (landscape) {
+        CGFloat cellW = MAX(180.0, (bounds.size.width - padding * 4.0) / 3.0);
+        CGFloat contentW = padding + count * (cellW + padding);
+        return MAX(0.0, contentW - bounds.size.width);
+    }
+
+    NSInteger cols = 2;
+    NSInteger rows = ceil((double)count / (double)cols);
+    CGFloat cellH = MAX(220.0, (bounds.size.height - padding * 3.0) / 2.0);
+    CGFloat contentH = padding + rows * (cellH + padding);
+    return MAX(0.0, contentH - bounds.size.height);
+}
+
+static CGRect CV3ExposeCellFrameForIndex(NSInteger index, NSInteger count, CGRect bounds, BOOL landscape) {
+    CGFloat padding = 24.0;
+    if (landscape) {
+        CGFloat cellW = MAX(180.0, (bounds.size.width - padding * 4.0) / 3.0);
+        CGFloat cellH = MAX(180.0, bounds.size.height - padding * 2.0);
+        return CGRectMake(padding + index * (cellW + padding) - globalExposeScrollOffset,
+                          padding,
+                          cellW,
+                          cellH);
+    }
+
+    NSInteger cols = 2;
+    NSInteger row = index / cols;
+    NSInteger col = index % cols;
+    CGFloat cellW = MAX(140.0, (bounds.size.width - padding * 3.0) / 2.0);
+    CGFloat cellH = MAX(220.0, (bounds.size.height - padding * 3.0) / 2.0);
+    return CGRectMake(padding + col * (cellW + padding),
+                      padding + row * (cellH + padding) - globalExposeScrollOffset,
+                      cellW,
+                      cellH);
+}
+
+static void CV3UpdateExposeSelection(NSInteger selectedIndex) {
+    if (!globalExposeWindows || globalExposeWindows.count == 0) return;
+    globalExposeSelectedIndex = MAX(0, MIN(selectedIndex, (NSInteger)globalExposeWindows.count - 1));
+
+    for (NSInteger i = 0; i < (NSInteger)globalExposeWindows.count; i++) {
+        CV3FloatingAppWindow *win = globalExposeWindows[i];
+        UIView *overlay = win.exposeOverlayView;
+        if (!overlay) continue;
+
+        BOOL selected = (i == globalExposeSelectedIndex);
+        UIColor *focusColor = [UIColor colorWithRed:0.18 green:0.82 blue:1.0 alpha:1.0];
+        overlay.layer.borderWidth = selected ? 3.0 : 1.0;
+        overlay.layer.borderColor = (selected
+                                     ? focusColor
+                                     : [[UIColor whiteColor] colorWithAlphaComponent:0.20]).CGColor;
+        overlay.layer.cornerRadius = MAX(12.0, MIN(24.0, MIN(overlay.bounds.size.width, overlay.bounds.size.height) * 0.035));
+        overlay.backgroundColor = selected ? [focusColor colorWithAlphaComponent:0.08] : [UIColor clearColor];
+    }
+}
+
+static void CV3UpdateExposeSelectionForViewportCenter(void) {
+    if (!globalExposeWindows || globalExposeWindows.count == 0 || !globalExposeBackdrop) return;
+
+    CGRect bounds = globalExposeBackdrop.bounds;
+    CGPoint viewportCenter = CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds));
+    CGFloat bestDistance = CGFLOAT_MAX;
+    NSInteger bestIndex = globalExposeSelectedIndex;
+
+    for (NSInteger i = 0; i < (NSInteger)globalExposeWindows.count; i++) {
+        CGRect cellFrame = CV3ExposeCellFrameForIndex(i, globalExposeWindows.count, bounds, globalExposeIsLandscape);
+        CGPoint center = CGPointMake(CGRectGetMidX(cellFrame), CGRectGetMidY(cellFrame));
+        CGFloat dx = center.x - viewportCenter.x;
+        CGFloat dy = center.y - viewportCenter.y;
+        CGFloat distance = dx * dx + dy * dy;
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            bestIndex = i;
+        }
+    }
+
+    CV3UpdateExposeSelection(bestIndex);
+}
+
+static void CV3LayoutExposeWindowsAnimated(BOOL animated) {
+    if (!globalExposeWindows || globalExposeWindows.count == 0 || !globalExposeBackdrop) return;
+
+    CGRect bounds = globalExposeBackdrop.bounds;
+    globalExposeScrollOffset = CV3ClampCGFloat(globalExposeScrollOffset,
+                                               0.0,
+                                               CV3ExposeMaxScrollForWindows(globalExposeWindows, bounds, globalExposeIsLandscape));
+
+    void (^layoutBlock)(void) = ^{
+        for (NSInteger i = 0; i < (NSInteger)globalExposeWindows.count; i++) {
+            CV3FloatingAppWindow *win = globalExposeWindows[i];
+            if (win.isClosing) continue;
+
+            CGRect cellFrame = CV3ExposeCellFrameForIndex(i, globalExposeWindows.count, bounds, globalExposeIsLandscape);
+            CGFloat scaleX = cellFrame.size.width / MAX(win.bounds.size.width, 1.0);
+            CGFloat scaleY = cellFrame.size.height / MAX(win.bounds.size.height, 1.0);
+            CGFloat scale = MIN(scaleX, scaleY);
+
+            win.transform = CGAffineTransformMakeScale(scale, scale);
+            win.center = CGPointMake(CGRectGetMidX(cellFrame), CGRectGetMidY(cellFrame));
+        }
+    };
+
+    if (animated) {
+        [UIView animateWithDuration:0.28 delay:0 usingSpringWithDamping:0.82 initialSpringVelocity:0.0 options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionAllowUserInteraction animations:layoutBlock completion:nil];
+    } else {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        layoutBlock();
+        [CATransaction commit];
+    }
+
+    CV3UpdateExposeSelection(globalExposeSelectedIndex);
+}
 
 static void CV3ExitExposeModeSelectingWindow(CV3FloatingAppWindow *selectedWindow, BOOL focusSelected) {
     if (!isGlobalExposeActive) {
@@ -41,6 +168,9 @@ static void CV3ExitExposeModeSelectingWindow(CV3FloatingAppWindow *selectedWindo
     isGlobalExposeActive = NO;
     NSArray *windowsSnapshot = [floatingWindows copy];
     UIWindow *backdrop = globalExposeBackdrop;
+    globalExposeWindows = nil;
+    globalExposeScrollOffset = 0.0;
+    globalExposeSelectedIndex = 0;
 
     if (focusSelected && selectedWindow && !selectedWindow.isClosing) {
         [selectedWindow promoteFloatingWindowInZOrder];
@@ -126,27 +256,23 @@ void CV3ToggleExposeMode(void) {
             
             UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:[CV3FloatingAppWindow class] action:@selector(handleExposeBackdropTap:)];
             [globalExposeBackdrop addGestureRecognizer:tap];
+            UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:[CV3FloatingAppWindow class] action:@selector(handleExposeBackdropPan:)];
+            [globalExposeBackdrop addGestureRecognizer:pan];
         }
         
         globalExposeBackdrop.alpha = 0.0;
         globalExposeBackdrop.hidden = NO;
-        
-        NSInteger count = activeWindows.count;
-        NSInteger cols = ceil(sqrt((double)count));
-        NSInteger rows = ceil((double)count / cols);
-        
-        CGRect screenBounds = globalExposeBackdrop.bounds;
-        CGFloat padding = 24.0;
-        CGFloat availableW = screenBounds.size.width - padding * (cols + 1);
-        CGFloat availableH = screenBounds.size.height - padding * (rows + 1);
-        
-        CGFloat cellW = availableW / cols;
-        CGFloat cellH = availableH / rows;
+
+        globalExposeWindows = [activeWindows copy];
+        globalExposeScrollOffset = 0.0;
+        globalExposeSelectedIndex = 0;
+        UIInterfaceOrientation orientation = CV3TrustedInterfaceOrientation(scene);
+        globalExposeIsLandscape = UIInterfaceOrientationIsLandscape(orientation);
         
         [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.75 initialSpringVelocity:0.0 options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionAllowUserInteraction animations:^{
             globalExposeBackdrop.alpha = 1.0;
             
-            for (NSInteger i=0; i<count; i++) {
+            for (NSInteger i=0; i<(NSInteger)activeWindows.count; i++) {
                 CV3FloatingAppWindow *win = activeWindows[i];
                 
                 // 折叠浮窗的控制菜单（如果有展开的话）
@@ -162,23 +288,12 @@ void CV3ToggleExposeMode(void) {
                     win.exposeOverlayView.backgroundColor = [UIColor clearColor];
                     UITapGestureRecognizer *winTap = [[UITapGestureRecognizer alloc] initWithTarget:win action:@selector(handleExposeSelectionTap:)];
                     [win.exposeOverlayView addGestureRecognizer:winTap];
+                    UIPanGestureRecognizer *winPan = [[UIPanGestureRecognizer alloc] initWithTarget:win action:@selector(handleExposeCardPan:)];
+                    [win.exposeOverlayView addGestureRecognizer:winPan];
                     [win addSubview:win.exposeOverlayView];
                 }
-                
-                NSInteger r = i / cols;
-                NSInteger c = i % cols;
-                
-                CGRect cellFrame = CGRectMake(padding + c * (cellW + padding), padding + r * (cellH + padding), cellW, cellH);
-                
-                CGFloat scaleX = cellW / win.bounds.size.width;
-                CGFloat scaleY = cellH / win.bounds.size.height;
-                CGFloat scale = MIN(scaleX, scaleY);
-                
-                CGPoint targetCenter = CGPointMake(CGRectGetMidX(cellFrame), CGRectGetMidY(cellFrame));
-                
-                win.transform = CGAffineTransformMakeScale(scale, scale);
-                win.center = targetCenter;
             }
+            CV3LayoutExposeWindowsAnimated(NO);
         } completion:nil];
     }
 }
@@ -384,8 +499,42 @@ void CV3ToggleExposeMode(void) {
     CV3ExitExposeModeSelectingWindow(nil, NO);
 }
 
++ (void)handleExposeBackdropPan:(UIPanGestureRecognizer *)sender {
+    if (!isGlobalExposeActive || !globalExposeBackdrop) return;
+
+    CGPoint translation = [sender translationInView:globalExposeBackdrop];
+    if (sender.state == UIGestureRecognizerStateChanged) {
+        globalExposeScrollOffset -= globalExposeIsLandscape ? translation.x : translation.y;
+        [sender setTranslation:CGPointZero inView:globalExposeBackdrop];
+        CV3LayoutExposeWindowsAnimated(NO);
+        CV3UpdateExposeSelectionForViewportCenter();
+    } else if (sender.state == UIGestureRecognizerStateEnded ||
+               sender.state == UIGestureRecognizerStateCancelled ||
+               sender.state == UIGestureRecognizerStateFailed) {
+        globalExposeScrollOffset = CV3ClampCGFloat(globalExposeScrollOffset,
+                                                   0.0,
+                                                   CV3ExposeMaxScrollForWindows(globalExposeWindows, globalExposeBackdrop.bounds, globalExposeIsLandscape));
+        CV3LayoutExposeWindowsAnimated(YES);
+        CV3UpdateExposeSelectionForViewportCenter();
+    }
+}
+
 - (void)handleExposeSelectionTap:(UITapGestureRecognizer *)sender {
+    if (!globalExposeWindows || sender.state != UIGestureRecognizerStateEnded) return;
+
+    NSInteger index = [globalExposeWindows indexOfObject:self];
+    if (index == NSNotFound) return;
+
+    if (index != globalExposeSelectedIndex) {
+        CV3UpdateExposeSelection(index);
+        return;
+    }
+
     CV3ExitExposeModeSelectingWindow(self, YES);
+}
+
+- (void)handleExposeCardPan:(UIPanGestureRecognizer *)sender {
+    [CV3FloatingAppWindow handleExposeBackdropPan:sender];
 }
 
 - (void)enforcePortraitWindowGeometry {
