@@ -187,17 +187,6 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         self.appPanel.contentView.backgroundColor = [UIColor clearColor];
         self.appPanel.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:self.isPanelShowing ? 0.18 : 0.12].CGColor;
         self.appPanel.layer.borderWidth = 0.5 / [UIScreen mainScreen].scale;
-        if (self.specularHighlight) {
-            self.specularHighlight.colors = @[
-                (id)[[UIColor whiteColor] colorWithAlphaComponent:0.0].CGColor,
-                (id)[[UIColor whiteColor] colorWithAlphaComponent:self.isPanelShowing ? 0.035 : 0.02].CGColor,
-                (id)[[UIColor whiteColor] colorWithAlphaComponent:0.0].CGColor
-            ];
-        }
-        if (self.innerGlowLayer) {
-            self.innerGlowLayer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:self.isPanelShowing ? 0.20 : 0.14].CGColor;
-            self.innerGlowLayer.borderWidth = 0.3;
-        }
     }
 
     for (UIView *sub in self.categoryBar.subviews) {
@@ -289,15 +278,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     [self filterApps];
 }
 
-// 建议 2：透视穿孔效果 (Holographic Punch-through)
-- (void)updateRefractionEffect {
-    if (!self.isPanelShowing) return;
-    // 使用 CIFilter 模拟光学穿孔效果
-    self.distortionFilter = [CIFilter filterWithName:@"CIDisplacementDistortion"];
-    [self.distortionFilter setValue:[CIImage imageWithColor:[CIColor colorWithRed:0 green:0 blue:0]] forKey:kCIInputImageKey];
-    // 动态调整畸变参数
-    self.refractionView.layer.filters = @[self.distortionFilter];
-}
+
 
 // 建议 2：应用“衰老”效果 (Entropy Archive)
 - (void)applyAgingEffectToCell:(CV3AppCell *)cell withInfo:(CV3AppInfo *)info {
@@ -419,8 +400,6 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         cornerAnim.repeatCount = HUGE_VALF;
         cornerAnim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
         [self.appPanel.layer addAnimation:cornerAnim forKey:@"liquidCorner"];
-        [self.innerGlowLayer addAnimation:cornerAnim forKey:@"liquidCorner"];
-        [self.dispersionContainer.layer addAnimation:cornerAnim forKey:@"liquidCorner"];
 
         // 1. 基础缩放与阴影动画
         [UIView animateWithDuration:0.5 delay:0 options:UIViewAnimationOptionAutoreverse | UIViewAnimationOptionRepeat | UIViewAnimationOptionAllowUserInteraction animations:^{
@@ -471,8 +450,6 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         [container.layer removeAllAnimations];
         [self.searchBackground removeAllAnimations];
         [self.appPanel.layer removeAnimationForKey:@"liquidCorner"];
-        [self.innerGlowLayer removeAnimationForKey:@"liquidCorner"];
-        [self.dispersionContainer.layer removeAnimationForKey:@"liquidCorner"];
 
         [UIView animateWithDuration:0.3 animations:^{
             container.transform = CGAffineTransformIdentity;
@@ -646,8 +623,6 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         self.apps = [NSMutableArray array];
         self.feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
         self.selectionFeedback = [[UISelectionFeedbackGenerator alloc] init];
-        self.motionManager = [[CMMotionManager alloc] init];
-        self.motionManager.deviceMotionUpdateInterval = 1.0 / 120.0;
         
         // 初始化边缘预警层
         self.triggerPreviewLayer = [CAGradientLayer layer];
@@ -752,91 +727,12 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     self.contrastBackdrop.userInteractionEnabled = NO;
     [self.appPanel.contentView addSubview:self.contrastBackdrop];
 
-    // 3. 极致精致感：0.3pt 白色内发光 (Inner Glow)
-    // 这种极细的高亮边框能赋予面板物理实体的“边缘折射”感
-    self.innerGlowLayer = [CALayer layer];
-    self.innerGlowLayer.frame = self.appPanel.bounds;
-    self.innerGlowLayer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.45].CGColor;
-    self.innerGlowLayer.borderWidth = 0.3;
-    self.innerGlowLayer.cornerRadius = CV3Style.cornerRadius;
-    if (@available(iOS 13.0, *)) {
-        self.innerGlowLayer.cornerCurve = kCACornerCurveContinuous;
-    }
-    [self.appPanel.layer addSublayer:self.innerGlowLayer];
 
-    self.specularHighlight = [CAGradientLayer layer];
-    self.specularHighlight.frame = self.appPanel.bounds;
-    self.specularHighlight.colors = @[(id)[[UIColor labelColor] colorWithAlphaComponent:0.0].CGColor, (id)[[UIColor labelColor] colorWithAlphaComponent:0.07].CGColor, (id)[[UIColor labelColor] colorWithAlphaComponent:0.0].CGColor];
-    [self.appPanel.layer addSublayer:self.specularHighlight];
-
-    self.dispersionContainer = [[UIView alloc] initWithFrame:self.appPanel.bounds];
-    self.dispersionContainer.layer.cornerRadius = CV3Style.cornerRadius;
-    if (@available(iOS 13.0, *)) {
-        self.dispersionContainer.layer.cornerCurve = kCACornerCurveContinuous;
-    }
-    self.dispersionContainer.layer.masksToBounds = YES;
-    self.dispersionContainer.userInteractionEnabled = NO;
-    [self.appPanel.contentView addSubview:self.dispersionContainer];
-    
-    self.cyanLayer = [CALayer layer]; 
-    self.cyanLayer.frame = CGRectInset(self.dispersionContainer.bounds, -0.3, -0.3);
-    
-    // 创意：光学折射层 (Negative Lens Effect)
-    self.refractionView = [[UIView alloc] initWithFrame:self.appPanel.bounds];
-    self.refractionView.userInteractionEnabled = NO;
-    self.refractionView.layer.compositingFilter = @"overlayBlendMode";
-    [self.appPanel.contentView addSubview:self.refractionView];
-
-    self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.12].CGColor; 
-    self.cyanLayer.borderWidth = 0.3; 
-    [self.dispersionContainer.layer addSublayer:self.cyanLayer];
-    
-    self.magentaLayer = [CALayer layer]; 
-    self.magentaLayer.frame = CGRectInset(self.dispersionContainer.bounds, 0.3, 0.3); 
-    self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:0.12].CGColor; 
-    self.magentaLayer.borderWidth = 0.3; 
-    [self.dispersionContainer.layer addSublayer:self.magentaLayer];
 
     [self.panelContainer addSubview:self.appPanel];
     [self refreshGlassAccentSurfaces];
 
-    // 终极融合系统：初始化全屏投影层
-    self.projectionView = [[UIView alloc] initWithFrame:self.bounds];
-    self.projectionView.userInteractionEnabled = NO;
-    self.projectionView.layer.compositingFilter = @"plusLighterBlendMode";
-    self.projectionView.alpha = 0.3;
-    [self.rootViewController.view insertSubview:self.projectionView atIndex:0];
 
-    // 建议 1-3：主动交互图层初始化
-    self.trailLayer = [CAShapeLayer layer];
-    self.trailLayer.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.4].CGColor;
-    self.trailLayer.lineWidth = 4.0;
-    self.trailLayer.lineCap = kCALineCapRound;
-    [self.rootViewController.view.layer addSublayer:self.trailLayer];
-    
-    self.lightWaveView = [[UIView alloc] initWithFrame:self.bounds];
-    self.lightWaveView.userInteractionEnabled = NO;
-    self.lightWaveView.backgroundColor = [UIColor clearColor];
-    [self.rootViewController.view addSubview:self.lightWaveView];
-
-    // 建议 1：初始化光纤导光图层 (Fiber-Optic Setup)
-    // 这些光晕位于最底层，用于模拟玻璃内部的导光效果
-    NSArray *glowColors = @[[UIColor colorWithRed:1.00 green:0.37 blue:0.33 alpha:1.0], 
-                           [UIColor colorWithRed:1.00 green:0.75 blue:0.18 alpha:1.0], 
-                           [UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:1.0]];
-    for (int i = 0; i < 3; i++) {
-        CAGradientLayer *glow = [CAGradientLayer layer];
-        glow.frame = CGRectMake(0, 0, 150, 150);
-        glow.type = kCAGradientLayerRadial;
-        glow.colors = @[(id)[glowColors[i] colorWithAlphaComponent:0.08].CGColor, (id)[UIColor clearColor].CGColor];
-        glow.startPoint = CGPointMake(0.5, 0.5);
-        glow.endPoint = CGPointMake(1.0, 1.0);
-        glow.hidden = YES; // 初始隐藏，仅在面板显示时激活
-        [self.appPanel.layer insertSublayer:glow atIndex:0];
-        if (i == 0) self.redGlow = glow;
-        else if (i == 1) self.yellowGlow = glow;
-        else self.greenGlow = glow;
-    }
 
     self.trafficCapsule = [[UIView alloc] initWithFrame:CGRectMake(16, 14, CV3Style.trafficCapsuleW, CV3Style.trafficCapsuleH)];
     self.trafficCapsule.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.08];
@@ -965,33 +861,6 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     [self.collectionView addGestureRecognizer:pinLongPress];
 }
 
-- (void)triggerCollisionImpulse {
-    // 建议 3：Chromatic Collision Impulse (边缘色散碰撞脉冲)
-    // 模拟物理冲击导致的镜头组瞬时偏移
-    [CATransaction begin];
-    [CATransaction setAnimationDuration:0.12];
-    [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut]];
-    
-    // 青色/品红层向相反方向剧烈抖动后回弹
-    CAKeyframeAnimation *cyanAnim = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation"];
-    cyanAnim.values = @[[NSValue valueWithCGPoint:CGPointMake(-4, -4)], [NSValue valueWithCGPoint:CGPointZero]];
-    [self.cyanLayer addAnimation:cyanAnim forKey:@"collision"];
-    
-    CAKeyframeAnimation *magAnim = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation"];
-    magAnim.values = @[[NSValue valueWithCGPoint:CGPointMake(4, 4)], [NSValue valueWithCGPoint:CGPointZero]];
-    [self.magentaLayer addAnimation:magAnim forKey:@"collision"];
-    
-    // 内发光瞬间增强，模拟碰撞火花
-    CAKeyframeAnimation *glowAnim = [CAKeyframeAnimation animationWithKeyPath:@"borderWidth"];
-    glowAnim.values = @[@2.0, @0.3];
-    [self.innerGlowLayer addAnimation:glowAnim forKey:@"collision"];
-    
-    [CATransaction commit];
-    
-    // 触觉反馈：刚性碰撞
-    UIImpactFeedbackGenerator *rigid = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid];
-    [rigid impactOccurredWithIntensity:1.0];
-}
 
 // 建议 2：Magnetic Search Attraction (磁极引力搜索)
 - (void)updateMagneticLayout {
@@ -1173,18 +1042,8 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
                 CGFloat smoothRatio = 0.5 * (1.0 + cos(M_PI * (1.0 - ratio))); 
                 CGFloat scale = 1.0 + (maxScale - 1.0) * smoothRatio;
                 
-                // 建议 1：Dynamic Lean (3D 鱼眼姿态偏移)
-                // 增加 M34 透视感
-                CATransform3D transform = CATransform3DIdentity;
-                transform.m34 = -1.0 / 500.0;
-                
-                // 根据手指偏移量计算旋转角度（最大 25 度）
-                CGFloat angleX = (dy / radius) * (M_PI / 7.0) * smoothRatio;
-                CGFloat angleY = -(dx / radius) * (M_PI / 7.0) * smoothRatio;
-                
-                transform = CATransform3DRotate(transform, angleX, 1, 0, 0);
-                transform = CATransform3DRotate(transform, angleY, 0, 1, 0);
-                transform = CATransform3DScale(transform, scale, scale, 1.0);
+                // 移除 3D 姿态偏转，仅保留 2D 缩放
+                CATransform3D transform = CATransform3DMakeScale(scale, scale, 1.0);
 
                 // 建议 4：Pressure Wavefronts (触控压感波动 - 物理推开效果)
                 // 计算远离手指的推力位移
@@ -1200,11 +1059,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 
                 if ([cell isKindOfClass:[CV3AppCell class]]) {
                     CV3AppCell *appCell = (CV3AppCell *)cell;
-                    appCell.iconHighlight.opacity = smoothRatio * 0.4;
-                    CGFloat offsetX = dx / radius;
-                    CGFloat offsetY = dy / radius;
-                    appCell.iconHighlight.startPoint = CGPointMake(0.5 - offsetX, 0.5 - offsetY);
-                    appCell.iconHighlight.endPoint = CGPointMake(1.0 - offsetX, 1.0 - offsetY);
+                    appCell.iconHighlight.opacity = 0;
                 }
                 [CATransaction commit];
             } else {
@@ -1452,9 +1307,10 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         targetCenter.y = MAX(hH, MIN(b.size.height - hH, targetCenter.y));
 
         // 建议1：触觉反馈深度耦合 (Haptic Coupling)
-        // 如果检测到位置发生了磁吸偏移，触发一次刚性震动和碰撞脉冲 (C3)
+        // 如果检测到位置发生了磁吸偏移，触发一次刚性震动
         if (!CGPointEqualToPoint(currentCenter, targetCenter)) {
-            [self triggerCollisionImpulse];
+            UIImpactFeedbackGenerator *rigid = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid];
+            [rigid impactOccurredWithIntensity:1.0];
         }
 
         [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.6 initialSpringVelocity:1.0 options:0 animations:^{
@@ -1637,11 +1493,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     [CATransaction setDisableActions:YES];
     
     self.contrastBackdrop.frame = self.appPanel.bounds;
-    self.innerGlowLayer.frame = self.appPanel.bounds;
-    self.dispersionContainer.frame = self.appPanel.bounds;
-    self.specularHighlight.frame = self.appPanel.bounds;
-    self.cyanLayer.frame = CGRectInset(self.dispersionContainer.bounds, -0.3, -0.3);
-    self.magentaLayer.frame = CGRectInset(self.dispersionContainer.bounds, 0.3, 0.3);
     
     [CATransaction commit];
 
@@ -1851,11 +1702,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
             self.contrastBackdrop.frame = self.appPanel.bounds;
-            self.innerGlowLayer.frame = self.appPanel.bounds;
-            self.dispersionContainer.frame = self.appPanel.bounds;
-            self.specularHighlight.frame = self.appPanel.bounds;
-            self.cyanLayer.frame = CGRectInset(self.appPanel.bounds, -0.3, -0.3);
-            self.magentaLayer.frame = CGRectInset(self.appPanel.bounds, 0.3, 0.3);
             [CATransaction commit];
 
             [self.collectionView.collectionViewLayout invalidateLayout];
@@ -2133,18 +1979,11 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         [self filterApps];
         self.backgroundColor = [UIColor clearColor];
         self.lastTriggerPoint = point;
-        self.hasCapturedBaseline = NO; // 重置基准姿态捕获标志
         [self loadAppsAsync];
         [self updateTrafficLightsFocus:YES];
         self.panelContainer.hidden = NO; self.panelContainer.center = point;
         
-        // 恢复所有高开销特效图层的显示
-        self.dispersionContainer.hidden = NO;
-        self.cyanLayer.hidden = NO;
-        self.magentaLayer.hidden = NO;
-        self.innerGlowLayer.hidden = NO;
         self.contrastBackdrop.hidden = NO;
-        self.specularHighlight.hidden = NO;
 
         // 预先应用正确的旋转变换和尺寸
         CGAffineTransform initialRotation = CGAffineTransformIdentity;
@@ -2194,10 +2033,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         self.trafficCapsule.frame = CGRectMake(16, 14, CV3Style.trafficCapsuleW, CV3Style.trafficCapsuleH);
         [self updateResizingHandleFrame];
         self.contrastBackdrop.frame = self.appPanel.bounds;
-        self.innerGlowLayer.frame = self.appPanel.bounds;
-        self.specularHighlight.frame = self.appPanel.bounds;
-        self.cyanLayer.frame = CGRectInset(self.appPanel.bounds, -0.3, -0.3);
-        self.magentaLayer.frame = CGRectInset(self.appPanel.bounds, 0.3, 0.3);
         [self refreshGlassAccentSurfaces];
         [self.collectionView.collectionViewLayout invalidateLayout];
 
@@ -2245,7 +2080,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             CV3UpdateAdaptiveTint([self currentActiveBundleID]);
         } completion:^(BOOL f){ 
             self.isAnimating = NO; 
-            [self startLiquidMotion]; 
         }];
     } else {
         // 关键修复：不要同步收起键盘，因为 resignFirstResponder 是重度同步操作，会阻塞动画开始
@@ -2254,7 +2088,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         });
 
         [self updateTrafficLightsFocus:NO];
-        [self stopLiquidMotion];
         [self refreshGlassAccentSurfaces];
         
         // 获取当前的旋转状态
@@ -2264,7 +2097,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             self.backgroundColor = [UIColor clearColor];
             self.panelContainer.alpha = 0; 
             self.panelContainer.layer.shadowOpacity = 0.0;
-            self.panelContainer.center = self.lastTriggerPoint; // 回退到存储的触发点
+            self.panelContainer.center = self.lastTriggerPoint; // 回退 to 存储的触发点
             self.panelContainer.transform = CGAffineTransformScale(currentRotation, 0.5, 0.5);
             
             [CATransaction begin];
@@ -2279,13 +2112,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         } completion:^(BOOL f){ 
             self.isAnimating = NO; 
             self.panelContainer.hidden = YES; 
-            // 显式挂起所有重度开销图层，确保 GPU 零消耗
-            self.dispersionContainer.hidden = YES;
-            self.cyanLayer.hidden = YES;
-            self.magentaLayer.hidden = YES;
-            self.innerGlowLayer.hidden = YES;
             self.contrastBackdrop.hidden = YES;
-            self.specularHighlight.hidden = YES;
         }];
     }
 }
@@ -2301,197 +2128,10 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     }
 }
 
-- (void)startLiquidMotion {
-    if (!self.motionManager.isDeviceMotionAvailable) return;
-
-    // [Geek Advice] Align with 120Hz display refresh rate using CADisplayLink
-    [self.motionManager startDeviceMotionUpdates];
-
-    if (self.liquidDisplayLink) {
-        [self.liquidDisplayLink invalidate];
-    }
-
-    self.liquidDisplayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(updateLiquidMotion:)];
-    [self.liquidDisplayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-}
-
-- (void)updateLiquidMotion:(CADisplayLink *)sender {
-    CMDeviceMotion *m = self.motionManager.deviceMotion;
-    if (!m) return;
-
-    if (!self.hasCapturedBaseline) {
-        self.baseRoll = m.attitude.roll;
-        self.basePitch = m.attitude.pitch;
-        self.hasCapturedBaseline = YES;
-        // 面板显示时激活光效
-        [CATransaction begin]; [CATransaction setDisableActions:YES];
-        self.redGlow.hidden = NO; self.yellowGlow.hidden = NO; self.greenGlow.hidden = NO;
-        [CATransaction commit];
-    }
-
-    CGFloat deltaRoll = m.attitude.roll - self.baseRoll;
-    CGFloat deltaPitch = m.attitude.pitch - self.basePitch;
-
-    [CATransaction begin]; [CATransaction setDisableActions:YES];
-
-    // 建议 1：Fiber-Optic Light Leak (光纤导光实时姿态)
-    // 光束顺着倾斜方向在面板内部流动，具有更高的位移敏感度
-    CGFloat glowShift = 45.0;
-    self.redGlow.position = CGPointMake(40 + deltaRoll * glowShift, 25 + deltaPitch * glowShift);
-    self.yellowGlow.position = CGPointMake(65 + deltaRoll * glowShift, 25 + deltaPitch * glowShift);
-    self.greenGlow.position = CGPointMake(90 + deltaRoll * glowShift, 25 + deltaPitch * glowShift);
-
-    self.specularHighlight.startPoint = CGPointMake(0.5 - deltaRoll*1.5, 0.5 - deltaPitch*1.5);
-    self.specularHighlight.endPoint = CGPointMake(1.5 - deltaRoll*1.5, 1.5 - deltaPitch*1.5);
-
-    CGFloat dx = deltaRoll * 1.2;
-    CGFloat dy = deltaPitch * 1.2;
-    self.cyanLayer.transform = CATransform3DMakeTranslation(-dx, -dy, 0);
-    self.magentaLayer.transform = CATransform3DMakeTranslation(dx, dy, 0);
-
-    // 建议2：视差解耦 (Parallax Decoupling) 2.0 - 多平面深度体系
-    // 核心原理：层级越高（越靠近用户），位移系数越大
-    CGFloat panelDX = deltaRoll * CV3Style.parallaxPanelFactor;
-    CGFloat panelDY = deltaPitch * CV3Style.parallaxPanelFactor;
-    
-    // 核心修复：停止移动整个 appPanel 以避免边缘空白 (The "Gaps" Fix)
-    // 相反，我们移动内部的每一个组件，利用背景模糊层已有的 1.15x 缩放作为安全边距
-    self.appPanel.transform = CGAffineTransformIdentity; 
-
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    for (UIView *subview in self.appPanel.subviews) {
-        if ([NSStringFromClass([subview class]) containsString:@"Backdrop"]) {
-            // 背景层：保持 1.15x 缩放的同时增加位移，由于有 15% 的溢出，位移不会导致露底
-            subview.transform = CGAffineTransformConcat(CGAffineTransformMakeScale(1.15, 1.15), CGAffineTransformMakeTranslation(panelDX, panelDY));
-        }
-    }
-    
-    // 移动内容层 (Content Parallax)
-    CGAffineTransform contentParallax = CGAffineTransformMakeTranslation(panelDX, panelDY);
-    self.searchField.superview.transform = contentParallax;
-    self.categoryBar.transform = contentParallax;
-    self.collectionView.transform = contentParallax;
-    self.noResultsLabel.transform = contentParallax;
-    
-    // 移动特效层 (Effect Layers)
-    self.contrastBackdrop.transform = contentParallax;
-    self.dispersionContainer.transform = contentParallax;
-    self.specularHighlight.affineTransform = contentParallax;
-    [CATransaction commit];
-
-    // 建议 3：Glow & Content Depth (发光与内容深度差)
-    // 内发光层位移略大于面板，创造玻璃边缘的折射感
-    CGFloat glowDX = panelDX * 1.15;
-    CGFloat glowDY = panelDY * 1.15;
-    self.innerGlowLayer.affineTransform = CGAffineTransformMakeTranslation(glowDX, glowDY);
-
-    // 建议 2：Gravity-Aware Icons (重力图标视差)
-    // 遍历可见 cell，应用反向视差，系数设为最高以凸显浮空感
-    NSArray *visibleCells = [self.collectionView visibleCells];
-    for (UICollectionViewCell *cell in visibleCells) {
-        if ([cell isKindOfClass:[CV3AppCell class]]) {
-            // 图标位移系数 3.5x，创造明显的层次差
-            ((CV3AppCell *)cell).iconOffset = CGPointMake(-deltaRoll * 3.5, -deltaPitch * 3.5);
-        }
-    }
-
-    // 装饰件深度视差 (Layered Decoration Parallax) + 惯性衰减 (Inertial Damping)
-    CGFloat targetDecoDX = deltaRoll * CV3Style.parallaxDecoFactor;
-    CGFloat targetDecoDY = deltaPitch * CV3Style.parallaxDecoFactor;
-
-    // 惯性平滑逻辑：使用插值 (Lerp) 实现物理质量感
-    CGFloat oldDecoDX = self.currentDecoDX;
-    CGFloat oldDecoDY = self.currentDecoDY;
-    self.currentDecoDX += (targetDecoDX - self.currentDecoDX) * CV3Style.lerpFactor;
-    self.currentDecoDY += (targetDecoDY - self.currentDecoDY) * CV3Style.lerpFactor;
-
-    // 建议：触觉阻尼 (Haptic Damping Feedback)
-    CGFloat frameDisplacement = hypot(self.currentDecoDX - oldDecoDX, self.currentDecoDY - oldDecoDY);
-    if (frameDisplacement > CV3Style.hapticThreshold) { 
-        static NSTimeInterval lastHapticTime = 0;
-        NSTimeInterval now = CACurrentMediaTime();
-        if (now - lastHapticTime > 0.1) { 
-            [self.selectionFeedback selectionChanged];
-            lastHapticTime = now;
-        }
-    }
-
-    CGAffineTransform decoParallax = CGAffineTransformMakeTranslation(self.currentDecoDX, self.currentDecoDY);
-    self.trafficCapsule.transform = decoParallax;
-    self.resizingHandle.transform = decoParallax;
-
-    // 建议：边缘折射干扰 (Edge Refraction Flicker)
-    CGFloat tilt = sqrt(m.attitude.roll * m.attitude.roll + m.attitude.pitch * m.attitude.pitch);
-    if (tilt > 1.1) { 
-        CGFloat flicker = 0.15 * sin(CACurrentMediaTime() * 18.0); 
-        CGFloat boost = (tilt - 1.1) * 0.6 + flicker;
-
-        self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:MIN(0.6, 0.12 + MAX(0, boost))].CGColor;
-        self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:MIN(0.6, 0.12 + MAX(0, boost))].CGColor;
-        self.innerGlowLayer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:MIN(1.0, 0.45 + MAX(0, boost))].CGColor;
-        self.innerGlowLayer.borderWidth = 0.3 + MAX(0, boost) * 1.5;
-    } else {
-        self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.12].CGColor;
-        self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:0.12].CGColor;
-        self.innerGlowLayer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.45].CGColor;
-        self.innerGlowLayer.borderWidth = 0.3;
-    }
-
-    [CATransaction commit];
-}
-
-- (void)stopLiquidMotion {
-    [self.motionManager stopDeviceMotionUpdates];
-
-    if (self.liquidDisplayLink) {
-        [self.liquidDisplayLink invalidate];
-        self.liquidDisplayLink = nil;
-    }
-
-    [CATransaction begin]; [CATransaction setDisableActions:YES];
-    self.redGlow.hidden = YES; self.yellowGlow.hidden = YES; self.greenGlow.hidden = YES;
-    [CATransaction commit];
-}
-
-// 建议 1：微流体记忆 (Viscous Residue Memory)
-- (void)showTrailingResidueFromPoint:(CGPoint)startPoint toPoint:(CGPoint)endPoint {
-    UIBezierPath *path = [UIBezierPath bezierPath];
-    [path moveToPoint:startPoint];
-    [path addQuadCurveToPoint:endPoint controlPoint:CGPointMake((startPoint.x + endPoint.x)/2, startPoint.y)];
-    self.trailLayer.path = path.CGPath;
-    
-    [UIView animateWithDuration:0.5 animations:^{ self.trailLayer.opacity = 0; } completion:^(BOOL f) {
-        self.trailLayer.path = nil; self.trailLayer.opacity = 1.0;
-    }];
-}
-
-// 建议 2：光照探测器 (Luminous Proximity)
-- (void)emitLightWaveFromPoint:(CGPoint)point {
-    UIView *wave = [[UIView alloc] initWithFrame:CGRectMake(point.x, point.y, 20, 20)];
-    wave.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3];
-    wave.layer.cornerRadius = 10;
-    [self.lightWaveView addSubview:wave];
-    [UIView animateWithDuration:0.8 animations:^{
-        wave.transform = CGAffineTransformMakeScale(20, 20);
-        wave.alpha = 0;
-    } completion:^(BOOL f){ [wave removeFromSuperview]; }];
-}
 
 
 
-// 建议 3：交互黑洞预知系统 (Black Hole Predictive System)
-- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [super touchesBegan:touches withEvent:event];
-    if (!self.isPanelShowing) {
-        UITouch *touch = [touches anyObject];
-        // 探测靠近边界的行为（1cm 距离阈值）
-        if ([touch locationInView:self].x > self.bounds.size.width - 50) {
-            self.isInPredictiveMode = YES;
-            // 移除 panelContainer.hidden = NO 和 alpha 设置
-        }
-    }
-}
+
 
 
 - (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView {
@@ -2717,8 +2357,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         [self.heartbeatTimer invalidate];
         self.heartbeatTimer = nil;
     }
-
-    [self stopLiquidMotion];
 }
 
 - (void)dealloc {
