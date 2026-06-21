@@ -152,6 +152,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     launcherWindow.panelContainer.alpha = 0.0;
     launcherWindow.panelContainer.hidden = YES;
     launcherWindow.panelContainer.layer.shadowOpacity = 0.0;
+    [launcherWindow.searchField resignFirstResponder];
 }
 
 @implementation CV3Window
@@ -1087,6 +1088,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 
 - (void)handleCategoryTap:(UIButton *)sender {
     CV3ExitExposeModeIfNeeded(nil, NO);
+    [self.searchField resignFirstResponder];
     [self.selectionFeedback selectionChanged]; // 模拟物理拨轮的刻度感
     
     // 从标题中解析出原始分类名，如从 "社交 (12)" 解析出 "社交"
@@ -1235,6 +1237,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     
     if (gesture.state == UIGestureRecognizerStateBegan) {
         CV3ExitExposeModeIfNeeded(nil, NO);
+        [self.searchField resignFirstResponder];
         if (location.y > 45.0) { return; }
         self.hasBeenMoved = YES;
         [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.5 initialSpringVelocity:1.0 options:0 animations:^{
@@ -1320,6 +1323,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 - (void)handleResize:(UIPanGestureRecognizer *)gesture {
     if (!gesture || gesture.state == UIGestureRecognizerStateBegan) {
         CV3ExitExposeModeIfNeeded(nil, NO);
+        [self.searchField resignFirstResponder];
     }
     // 增加 resize 锁
     self.isProcessing = YES; 
@@ -2124,6 +2128,10 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
 
 
+
+- (void)scrollViewWillBeginDragging:(UIScrollView *)scrollView {
+    [self.searchField resignFirstResponder];
+}
 
 - (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView {
     [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.6 initialSpringVelocity:0.5 options:0 animations:^{
