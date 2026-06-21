@@ -4045,6 +4045,7 @@ void CV3ToggleExposeMode(void) {
     
     self.windowScene = nil; // Clear scene attachment
     [floatingWindows removeObject:self];
+    [[NSNotificationCenter defaultCenter] postNotificationName:CV3FloatingWindowsDidChangeNotification object:nil];
 
     // 如果没有剩下活跃的分屏窗口，且 Expose 模式处于开启状态，自动退出 Expose 模式
     if (isGlobalExposeActive) {
