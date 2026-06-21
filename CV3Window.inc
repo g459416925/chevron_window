@@ -166,10 +166,10 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 
     launcherWindow.isPanelShowing = NO;
     launcherWindow.isAnimating = NO;
-    launcherWindow.dimmingView.alpha = 0.0;
-    launcherWindow.dimmingView.userInteractionEnabled = NO;
+    launcherWindow.backgroundColor = [UIColor clearColor];
     launcherWindow.panelContainer.alpha = 0.0;
     launcherWindow.panelContainer.hidden = YES;
+    launcherWindow.panelContainer.layer.shadowOpacity = 0.0;
 }
 
 @implementation CV3Window
@@ -177,7 +177,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 - (void)applyBackgroundTint:(UIColor *)color {
     (void)color;
     [UIView animateWithDuration:0.8 animations:^{
-        self.dimmingView.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.15];
+        self.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:CV3Style.maskAlpha];
         [self refreshGlassAccentSurfaces];
     }];
 }
@@ -695,13 +695,8 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         [manager addGestureRecognizer:self.systemEdgePan withType:112];
     } @catch (NSException *e) {}
     
-    self.dimmingView = [[UIView alloc] initWithFrame:bounds];
-    self.dimmingView.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.15];
-    self.dimmingView.alpha = 0;
-    self.dimmingView.userInteractionEnabled = NO; // 初始关闭
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDimmingTap:)];
-    [self.dimmingView addGestureRecognizer:tap];
-    [self.rootViewController.view addSubview:self.dimmingView];
+    [self addGestureRecognizer:tap];
     
     self.bezierContainer = [[UIView alloc] initWithFrame:bounds];
     self.bezierContainer.alpha = 0;
@@ -1806,7 +1801,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     [self.rootViewController.view bringSubviewToFront:self.edgeTriggerView];
 
     // 2. 面板容器
-    self.dimmingView.frame = bounds;
     self.panelContainer.backgroundColor = [UIColor clearColor];
 
     // 动态计算面板尺寸 (使用常量并确保不超出安全区域)
@@ -1923,6 +1917,11 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             subview.transform = CGAffineTransformMakeScale(1.15, 1.15);
         }
     }
+    
+    // 在 layoutSubviews 结尾更新 shadowPath，保证在拖动或 resize 时阴影能同步 bounds 并采用硬件加速
+    if (self.isPanelShowing) {
+        self.panelContainer.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.panelContainer.bounds cornerRadius:CV3Style.cornerRadius].CGPath;
+    }
 }
 
 
@@ -2025,7 +2024,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             [UIView animateWithDuration:0.4 animations:^{
                 self.panelContainer.hidden = YES;
                 self.panelContainer.alpha = 0;
-                self.dimmingView.alpha = 0;
+                self.backgroundColor = [UIColor clearColor];
                 self.isAnimating = NO;
             }];
             
@@ -2046,7 +2045,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         }
         [UIView animateWithDuration:0.5 delay:0.15 options:UIViewAnimationOptionCurveEaseInOut animations:^{ 
             self.bezierContainer.alpha = 0; 
-            if (!self.isPanelShowing) self.dimmingView.alpha = 0;
+            if (!self.isPanelShowing) self.backgroundColor = [UIColor clearColor];
         } completion:nil];
     }
 }
@@ -2132,12 +2131,11 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         self.searchField.text = @"";
         self.selectedCategory = @"全部";
         [self filterApps];
-        self.dimmingView.alpha = 1.0; // 阈值触发时同步显示遮罩
+        self.backgroundColor = [UIColor clearColor];
         self.lastTriggerPoint = point;
         self.hasCapturedBaseline = NO; // 重置基准姿态捕获标志
         [self loadAppsAsync];
         [self updateTrafficLightsFocus:YES];
-        self.dimmingView.userInteractionEnabled = YES; // 显示时开启拦截
         self.panelContainer.hidden = NO; self.panelContainer.center = point;
         
         // 恢复所有高开销特效图层的显示
@@ -2203,6 +2201,13 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         [self refreshGlassAccentSurfaces];
         [self.collectionView.collectionViewLayout invalidateLayout];
 
+        // 阴影硬件加速与大阴影配置
+        self.panelContainer.layer.shadowColor = [UIColor blackColor].CGColor;
+        self.panelContainer.layer.shadowOffset = CGSizeZero;
+        self.panelContainer.layer.shadowOpacity = 0.0;
+        self.panelContainer.layer.shadowRadius = CV3Style.shadowRadiusMask;
+        self.panelContainer.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.panelContainer.bounds cornerRadius:CV3Style.cornerRadius].CGPath;
+
         self.panelContainer.transform = CGAffineTransformScale(startTransform, 0.4, 0.4);
         self.panelContainer.alpha = 0;
 
@@ -2220,10 +2225,11 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         CGPoint targetCenter = (self.cachedTargetCenter.x > 0) ? self.cachedTargetCenter : [self calculateTargetCenter];
 
         [UIView animateWithDuration:0.75 delay:0 usingSpringWithDamping:0.65 initialSpringVelocity:1.2 options:0 animations:^{
-            self.dimmingView.alpha = 1.0;
+            self.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:CV3Style.maskAlpha];
             self.panelContainer.center = targetCenter;
             self.panelContainer.transform = initialRotation;
             self.panelContainer.alpha = 1;
+            self.panelContainer.layer.shadowOpacity = CV3Style.shadowOpacityMask;
             
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
@@ -2249,15 +2255,15 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
         [self updateTrafficLightsFocus:NO];
         [self stopLiquidMotion];
-        self.dimmingView.userInteractionEnabled = NO; // 隐藏时关闭拦截
         [self refreshGlassAccentSurfaces];
         
         // 获取当前的旋转状态
         CGAffineTransform currentRotation = self.panelContainer.transform;
         
         [UIView animateWithDuration:0.25 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0.5 options:0 animations:^{ 
-            self.dimmingView.alpha = 0;
+            self.backgroundColor = [UIColor clearColor];
             self.panelContainer.alpha = 0; 
+            self.panelContainer.layer.shadowOpacity = 0.0;
             self.panelContainer.center = self.lastTriggerPoint; // 回退到存储的触发点
             self.panelContainer.transform = CGAffineTransformScale(currentRotation, 0.5, 0.5);
             
@@ -2988,12 +2994,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             return self.panelContainer;
         }
         
-        // 检查遮罩层
-        CGPoint pInDimming = [self convertPoint:point toView:self.dimmingView];
-        if (CGRectContainsPoint(self.dimmingView.bounds, pInDimming)) {
-            return self.dimmingView;
-        }
-        return nil;
+        // 3. 触控外部拦截：点击面板外部时返回主窗口自身，拦截触控并触发收起手势
+        return self;
     }
 
     // 触控透传架构: 当面板隐藏时，CV3Window 的 hitTest 返回 nil，实现完全透传，
