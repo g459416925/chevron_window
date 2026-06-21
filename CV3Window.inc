@@ -4,10 +4,354 @@ static NSString *CV3CurrentWorkspaceBundleID(void) {
     @try {
         id workspace = [CV3ClassNamed(@"SBMainWorkspace") sharedInstance];
         id activeItem = CV3InvokeObject(workspace, @selector(activeDisplayItem));
-        NSString *bundleID = CV3InvokeObject(activeItem, @selector(bundleIdentifier));
+        NSString *bundleID = CV3BundleIdentifierFromWorkspaceObject(activeItem);
         if (bundleID.length > 0) return bundleID;
     } @catch (NSException *e) {}
     return nil;
+}
+
+static BOOL CV3WorkspaceObjectMatchesBundleID(id object, NSString *bundleID) {
+    if (!object || bundleID.length == 0) return NO;
+
+    NSString *activeBundleID = CV3BundleIdentifierFromWorkspaceObject(object);
+    if ([activeBundleID isEqualToString:bundleID]) return YES;
+    if ([activeBundleID containsString:bundleID]) return YES;
+
+    @try {
+        NSString *description = [object description];
+        if ([description containsString:bundleID]) return YES;
+    } @catch (NSException *e) {}
+
+    return NO;
+}
+
+static BOOL CV3SceneSettingsLookForeground(id settings) {
+    if (!settings) return NO;
+
+    if (CV3InvokeBool(settings, @selector(foreground), NO)) return YES;
+    return !CV3InvokeBool(settings, @selector(backgrounded), YES);
+}
+
+static NSMutableSet<NSString *> *CV3ObservedForegroundSceneIdentifiers = nil;
+static NSMutableSet<NSString *> *CV3ObservedForegroundBundleIDs = nil;
+static NSString *CV3LastObservedForegroundSceneIdentifier = nil;
+static NSString *CV3LastObservedForegroundBundleID = nil;
+static NSMutableDictionary<NSString *, NSNumber *> *CV3PanelStateLastDebugLogTimes = nil;
+
+static NSString *CV3ShortDebugString(id object, NSUInteger maxLength) {
+    NSString *string = nil;
+    @try {
+        string = [object description];
+    } @catch (NSException *e) {}
+
+    if (string.length == 0) return @"nil";
+    if (string.length <= maxLength) return string;
+    return [[string substringToIndex:maxLength] stringByAppendingString:@"…"];
+}
+
+static void CV3RecordApplicationForegroundState(NSString *bundleID, BOOL foreground) {
+    if (bundleID.length == 0) return;
+
+    if (!CV3ObservedForegroundBundleIDs) {
+        CV3ObservedForegroundBundleIDs = [NSMutableSet set];
+    }
+
+    if (foreground) {
+        [CV3ObservedForegroundBundleIDs addObject:bundleID];
+        CV3LastObservedForegroundBundleID = bundleID;
+        if (sharedWindow && sharedWindow.isPanelShowing) {
+            CV3LogToFile(@"[Warning][PanelStateRecord] SBApplication foreground bundle=%@", bundleID);
+        }
+    } else {
+        [CV3ObservedForegroundBundleIDs removeObject:bundleID];
+        if ([CV3LastObservedForegroundBundleID isEqualToString:bundleID]) {
+            CV3LastObservedForegroundBundleID = nil;
+        }
+    }
+}
+
+static void CV3RecordSceneForegroundState(FBScene *scene, id settings, NSString *reason) {
+    if (!scene || !settings) return;
+
+    NSString *identifier = nil;
+    @try {
+        identifier = scene.identifier;
+    } @catch (NSException *e) {}
+    if (identifier.length == 0) return;
+
+    if (!CV3ObservedForegroundSceneIdentifiers) {
+        CV3ObservedForegroundSceneIdentifiers = [NSMutableSet set];
+    }
+
+    if (CV3SceneSettingsLookForeground(settings)) {
+        [CV3ObservedForegroundSceneIdentifiers addObject:identifier];
+        CV3LastObservedForegroundSceneIdentifier = identifier;
+        if (sharedWindow && sharedWindow.isPanelShowing) {
+            CV3LogToFile(@"[Warning][PanelStateRecord] FBScene foreground id=%@ reason=%@", identifier, reason ?: @"Unknown");
+        }
+    } else {
+        [CV3ObservedForegroundSceneIdentifiers removeObject:identifier];
+        if ([CV3LastObservedForegroundSceneIdentifier isEqualToString:identifier]) {
+            CV3LastObservedForegroundSceneIdentifier = nil;
+        }
+    }
+}
+
+static BOOL CV3ObservedForegroundMatchesBundleID(NSString *bundleID) {
+    if (bundleID.length == 0) return NO;
+
+    if ([CV3LastObservedForegroundBundleID isEqualToString:bundleID]) return YES;
+    if ([CV3ObservedForegroundBundleIDs containsObject:bundleID]) return YES;
+
+    if ([CV3LastObservedForegroundSceneIdentifier containsString:bundleID]) return YES;
+
+    for (NSString *identifier in [CV3ObservedForegroundSceneIdentifiers copy]) {
+        if ([identifier containsString:bundleID]) return YES;
+    }
+
+    return NO;
+}
+
+static BOOL CV3ApplicationHasLiveScene(NSString *bundleID) {
+    if (bundleID.length == 0) return NO;
+
+    @try {
+        SBApplication *app = [[CV3ClassNamed(@"SBApplicationController") sharedInstance] applicationWithBundleIdentifier:bundleID];
+        if (app && [app respondsToSelector:@selector(mainScene)]) {
+            FBScene *scene = [app mainScene];
+            if (scene && [scene.identifier containsString:bundleID]) return YES;
+        }
+    } @catch (NSException *e) {}
+
+    @try {
+        id manager = [CV3ClassNamed(@"FBSceneManager") sharedInstance];
+        id workspace = [manager valueForKey:@"_workspace"];
+        NSDictionary *scenes = [workspace valueForKey:@"_allScenesByID"];
+
+        for (id key in scenes) {
+            FBScene *scene = scenes[key];
+            NSString *keyString = [key isKindOfClass:[NSString class]] ? key : [key description];
+            NSString *sceneID = nil;
+            @try {
+                sceneID = scene.identifier;
+            } @catch (NSException *e) {}
+
+            if ([keyString containsString:bundleID] || [sceneID containsString:bundleID]) {
+                return YES;
+            }
+        }
+    } @catch (NSException *e) {}
+
+    return NO;
+}
+
+static void CV3LogPanelStateDebugForBundleID(NSString *bundleID, CV3AppPanelProtectionState resolvedState, NSString *source) {
+    if (bundleID.length == 0 || !sharedWindow || !sharedWindow.isPanelShowing) return;
+
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    if (!CV3PanelStateLastDebugLogTimes) {
+        CV3PanelStateLastDebugLogTimes = [NSMutableDictionary dictionary];
+    }
+
+    NSString *logKey = [NSString stringWithFormat:@"%@:%@", source ?: @"Unknown", bundleID];
+    NSTimeInterval last = [CV3PanelStateLastDebugLogTimes[logKey] doubleValue];
+    if (now - last < 2.0) return;
+    CV3PanelStateLastDebugLogTimes[logKey] = @(now);
+
+    NSString *currentActive = CV3CurrentWorkspaceBundleID();
+    NSString *activeItemClass = @"nil";
+    NSString *activeItemParsed = @"nil";
+    NSString *activeItemDesc = @"nil";
+    NSUInteger activeItemsCount = 0;
+    BOOL activeItemsMatched = NO;
+
+    @try {
+        id workspace = [CV3ClassNamed(@"SBMainWorkspace") sharedInstance];
+        id activeItem = CV3InvokeObject(workspace, @selector(activeDisplayItem));
+        activeItemClass = activeItem ? NSStringFromClass([activeItem class]) : @"nil";
+        activeItemParsed = CV3BundleIdentifierFromWorkspaceObject(activeItem) ?: @"nil";
+        activeItemDesc = CV3ShortDebugString(activeItem, 220);
+
+        NSSet *activeItems = CV3InvokeObject(workspace, @selector(activeDisplayItems));
+        activeItemsCount = activeItems.count;
+        for (id item in activeItems) {
+            if (CV3WorkspaceObjectMatchesBundleID(item, bundleID)) {
+                activeItemsMatched = YES;
+                break;
+            }
+        }
+    } @catch (NSException *e) {}
+
+    BOOL observedBundleExact = [CV3ObservedForegroundBundleIDs containsObject:bundleID];
+    BOOL observedSceneMatch = CV3ObservedForegroundMatchesBundleID(bundleID);
+    NSString *lastObservedBundle = CV3LastObservedForegroundBundleID ?: @"nil";
+    NSString *lastObservedScene = CV3LastObservedForegroundSceneIdentifier ?: @"nil";
+
+    BOOL appExists = NO;
+    BOOL appBackgrounded = YES;
+    BOOL appSuspended = NO;
+    NSString *mainSceneID = @"nil";
+    BOOL mainSceneForeground = NO;
+    BOOL mainSceneSettingsForeground = NO;
+    BOOL mainSceneSettingsBackgrounded = YES;
+
+    @try {
+        SBApplication *app = [[CV3ClassNamed(@"SBApplicationController") sharedInstance] applicationWithBundleIdentifier:bundleID];
+        appExists = (app != nil);
+        if (app) {
+            appBackgrounded = CV3InvokeBool(app, @selector(isBackgrounded), YES);
+            appSuspended = CV3InvokeBool(app, @selector(isSuspended), NO);
+            FBScene *scene = nil;
+            if ([app respondsToSelector:@selector(mainScene)]) {
+                scene = [app mainScene];
+            }
+            if (scene) {
+                mainSceneID = scene.identifier ?: @"nil";
+                mainSceneSettingsForeground = CV3InvokeBool(scene.settings, @selector(foreground), NO);
+                mainSceneSettingsBackgrounded = CV3InvokeBool(scene.settings, @selector(backgrounded), YES);
+                mainSceneForeground = CV3SceneSettingsLookForeground(scene.settings);
+            }
+        }
+    } @catch (NSException *e) {}
+
+    NSUInteger fbSceneCount = 0;
+    BOOL fbSceneMatched = NO;
+    NSString *matchedFBSceneID = @"nil";
+    BOOL matchedFBSceneForeground = NO;
+    BOOL matchedFBSceneSettingsForeground = NO;
+    BOOL matchedFBSceneSettingsBackgrounded = YES;
+
+    @try {
+        id manager = [CV3ClassNamed(@"FBSceneManager") sharedInstance];
+        id workspace = [manager valueForKey:@"_workspace"];
+        NSDictionary *scenes = [workspace valueForKey:@"_allScenesByID"];
+        fbSceneCount = scenes.count;
+
+        for (id key in scenes) {
+            FBScene *scene = scenes[key];
+            NSString *keyString = [key isKindOfClass:[NSString class]] ? key : [key description];
+            NSString *sceneID = nil;
+            @try {
+                sceneID = scene.identifier;
+            } @catch (NSException *e) {}
+
+            if ([keyString containsString:bundleID] || [sceneID containsString:bundleID]) {
+                fbSceneMatched = YES;
+                matchedFBSceneID = sceneID ?: keyString ?: @"nil";
+                matchedFBSceneSettingsForeground = CV3InvokeBool(scene.settings, @selector(foreground), NO);
+                matchedFBSceneSettingsBackgrounded = CV3InvokeBool(scene.settings, @selector(backgrounded), YES);
+                matchedFBSceneForeground = CV3SceneSettingsLookForeground(scene.settings);
+                break;
+            }
+        }
+    } @catch (NSException *e) {}
+
+    CV3LogToFile(@"[Warning][PanelState] source=%@ target=%@ resolved=%ld currentActive=%@ activeItemClass=%@ activeItemParsed=%@ activeItemDesc=%@ activeItemsCount=%lu activeItemsMatched=%d observedBundleExact=%d observedSceneMatch=%d lastObservedBundle=%@ lastObservedScene=%@ appExists=%d appBackgrounded=%d appSuspended=%d mainSceneID=%@ mainSceneForeground=%d mainSceneSettingsForeground=%d mainSceneSettingsBackgrounded=%d fbSceneCount=%lu fbSceneMatched=%d matchedFBSceneID=%@ matchedFBSceneForeground=%d matchedFBSceneSettingsForeground=%d matchedFBSceneSettingsBackgrounded=%d",
+                 source ?: @"Unknown",
+                 bundleID,
+                 (long)resolvedState,
+                 currentActive ?: @"nil",
+                 activeItemClass,
+                 activeItemParsed,
+                 activeItemDesc,
+                 (unsigned long)activeItemsCount,
+                 activeItemsMatched,
+                 observedBundleExact,
+                 observedSceneMatch,
+                 lastObservedBundle,
+                 lastObservedScene,
+                 appExists,
+                 appBackgrounded,
+                 appSuspended,
+                 mainSceneID,
+                 mainSceneForeground,
+                 mainSceneSettingsForeground,
+                 mainSceneSettingsBackgrounded,
+                 (unsigned long)fbSceneCount,
+                 fbSceneMatched,
+                 matchedFBSceneID,
+                 matchedFBSceneForeground,
+                 matchedFBSceneSettingsForeground,
+                 matchedFBSceneSettingsBackgrounded);
+}
+
+static BOOL CV3ApplicationLooksForeground(NSString *bundleID) {
+    if (bundleID.length == 0) return NO;
+
+    if (CV3ObservedForegroundMatchesBundleID(bundleID)) return YES;
+
+    @try {
+        SBApplication *app = [[CV3ClassNamed(@"SBApplicationController") sharedInstance] applicationWithBundleIdentifier:bundleID];
+        if (app) {
+            BOOL backgrounded = CV3InvokeBool(app, @selector(isBackgrounded), YES);
+            BOOL suspended = CV3InvokeBool(app, @selector(isSuspended), NO);
+            if (!backgrounded && !suspended) return YES;
+
+            FBScene *scene = nil;
+            if ([app respondsToSelector:@selector(mainScene)]) {
+                scene = [app mainScene];
+            }
+            if (scene && [scene.identifier containsString:bundleID] && CV3SceneSettingsLookForeground(scene.settings)) {
+                return YES;
+            }
+        }
+    } @catch (NSException *e) {}
+
+    @try {
+        id manager = [CV3ClassNamed(@"FBSceneManager") sharedInstance];
+        id workspace = [manager valueForKey:@"_workspace"];
+        NSDictionary *scenes = [workspace valueForKey:@"_allScenesByID"];
+
+        for (id key in scenes) {
+            FBScene *scene = scenes[key];
+            NSString *keyString = [key isKindOfClass:[NSString class]] ? key : [key description];
+            NSString *sceneID = nil;
+            @try {
+                sceneID = scene.identifier;
+            } @catch (NSException *e) {}
+
+            if (([keyString containsString:bundleID] || [sceneID containsString:bundleID]) &&
+                CV3SceneSettingsLookForeground(scene.settings)) {
+                return YES;
+            }
+        }
+    } @catch (NSException *e) {}
+
+    @try {
+        for (UIScene *scene in [[UIApplication sharedApplication].connectedScenes allObjects]) {
+            if (scene.activationState != UISceneActivationStateForegroundActive) continue;
+            NSString *sceneDescription = [scene description];
+            NSString *sessionDescription = [scene.session description];
+            NSString *persistentIdentifier = CV3InvokeObject(scene.session, @selector(persistentIdentifier));
+            if ([sceneDescription containsString:bundleID] ||
+                [sessionDescription containsString:bundleID] ||
+                [persistentIdentifier containsString:bundleID]) {
+                return YES;
+            }
+        }
+    } @catch (NSException *e) {}
+
+    return NO;
+}
+
+static BOOL CV3WorkspaceHasActiveBundleID(NSString *bundleID) {
+    if (bundleID.length == 0) return NO;
+
+    NSString *currentActive = CV3CurrentWorkspaceBundleID();
+    if ([currentActive isEqualToString:bundleID]) return YES;
+
+    @try {
+        id workspace = [CV3ClassNamed(@"SBMainWorkspace") sharedInstance];
+        id activeItem = CV3InvokeObject(workspace, @selector(activeDisplayItem));
+        if (CV3WorkspaceObjectMatchesBundleID(activeItem, bundleID)) return YES;
+
+        NSSet *activeItems = CV3InvokeObject(workspace, @selector(activeDisplayItems));
+        for (id item in activeItems) {
+            if (CV3WorkspaceObjectMatchesBundleID(item, bundleID)) return YES;
+        }
+    } @catch (NSException *e) {}
+
+    return NO;
 }
 
 static void CV3OpenApplicationFast(NSString *bundleID, NSString *reason) {
@@ -158,16 +502,48 @@ static CV3FloatingAppWindow *CV3FloatingWindowForBundleID(NSString *bundleID) {
     return nil;
 }
 
-static void CV3RestoreAndFocusFloatingWindow(CV3FloatingAppWindow *window, NSString *reason) {
-    if (!window || window.isClosing) return;
+static CV3AppPanelProtectionState CV3AppPanelProtectionStateForBundleID(NSString *bundleID) {
+    if (bundleID.length == 0) return CV3AppPanelProtectionStateNone;
 
-    CV3ExitExposeModeIfNeeded(window, YES);
-    CV3LogToFile(@"[Launcher] 命中已有分屏，恢复并置顶: %@ (%@)", window.bundleID ?: @"nil", reason ?: @"Unknown");
-    [window restoreFromStash];
-    [window promoteFloatingWindowInZOrder];
-    [window setWindowFocused:YES];
-    [window enforceSceneForegroundState];
-    [window attemptToHostSceneWithRetries:6 delay:0.05];
+    CV3AppPanelProtectionState state = CV3AppPanelProtectionStateNone;
+
+    if (CV3FloatingWindowForBundleID(bundleID) != nil) {
+        state = CV3AppPanelProtectionStateSplit;
+        CV3LogPanelStateDebugForBundleID(bundleID, state, @"ProtectionState");
+        return state;
+    }
+
+    if (CV3WorkspaceHasActiveBundleID(bundleID)) {
+        state = CV3AppPanelProtectionStateForeground;
+        CV3LogPanelStateDebugForBundleID(bundleID, state, @"ProtectionState");
+        return state;
+    }
+
+    if (CV3ApplicationLooksForeground(bundleID)) {
+        state = CV3AppPanelProtectionStateForeground;
+        CV3LogPanelStateDebugForBundleID(bundleID, state, @"ProtectionState");
+        return state;
+    }
+
+    if (CV3ApplicationHasLiveScene(bundleID)) {
+        state = CV3AppPanelProtectionStateForeground;
+        CV3LogPanelStateDebugForBundleID(bundleID, state, @"ProtectionState");
+        return state;
+    }
+
+    CV3LogPanelStateDebugForBundleID(bundleID, state, @"ProtectionState");
+    return state;
+}
+
+static NSString *CV3AppPanelProtectionReason(CV3AppPanelProtectionState state) {
+    switch (state) {
+        case CV3AppPanelProtectionStateForeground:
+            return @"当前已在前台运行";
+        case CV3AppPanelProtectionStateSplit:
+            return @"当前已处于分屏状态";
+        default:
+            return nil;
+    }
 }
 
 static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
@@ -253,6 +629,18 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 // 统一 App 启动逻辑
 - (void)launchApp:(CV3AppInfo *)info {
     if (!info || !info.bundleId) return;
+    NSString *bid = [info.bundleId copy];
+    CV3AppPanelProtectionState protectionState = CV3AppPanelProtectionStateForBundleID(bid);
+    if (protectionState != CV3AppPanelProtectionStateNone) {
+        UINotificationFeedbackGenerator *blockedFeedback = [[UINotificationFeedbackGenerator alloc] init];
+        [blockedFeedback notificationOccurred:UINotificationFeedbackTypeWarning];
+        CV3LogToFile(@"[Launcher] 已阻止主App面板操作: 目标=%@, 原因=%@",
+                     bid,
+                     CV3AppPanelProtectionReason(protectionState) ?: @"Unknown");
+        [self.collectionView reloadData];
+        return;
+    }
+
     if (self.launchDebounce) return;
     CV3ExitExposeModeIfNeeded(nil, NO);
     self.launchDebounce = YES;
@@ -263,18 +651,8 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     UIImpactFeedbackGenerator *launcherImpact = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [launcherImpact impactOccurred];
 
-    NSString *bid = [info.bundleId copy];
     NSString *currentActive = CV3CurrentWorkspaceBundleID();
     CV3LogToFile(@"[Launcher] 主App面板应用点击: 目标=%@, 当前前台App=%@", bid, currentActive);
-
-    // 核心修复：检测是否已有该应用的分屏窗口，如果有则直接激活而非全屏开启
-    CV3FloatingAppWindow *existingWindow = CV3FloatingWindowForBundleID(bid);
-    
-    if (existingWindow) {
-        [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
-        CV3RestoreAndFocusFloatingWindow(existingWindow, @"PanelAppClick");
-        return;
-    }
 
     // 记录使用频率（带时间戳）
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
@@ -958,11 +1336,23 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     CGPoint pointInPanel = [gesture locationInView:self.panelContainer];
     
     if (gesture.state == UIGestureRecognizerStateBegan) {
-        CV3ExitExposeModeIfNeeded(nil, NO);
         NSIndexPath *indexPath = [self.collectionView indexPathForItemAtPoint:pointInCollection];
         if (indexPath && indexPath.item < self.filteredApps.count) {
             CV3AppCell *cell = (CV3AppCell *)[self.collectionView cellForItemAtIndexPath:indexPath];
             self.draggedAppInfo = self.filteredApps[indexPath.item];
+            CV3AppPanelProtectionState protectionState = CV3AppPanelProtectionStateForBundleID(self.draggedAppInfo.bundleId);
+            if (protectionState != CV3AppPanelProtectionStateNone) {
+                UINotificationFeedbackGenerator *blockedFeedback = [[UINotificationFeedbackGenerator alloc] init];
+                [blockedFeedback notificationOccurred:UINotificationFeedbackTypeWarning];
+                CV3LogToFile(@"[Launcher] 已阻止主App面板长按操作: 目标=%@, 原因=%@",
+                             self.draggedAppInfo.bundleId,
+                             CV3AppPanelProtectionReason(protectionState) ?: @"Unknown");
+                self.draggedAppInfo = nil;
+                [self.collectionView reloadData];
+                return;
+            }
+
+            CV3ExitExposeModeIfNeeded(nil, NO);
             
             [self.feedback impactOccurredWithIntensity:0.85];
             
@@ -998,6 +1388,25 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         self.collectionView.scrollEnabled = YES;
         
         if (self.draggedIconView && self.draggedAppInfo) {
+            CV3AppPanelProtectionState protectionState = CV3AppPanelProtectionStateForBundleID(self.draggedAppInfo.bundleId);
+            if (protectionState != CV3AppPanelProtectionStateNone) {
+                UINotificationFeedbackGenerator *blockedFeedback = [[UINotificationFeedbackGenerator alloc] init];
+                [blockedFeedback notificationOccurred:UINotificationFeedbackTypeWarning];
+                CV3LogToFile(@"[Launcher] 已阻止主App面板拖拽完成操作: 目标=%@, 原因=%@",
+                             self.draggedAppInfo.bundleId,
+                             CV3AppPanelProtectionReason(protectionState) ?: @"Unknown");
+                [UIView animateWithDuration:0.25 animations:^{
+                    self.draggedIconView.alpha = 0.0;
+                    self.draggedIconView.transform = CGAffineTransformMakeScale(0.1, 0.1);
+                } completion:^(BOOL finished) {
+                    [self.draggedIconView removeFromSuperview];
+                    self.draggedIconView = nil;
+                    self.draggedAppInfo = nil;
+                    [self.collectionView reloadData];
+                }];
+                return;
+            }
+
             // 判断是否拖出面板边界。这里直接使用 panelContainer 坐标，避免横屏 transform 下的换算误差。
             BOOL isOutside = !CGRectContainsPoint(self.panelContainer.bounds, pointInPanel);
             
@@ -1008,6 +1417,15 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
                 NSString *bundleID = [self.draggedAppInfo.bundleId copy];
                 CGPoint spawnPoint = [self.draggedIconView.superview convertPoint:self.draggedIconView.center toView:nil];
                 dispatch_async(dispatch_get_main_queue(), ^{
+                    CV3AppPanelProtectionState asyncProtectionState = CV3AppPanelProtectionStateForBundleID(bundleID);
+                    if (asyncProtectionState != CV3AppPanelProtectionStateNone) {
+                        CV3LogToFile(@"[Launcher] 已阻止主App面板异步分屏创建: 目标=%@, 原因=%@",
+                                     bundleID,
+                                     CV3AppPanelProtectionReason(asyncProtectionState) ?: @"Unknown");
+                        [self.collectionView reloadData];
+                        return;
+                    }
+
                     if (!floatingWindows) {
                         floatingWindows = [NSMutableArray array];
                     }
@@ -2052,6 +2470,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     }
     self.isPanelShowing = visible; self.isAnimating = YES;
     if (visible) {
+        [self startPanelStateRefreshTimer];
         self.searchField.text = @"";
         self.selectedCategory = @"全部";
         [self filterApps];
@@ -2160,6 +2579,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             self.isAnimating = NO; 
         }];
     } else {
+        [self stopPanelStateRefreshTimer];
         // 关键修复：不要同步收起键盘，因为 resignFirstResponder 是重度同步操作，会阻塞动画开始
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.searchField resignFirstResponder];
@@ -2403,6 +2823,35 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     [self.collectionView reloadData];
 }
 
+- (void)refreshProtectedAppMarkers {
+    if (!self.isPanelShowing || self.collectionView.hidden) return;
+
+    NSArray<NSIndexPath *> *visibleIndexPaths = [self.collectionView indexPathsForVisibleItems];
+    if (visibleIndexPaths.count == 0) return;
+
+    [UIView performWithoutAnimation:^{
+        [self.collectionView reloadItemsAtIndexPaths:visibleIndexPaths];
+    }];
+}
+
+- (void)startPanelStateRefreshTimer {
+    if (self.panelStateRefreshTimer) return;
+
+    self.panelStateRefreshTimer = [NSTimer scheduledTimerWithTimeInterval:0.5
+                                                                   target:self
+                                                                 selector:@selector(refreshProtectedAppMarkers)
+                                                                 userInfo:nil
+                                                                  repeats:YES];
+    [[NSRunLoop mainRunLoop] addTimer:self.panelStateRefreshTimer forMode:NSRunLoopCommonModes];
+}
+
+- (void)stopPanelStateRefreshTimer {
+    if (!self.panelStateRefreshTimer) return;
+
+    [self.panelStateRefreshTimer invalidate];
+    self.panelStateRefreshTimer = nil;
+}
+
 - (void)show {
     CV3ExitExposeModeIfNeeded(nil, NO);
     [self attachToCurrentActiveScene];
@@ -2439,6 +2888,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         [self.heartbeatTimer invalidate];
         self.heartbeatTimer = nil;
     }
+
+    [self stopPanelStateRefreshTimer];
 }
 
 - (void)dealloc {
@@ -2680,8 +3131,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     
     // 增加首项判断逻辑，用于开启搜索首项高亮
     BOOL isFirst = (index == 0 && self.searchField.text.length > 0);
-    BOOL isSplitActive = (CV3FloatingWindowForBundleID(info.bundleId) != nil);
-    [cell configureWithInfo:info searchText:self.searchField.text isFirst:isFirst isSplitActive:isSplitActive];
+    CV3AppPanelProtectionState protectionState = CV3AppPanelProtectionStateForBundleID(info.bundleId);
+    [cell configureWithInfo:info searchText:self.searchField.text isFirst:isFirst protectionState:protectionState];
 
     // 应用“熵减”衰老视觉效果
     [self applyAgingEffectToCell:cell withInfo:info];
