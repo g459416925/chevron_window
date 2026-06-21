@@ -13,38 +13,20 @@ static NSString *CV3CurrentWorkspaceBundleID(void) {
 static void CV3OpenApplicationFast(NSString *bundleID, NSString *reason) {
     if (bundleID.length == 0) return;
 
-    if (![NSThread isMainThread]) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            CV3OpenApplicationFast(bundleID, reason);
-        });
-        return;
-    }
-
     CV3ExitExposeModeIfNeeded(nil, NO);
 
-    @try {
-        id sharedApp = [UIApplication sharedApplication];
-        if ([sharedApp respondsToSelector:@selector(launchApplicationWithIdentifier:suspended:)]) {
-            [sharedApp launchApplicationWithIdentifier:bundleID suspended:NO];
-            CV3LogToFile(@"[Launcher] Fast open (launchApplicationWithIdentifier) %@ (%@)", bundleID, reason ?: @"Unknown");
-            return;
+    // 建议 2：使用高优先级全局队列异步启动，防止主线程 UI 渲染被阻塞以实现秒级跳转
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        @try {
+            id workspace = [CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace];
+            if (workspace && [workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
+                BOOL opened = ((BOOL (*)(id, SEL, id))objc_msgSend)(workspace, @selector(openApplicationWithBundleID:), bundleID);
+                CV3LogToFile(@"[Launcher] Fast open %@ -> %d (%@)", bundleID, opened, reason ?: @"Unknown");
+            }
+        } @catch (NSException *e) {
+            CV3LogToFile(@"[Launcher] Fast open 异常 %@: %@", bundleID, e);
         }
-    } @catch (NSException *e) {
-        CV3LogToFile(@"[Launcher] Fast open (launchApplicationWithIdentifier) 异常 %@: %@", bundleID, e);
-    }
-
-    @try {
-        id workspace = [CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace];
-        if (workspace && [workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
-            BOOL opened = ((BOOL (*)(id, SEL, id))objc_msgSend)(workspace, @selector(openApplicationWithBundleID:), bundleID);
-            CV3LogToFile(@"[Launcher] Fast open %@ -> %d (%@)", bundleID, opened, reason ?: @"Unknown");
-            return;
-        }
-    } @catch (NSException *e) {
-        CV3LogToFile(@"[Launcher] Fast open 异常 %@: %@", bundleID, e);
-    }
-
-    CV3LogToFile(@"[Launcher] Fast open 跳过：LSApplicationWorkspace 不可用 %@", bundleID);
+    });
 }
 
 __attribute__((unused)) static id CV3SpringBoardIconForBundleID(NSString *bundleID) {
@@ -527,6 +509,14 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         return YES;
     }
 
+    // 如果是绑定在 UIWindow 上的全屏 tap 收起手势，且触点在面板物理边界内，不拦截，让子视图（如 CollectionView Cell）正常接收触控
+    if (gestureRecognizer.view == self) {
+        CGPoint location = [touch locationInView:self.panelContainer];
+        if (CGRectContainsPoint(self.panelContainer.bounds, location)) {
+            return NO;
+        }
+    }
+
     // 拦截面板移动手势
     if (gestureRecognizer.view == self.panelContainer && ![gestureRecognizer isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) {
         CGPoint location = [touch locationInView:self.panelContainer];
@@ -671,6 +661,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     } @catch (NSException *e) {}
     
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDimmingTap:)];
+    tap.delegate = self;
     [self addGestureRecognizer:tap];
     
     self.bezierContainer = [[UIView alloc] initWithFrame:bounds];
