@@ -247,6 +247,9 @@ struct {
     CGFloat trafficDotSize;
     CGFloat windowHandleW;
     CGFloat windowHandleH;
+    CGFloat shadowRadiusMask;
+    CGFloat shadowOpacityMask;
+    CGFloat maskAlpha;
     CGFloat floatingChromeH;
     CGFloat floatingChromeControlSize;
     CGFloat floatingChromeCornerRadius;
@@ -325,6 +328,9 @@ struct {
     .trafficDotSize = 8.0,
     .windowHandleW = 58.0,
     .windowHandleH = 18.0,
+    .shadowRadiusMask = 180.0,
+    .shadowOpacityMask = 0.85,
+    .maskAlpha = 0.18,
     .floatingChromeH = 28.0,
     .floatingChromeControlSize = 12.0,
     .floatingChromeCornerRadius = 18.0,
@@ -1364,7 +1370,6 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 @property (nonatomic, assign) BOOL isKeyboardVisible; 
 @property (nonatomic, assign) BOOL observersRegistered;
 @property (nonatomic, assign) BOOL hasBeenMoved;
-@property (nonatomic, strong) UIView *dimmingView;
 @property (nonatomic, strong) UIView *resizingHandle;
 @property (nonatomic, strong) CAShapeLayer *resizingHandleLayer; 
 @property (nonatomic, strong) UIView *trafficCapsule;
