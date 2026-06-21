@@ -225,6 +225,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 
 // 统一 App 启动逻辑
 - (void)launchApp:(CV3AppInfo *)info {
+    if (!info || !info.bundleId) return;
     if (self.launchDebounce) return;
     CV3ExitExposeModeIfNeeded(nil, NO);
     self.launchDebounce = YES;
@@ -235,33 +236,32 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     UIImpactFeedbackGenerator *launcherImpact = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [launcherImpact impactOccurred];
 
-    if (info.bundleId) {
-        NSString *bid = [info.bundleId copy];
-        
-        // 核心修复：检测是否已有该应用的分屏窗口，如果有则直接激活而非全屏开启
-        CV3FloatingAppWindow *existingWindow = CV3FloatingWindowForBundleID(bid);
-        
-        if (existingWindow) {
-            [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
-            CV3RestoreAndFocusFloatingWindow(existingWindow, @"PanelAppClick");
-            return;
-        }
+    NSString *bid = [info.bundleId copy];
+    CV3LogToFile(@"[Launcher] 主App面板应用点击: %@", bid);
 
-        // 记录使用频率（带时间戳）
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-            NSMutableDictionary *usage = [[defaults dictionaryForKey:@"CV3AppUsageData"] mutableCopy] ?: [NSMutableDictionary dictionary];
-            NSMutableArray *timestamps = [usage[bid] mutableCopy] ?: [NSMutableArray array];
-            [timestamps addObject:@([[NSDate date] timeIntervalSince1970])];
-            if (timestamps.count > 20) [timestamps removeObjectAtIndex:0];
-            usage[bid] = timestamps;
-            [defaults setObject:usage forKey:@"CV3AppUsageData"];
-            [defaults synchronize];
-        });
-
-        CV3HidePanelImmediately(self);
-        CV3OpenApplicationFast(bid, [NSString stringWithFormat:@"LauncherOpen:%@", bid]);
+    // 核心修复：检测是否已有该应用的分屏窗口，如果有则直接激活而非全屏开启
+    CV3FloatingAppWindow *existingWindow = CV3FloatingWindowForBundleID(bid);
+    
+    if (existingWindow) {
+        [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
+        CV3RestoreAndFocusFloatingWindow(existingWindow, @"PanelAppClick");
+        return;
     }
+
+    // 记录使用频率（带时间戳）
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+        NSMutableDictionary *usage = [[defaults dictionaryForKey:@"CV3AppUsageData"] mutableCopy] ?: [NSMutableDictionary dictionary];
+        NSMutableArray *timestamps = [usage[bid] mutableCopy] ?: [NSMutableArray array];
+        [timestamps addObject:@([[NSDate date] timeIntervalSince1970])];
+        if (timestamps.count > 20) [timestamps removeObjectAtIndex:0];
+        usage[bid] = timestamps;
+        [defaults setObject:usage forKey:@"CV3AppUsageData"];
+        [defaults synchronize];
+    });
+
+    CV3HidePanelImmediately(self);
+    CV3OpenApplicationFast(bid, [NSString stringWithFormat:@"LauncherOpen:%@", bid]);
 }
 
 - (void)searchTextChanged:(UITextField *)textField {
