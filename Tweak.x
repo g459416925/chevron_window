@@ -366,13 +366,14 @@ struct {
 
 #pragma mark - Custom Cell
 @interface CV3AppCell : UICollectionViewCell
+@property (nonatomic, strong) UIView *iconBackdrop;
 @property (nonatomic, strong) UIImageView *iconView;
 @property (nonatomic, strong) UILabel *nameLabel;
 @property (nonatomic, strong) CAGradientLayer *iconHighlight;
 @property (nonatomic, strong) UIView *pinnedIndicator; 
 @property (nonatomic, assign) CGPoint iconOffset; // 新增：图标视差偏移
 @property (nonatomic, assign) BOOL isFirstResult; // 新增：是否为搜索首项
-- (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst;
+- (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst isSplitActive:(BOOL)isSplitActive;
 - (void)startBreathing;
 - (void)startPulse; 
 - (void)stopPulse;  
@@ -384,6 +385,7 @@ struct {
     if (self) {
         CGFloat iconSize = 54.0;
         UIView *ivBack = [[UIView alloc] initWithFrame:CGRectMake((frame.size.width - iconSize)/2, 8, iconSize, iconSize)];
+        self.iconBackdrop = ivBack;
         ivBack.backgroundColor = [[UIColor labelColor] colorWithAlphaComponent:0.08];
         ivBack.layer.cornerRadius = CV3Style.iconCornerRadius;
         ivBack.layer.shadowColor = [UIColor blackColor].CGColor;
@@ -441,14 +443,22 @@ struct {
     self.iconView.transform = t;
 }
 
-- (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst {
+- (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst isSplitActive:(BOOL)isSplitActive {
     self.iconView.image = info.icon;
     self.pinnedIndicator.hidden = !info.isPinned;
     self.isFirstResult = isFirst;
     if (info.isPinned) [self.iconView bringSubviewToFront:self.pinnedIndicator];
 
+    UIColor *splitColor = [UIColor colorWithRed:0.0 green:0.62 blue:1.0 alpha:1.0];
+    self.iconBackdrop.backgroundColor = isSplitActive ? [splitColor colorWithAlphaComponent:0.30] : [[UIColor labelColor] colorWithAlphaComponent:0.08];
+    self.iconBackdrop.layer.borderWidth = isSplitActive ? 1.5 : 0.0;
+    self.iconBackdrop.layer.borderColor = isSplitActive ? [splitColor colorWithAlphaComponent:0.80].CGColor : [UIColor clearColor].CGColor;
+    self.iconBackdrop.layer.shadowColor = isSplitActive ? splitColor.CGColor : [UIColor blackColor].CGColor;
+    self.iconBackdrop.layer.shadowOpacity = isSplitActive ? 0.55 : (float)CV3Style.iconShadowOpacity;
+    self.iconBackdrop.layer.shadowRadius = isSplitActive ? 9.0 : CV3Style.iconShadowRadius;
+
     if (searchText && searchText.length > 0) {
-        NSMutableAttributedString *as = [[NSMutableAttributedString alloc] initWithString:info.name attributes:@{NSForegroundColorAttributeName: [UIColor labelColor]}];
+        NSMutableAttributedString *as = [[NSMutableAttributedString alloc] initWithString:info.name attributes:@{NSForegroundColorAttributeName: isSplitActive ? splitColor : [UIColor labelColor]}];
         NSRange range = [info.name rangeOfString:searchText options:NSCaseInsensitiveSearch];
         if (range.location != NSNotFound) {
             [as addAttribute:NSForegroundColorAttributeName value:[UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:1.0] range:range];
@@ -460,16 +470,18 @@ struct {
         if (isFirst) {
             [self startPulse];
             self.iconView.layer.borderWidth = 1.5;
-            self.iconView.layer.borderColor = [[UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:0.6] CGColor];
+            self.iconView.layer.borderColor = (isSplitActive ? [splitColor colorWithAlphaComponent:0.9] : [UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:0.6]).CGColor;
         } else {
             [self stopPulse];
-            self.iconView.layer.borderWidth = 0;
+            self.iconView.layer.borderWidth = isSplitActive ? 1.5 : 0.0;
+            self.iconView.layer.borderColor = isSplitActive ? [splitColor colorWithAlphaComponent:0.9].CGColor : [UIColor clearColor].CGColor;
         }
     } else {
         self.nameLabel.attributedText = nil;
         self.nameLabel.text = info.name;
-        self.nameLabel.textColor = [UIColor labelColor];
-        self.iconView.layer.borderWidth = 0;
+        self.nameLabel.textColor = isSplitActive ? splitColor : [UIColor labelColor];
+        self.iconView.layer.borderWidth = isSplitActive ? 1.5 : 0.0;
+        self.iconView.layer.borderColor = isSplitActive ? [splitColor colorWithAlphaComponent:0.9].CGColor : [UIColor clearColor].CGColor;
     }
 }
 - (void)startBreathing {
@@ -641,6 +653,7 @@ static void CV3ApplyGlassAccentStyle(UIView *surface,
 }
 
 #pragma mark - Floating App Window (MilkyWay2-style)
+static NSString * const CV3FloatingWindowsDidChangeNotification = @"CV3FloatingWindowsDidChangeNotification";
 static NSMutableArray *floatingWindows = nil;
 static UIInterfaceOrientation CV3LastTrustedInterfaceOrientation = UIInterfaceOrientationPortrait;
 static BOOL CV3SuppressPresentationContextFanout = NO;
