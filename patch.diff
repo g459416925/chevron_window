@@ -1,0 +1,48 @@
+--- CV3Window.inc
++++ CV3Window.inc
+@@ -2645,8 +2645,10 @@
+             self.rootViewController.view.frame = self.bounds;
+         }
+         UIView *hit = [super hitTest:point withEvent:e];
++        CV3LogToFile(@"[HitTest] point: %@, hitView: %@", NSStringFromCGPoint(point), hit);
+         if (hit && hit != self) {
+             return hit;
+         }
+         return self;
+     }
+@@ -1405,6 +1407,7 @@
+         }
+     }
+     
++    CV3LogToFile(@"[Gesture] shouldReceiveTouch: %@, touchView: %@", gestureRecognizer, touch.view);
+     if (gestureRecognizer.view == self) {
+         UIView *view = touch.view;
+         while (view != nil) {
+@@ -1318,6 +1321,7 @@
+ }
+ 
+ - (void)handleDimmingTap:(UITapGestureRecognizer *)gesture {
++    CV3LogToFile(@"[Gesture] handleDimmingTap fired!");
+     if (self.isPanelShowing) {
+         if (self.searchField.isFirstResponder) {
+             [self.searchField resignFirstResponder];
+             return;
+         }
++        CV3LogToFile(@"[Gesture] handleDimmingTap calling animateSpotlight:NO");
+         [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
+     }
+ }
+@@ -2378,6 +2382,7 @@
+     
+     BOOL isLandscape = (orientation == UIInterfaceOrientationLandscapeLeft || orientation == UIInterfaceOrientationLandscapeRight);
+     if (!isLandscape) {
+         CGRect physicalBounds = [UIScreen mainScreen].bounds;
+         if (physicalBounds.size.width > physicalBounds.size.height) {
+             isLandscape = YES;
+@@ -2386,6 +2391,7 @@
+     }
+     
+     if (isLandscape) {
++        CV3LogToFile(@"[Keyboard] isLandscape YES, returning early from keyboardWillShow");
+         return;
+     }
