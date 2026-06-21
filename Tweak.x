@@ -371,6 +371,12 @@ struct {
 };
 
 #pragma mark - Custom Cell
+typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
+    CV3AppPanelProtectionStateNone = 0,
+    CV3AppPanelProtectionStateForeground,
+    CV3AppPanelProtectionStateSplit
+};
+
 @interface CV3AppCell : UICollectionViewCell
 @property (nonatomic, strong) UIView *iconBackdrop;
 @property (nonatomic, strong) UIImageView *iconView;
@@ -379,7 +385,7 @@ struct {
 @property (nonatomic, strong) UIView *pinnedIndicator; 
 @property (nonatomic, assign) CGPoint iconOffset; // 新增：图标视差偏移
 @property (nonatomic, assign) BOOL isFirstResult; // 新增：是否为搜索首项
-- (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst isSplitActive:(BOOL)isSplitActive;
+- (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst protectionState:(CV3AppPanelProtectionState)protectionState;
 - (void)startBreathing;
 - (void)startPulse; 
 - (void)stopPulse;  
@@ -449,22 +455,26 @@ struct {
     self.iconView.transform = t;
 }
 
-- (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst isSplitActive:(BOOL)isSplitActive {
+- (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst protectionState:(CV3AppPanelProtectionState)protectionState {
     self.iconView.image = info.icon;
     self.pinnedIndicator.hidden = !info.isPinned;
     self.isFirstResult = isFirst;
     if (info.isPinned) [self.iconView bringSubviewToFront:self.pinnedIndicator];
 
     UIColor *splitColor = [UIColor colorWithRed:0.0 green:0.62 blue:1.0 alpha:1.0];
-    self.iconBackdrop.backgroundColor = isSplitActive ? [splitColor colorWithAlphaComponent:0.30] : [[UIColor labelColor] colorWithAlphaComponent:0.08];
-    self.iconBackdrop.layer.borderWidth = isSplitActive ? 1.5 : 0.0;
-    self.iconBackdrop.layer.borderColor = isSplitActive ? [splitColor colorWithAlphaComponent:0.80].CGColor : [UIColor clearColor].CGColor;
-    self.iconBackdrop.layer.shadowColor = isSplitActive ? splitColor.CGColor : [UIColor blackColor].CGColor;
-    self.iconBackdrop.layer.shadowOpacity = isSplitActive ? 0.55 : (float)CV3Style.iconShadowOpacity;
-    self.iconBackdrop.layer.shadowRadius = isSplitActive ? 9.0 : CV3Style.iconShadowRadius;
+    UIColor *foregroundColor = [UIColor colorWithRed:1.0 green:0.28 blue:0.24 alpha:1.0];
+    BOOL isProtected = (protectionState != CV3AppPanelProtectionStateNone);
+    UIColor *protectionColor = (protectionState == CV3AppPanelProtectionStateForeground) ? foregroundColor : splitColor;
+    self.iconBackdrop.backgroundColor = isProtected ? [protectionColor colorWithAlphaComponent:0.30] : [[UIColor labelColor] colorWithAlphaComponent:0.08];
+    self.iconBackdrop.layer.borderWidth = isProtected ? 1.5 : 0.0;
+    self.iconBackdrop.layer.borderColor = isProtected ? [protectionColor colorWithAlphaComponent:0.80].CGColor : [UIColor clearColor].CGColor;
+    self.iconBackdrop.layer.shadowColor = isProtected ? protectionColor.CGColor : [UIColor blackColor].CGColor;
+    self.iconBackdrop.layer.shadowOpacity = isProtected ? 0.55 : (float)CV3Style.iconShadowOpacity;
+    self.iconBackdrop.layer.shadowRadius = isProtected ? 9.0 : CV3Style.iconShadowRadius;
+    self.iconView.alpha = isProtected ? 0.62 : 1.0;
 
     if (searchText && searchText.length > 0) {
-        NSMutableAttributedString *as = [[NSMutableAttributedString alloc] initWithString:info.name attributes:@{NSForegroundColorAttributeName: isSplitActive ? splitColor : [UIColor labelColor]}];
+        NSMutableAttributedString *as = [[NSMutableAttributedString alloc] initWithString:info.name attributes:@{NSForegroundColorAttributeName: isProtected ? protectionColor : [UIColor labelColor]}];
         NSRange range = [info.name rangeOfString:searchText options:NSCaseInsensitiveSearch];
         if (range.location != NSNotFound) {
             [as addAttribute:NSForegroundColorAttributeName value:[UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:1.0] range:range];
@@ -476,18 +486,18 @@ struct {
         if (isFirst) {
             [self startPulse];
             self.iconView.layer.borderWidth = 1.5;
-            self.iconView.layer.borderColor = (isSplitActive ? [splitColor colorWithAlphaComponent:0.9] : [UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:0.6]).CGColor;
+            self.iconView.layer.borderColor = (isProtected ? [protectionColor colorWithAlphaComponent:0.9] : [UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:0.6]).CGColor;
         } else {
             [self stopPulse];
-            self.iconView.layer.borderWidth = isSplitActive ? 1.5 : 0.0;
-            self.iconView.layer.borderColor = isSplitActive ? [splitColor colorWithAlphaComponent:0.9].CGColor : [UIColor clearColor].CGColor;
+            self.iconView.layer.borderWidth = isProtected ? 1.5 : 0.0;
+            self.iconView.layer.borderColor = isProtected ? [protectionColor colorWithAlphaComponent:0.9].CGColor : [UIColor clearColor].CGColor;
         }
     } else {
         self.nameLabel.attributedText = nil;
         self.nameLabel.text = info.name;
-        self.nameLabel.textColor = isSplitActive ? splitColor : [UIColor labelColor];
-        self.iconView.layer.borderWidth = isSplitActive ? 1.5 : 0.0;
-        self.iconView.layer.borderColor = isSplitActive ? [splitColor colorWithAlphaComponent:0.9].CGColor : [UIColor clearColor].CGColor;
+        self.nameLabel.textColor = isProtected ? protectionColor : [UIColor labelColor];
+        self.iconView.layer.borderWidth = isProtected ? 1.5 : 0.0;
+        self.iconView.layer.borderColor = isProtected ? [protectionColor colorWithAlphaComponent:0.9].CGColor : [UIColor clearColor].CGColor;
     }
 }
 - (void)startBreathing {
@@ -1361,6 +1371,7 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 @property (nonatomic, strong) UIImpactFeedbackGenerator *feedback;
 @property (nonatomic, strong) UISelectionFeedbackGenerator *selectionFeedback;
 @property (nonatomic, strong) NSTimer *heartbeatTimer;
+@property (nonatomic, strong) NSTimer *panelStateRefreshTimer;
 @property (nonatomic, assign) BOOL isKeyboardVisible; 
 @property (nonatomic, assign) BOOL observersRegistered;
 @property (nonatomic, assign) BOOL hasBeenMoved;
@@ -1543,6 +1554,7 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
 }
 @end
 
+#import "CV3WorkspaceSupport.h"
 #import "CV3Window.inc"
 
 static NSTimeInterval lastLogTime = 0;
@@ -1670,8 +1682,6 @@ static void CV3ApplySceneRotationContextToProject(CV3SceneRotationContext contex
     }
 }
 %end
-
-#import "CV3WorkspaceSupport.h"
 
 @interface SBWorkspaceTransitionRequest : NSObject
 @property (nonatomic, copy) NSSet *entities;
@@ -2351,28 +2361,33 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
 
 %hook SBApplication
 - (BOOL)isBackgrounded {
+    BOOL originalBackgrounded = %orig;
+    CV3RecordApplicationForegroundState(self.bundleIdentifier, !originalBackgrounded);
+
     if (floatingWindows && floatingWindows.count > 0) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if ([self.bundleIdentifier isEqualToString:win.bundleID] && !win.isClosing) {
                 // 如果窗口被 Stash (侧边隐藏)，允许应用进入正常的后台挂起状态，减少 CPU/内存压力
-                if (win.isStashed) return %orig;
+                if (win.isStashed) return originalBackgrounded;
                 return NO; // 核心：欺骗系统，让其认为该 App 始终在“前台”运行
             }
         }
     }
-    return %orig;
+    return originalBackgrounded;
 }
 
 - (BOOL)isSuspended {
+    BOOL originalSuspended = %orig;
+
     if (floatingWindows && floatingWindows.count > 0) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if ([self.bundleIdentifier isEqualToString:win.bundleID] && !win.isClosing) {
-                if (win.isStashed) return %orig;
+                if (win.isStashed) return originalSuspended;
                 return NO; 
             }
         }
     }
-    return %orig;
+    return originalSuspended;
 }
 %end
 
@@ -2421,6 +2436,8 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
 
 %hook FBScene
 - (void)updateSettings:(id)arg1 withTransitionContext:(id)arg2 {
+    CV3RecordSceneForegroundState((FBScene *)self, arg1, @"updateSettings");
+
     if (floatingWindows) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if ([self.identifier containsString:win.bundleID] && !win.isClosing) {
@@ -2460,6 +2477,8 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
 }
 
 - (void)updateSettings:(id)arg1 withTransitionContext:(id)arg2 completion:(id)arg3 {
+    CV3RecordSceneForegroundState((FBScene *)self, arg1, @"updateSettingsCompletion");
+
     if (floatingWindows) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if ([self.identifier containsString:win.bundleID] && !win.isClosing) {
