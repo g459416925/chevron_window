@@ -1347,15 +1347,9 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 @property (nonatomic, strong) UIVisualEffectView *appPanel; 
 @property (nonatomic, strong) UICollectionView *collectionView;
 @property (nonatomic, strong) UIView *edgeTriggerView; 
-@property (nonatomic, strong) CAGradientLayer *specularHighlight;
-@property (nonatomic, strong) CMMotionManager *motionManager;
-@property (nonatomic, strong) CADisplayLink *liquidDisplayLink;
 @property (nonatomic, strong) UIView *bezierContainer;
 @property (nonatomic, strong) CAShapeLayer *bezierLayer;
 @property (nonatomic, strong) UIVisualEffectView *bezierBlur;
-@property (nonatomic, strong) CALayer *cyanLayer;
-@property (nonatomic, strong) CALayer *magentaLayer;
-@property (nonatomic, strong) UIView *dispersionContainer; 
 @property (nonatomic, assign) BOOL isPanelShowing;
 @property (nonatomic, assign) BOOL isAnimating;
 @property (nonatomic, assign) BOOL isProcessing; 
@@ -1391,31 +1385,11 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 @property (nonatomic, copy) NSString *selectedCategory; 
 @property (nonatomic, assign) CGAffineTransform baseRotationTransform; 
 @property (nonatomic, strong) UIView *contrastBackdrop; 
-@property (nonatomic, strong) CALayer *innerGlowLayer; 
 @property (nonatomic, assign) CGPoint cachedTargetCenter; 
-@property (nonatomic, assign) CGFloat currentDecoDX; 
-@property (nonatomic, assign) CGFloat currentDecoDY; 
-@property (nonatomic, assign) CGFloat baseRoll; 
-@property (nonatomic, assign) CGFloat basePitch; 
-@property (nonatomic, assign) BOOL hasCapturedBaseline; 
 
-// 建议 1：光纤导光图层 (Fiber-Optic Glows)
-@property (nonatomic, strong) CAGradientLayer *redGlow, *yellowGlow, *greenGlow;
-
-#pragma mark - 创意：光学玻璃与引力场支持
-@property (nonatomic, strong) UIView *refractionView; // 光学折射容器
-@property (nonatomic, strong) CIFilter *distortionFilter; // 位移畸变滤镜
 @property (nonatomic, assign) BOOL isMagneticLayoutActive; // 引力布局状态
+@property (nonatomic, assign) NSInteger interactionCount;
 
-// 建议 1-3：主动交互系统 (Active Interactive System)
-@property (nonatomic, strong) CAShapeLayer *trailLayer; 
-@property (nonatomic, strong) UIView *lightWaveView;
-@property (nonatomic, assign) NSInteger interactionCount; 
-
-// 终极融合系统属性
-@property (nonatomic, strong) UIView *projectionView; // 呼吸投影层
-@property (nonatomic, assign) BOOL isInPredictiveMode; // 交互黑洞预知模式
-@property (nonatomic, assign) CGPoint lastVelocity; // 惯性偏移计算
 
 // 拖拽分屏支持
 @property (nonatomic, strong) UIImageView *draggedIconView;
@@ -1427,9 +1401,7 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 - (void)loadAppsAsync;
 - (void)applyBackgroundTint:(UIColor *)color;
 - (NSString *)_role; 
-- (void)triggerCollisionImpulse; 
 - (void)updateMagneticLayout;
-- (void)emitLightWaveFromPoint:(CGPoint)point;
 - (void)applyAgingEffectToCell:(CV3AppCell *)cell withInfo:(CV3AppInfo *)info;
 - (void)refreshGlassAccentSurfaces;
 - (void)applyGlassAccentToCategoryButton:(UIButton *)button selected:(BOOL)selected suggested:(BOOL)suggested;
