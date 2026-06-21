@@ -1956,6 +1956,7 @@ static NSTimeInterval lastLogTime = 0;
 }
 
 - (void)transaction:(id)arg1 willBeginLayoutTransitionWithContext:(id)arg2 {
+    CV3ExitExposeModeIfNeeded(nil, NO);
     CV3LogToFile(@"[Workspace] Layout 转换即将开始...");
     CV3BeginWorkspaceTransitionProtection(@"LayoutWillBegin");
     %orig;
@@ -1972,6 +1973,7 @@ static NSTimeInterval lastLogTime = 0;
 }
 
 - (void)executeTransitionRequest:(id)arg1 {
+    CV3ExitExposeModeIfNeeded(nil, NO);
     if ([arg1 respondsToSelector:@selector(source)]) {
         CV3LogToFile(@"[Workspace] 执行转换请求, Source: %ld", (long)[(SBMainWorkspaceTransitionRequest *)arg1 source]);
     }
@@ -1981,6 +1983,7 @@ static NSTimeInterval lastLogTime = 0;
 
 - (void)workspace:(id)arg1 didExecuteTransitionRequest:(id)arg2 {
     %orig;
+    CV3ExitExposeModeIfNeeded(nil, NO);
     CV3LogToFile(@"[Workspace] 转换请求已执行完毕，执行最终渲染对齐");
     CV3EndWorkspaceTransitionProtection(@"DidExecuteTransitionRequest");
     if (floatingWindows) {
@@ -2010,6 +2013,7 @@ static NSTimeInterval lastLogTime = 0;
 %hook SBLockScreenManager
 - (void)lockScreenViewControllerDidPresent {
     %orig;
+    CV3ExitExposeModeIfNeeded(nil, NO);
     if (sharedWindow) sharedWindow.hidden = YES;
     // 核心：分屏窗口在锁屏时不应被强制隐藏，除非用户手动操作
     if (floatingWindows) {
@@ -2037,6 +2041,7 @@ static NSTimeInterval lastLogTime = 0;
 %hook SBControlCenterController
 - (void)_willPresent {
     %orig;
+    CV3ExitExposeModeIfNeeded(nil, NO);
     if (sharedWindow) {
         sharedWindow.isSuppressedBySystem = YES;
         sharedWindow.hidden = YES;
@@ -2060,6 +2065,7 @@ static NSTimeInterval lastLogTime = 0;
 %hook SBCoverSheetPresentationManager
 - (void)setCoverSheetPresented:(BOOL)arg1 animated:(BOOL)arg2 {
     %orig;
+    if (arg1) CV3ExitExposeModeIfNeeded(nil, NO);
     if (sharedWindow) {
         sharedWindow.isSuppressedBySystem = arg1;
         sharedWindow.hidden = arg1;
@@ -2079,6 +2085,7 @@ static NSTimeInterval lastLogTime = 0;
 %hook CSCoverSheetViewController
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
+    CV3ExitExposeModeIfNeeded(nil, NO);
     if (sharedWindow) {
         sharedWindow.isSuppressedBySystem = YES;
         sharedWindow.hidden = YES;

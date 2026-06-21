@@ -20,6 +20,8 @@ static void CV3OpenApplicationFast(NSString *bundleID, NSString *reason) {
         return;
     }
 
+    CV3ExitExposeModeIfNeeded(nil, NO);
+
     @try {
         id sharedApp = [UIApplication sharedApplication];
         if ([sharedApp respondsToSelector:@selector(launchApplicationWithIdentifier:suspended:)]) {
@@ -69,6 +71,8 @@ __attribute__((unused)) static id CV3SpringBoardIconForBundleID(NSString *bundle
 
 __attribute__((unused)) static BOOL CV3LaunchSpringBoardIconFast(CV3AppInfo *info, NSString *reason) {
     if (info.bundleId.length == 0) return NO;
+
+    CV3ExitExposeModeIfNeeded(nil, NO);
 
     id icon = info.sbIcon ?: CV3SpringBoardIconForBundleID(info.bundleId);
     if (!icon) return NO;
@@ -148,6 +152,7 @@ static CV3FloatingAppWindow *CV3FloatingWindowForBundleID(NSString *bundleID) {
 static void CV3RestoreAndFocusFloatingWindow(CV3FloatingAppWindow *window, NSString *reason) {
     if (!window || window.isClosing) return;
 
+    CV3ExitExposeModeIfNeeded(window, YES);
     CV3LogToFile(@"[Launcher] 命中已有分屏，恢复并置顶: %@ (%@)", window.bundleID ?: @"nil", reason ?: @"Unknown");
     [window restoreFromStash];
     [window promoteFloatingWindowInZOrder];
@@ -226,6 +231,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 }
 
 - (void)handleDoubleTap:(UITapGestureRecognizer *)gesture {
+    CV3ExitExposeModeIfNeeded(nil, NO);
     // 建议 5：搜索极速启动
     // 如果搜索框有内容且有结果，双击面板直接启动第一个
     if (self.searchField.text.length > 0 && self.filteredApps.count > 0) {
@@ -240,6 +246,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 // 统一 App 启动逻辑
 - (void)launchApp:(CV3AppInfo *)info {
     if (self.launchDebounce) return;
+    CV3ExitExposeModeIfNeeded(nil, NO);
     self.launchDebounce = YES;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         self.launchDebounce = NO;
@@ -278,6 +285,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 }
 
 - (void)searchTextChanged:(UITextField *)textField {
+    CV3ExitExposeModeIfNeeded(nil, NO);
     [self filterApps];
 }
 
@@ -398,6 +406,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 
 - (void)textFieldDidBeginEditing:(UITextField *)textField {
     if (textField == self.searchField) {
+        CV3ExitExposeModeIfNeeded(nil, NO);
         UIView *container = textField.superview;
         
         // 建议2：搜索框液态响应 (Liquid Search Focus)
@@ -1021,6 +1030,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     CGPoint pointInPanel = [gesture locationInView:self.panelContainer];
     
     if (gesture.state == UIGestureRecognizerStateBegan) {
+        CV3ExitExposeModeIfNeeded(nil, NO);
         NSIndexPath *indexPath = [self.collectionView indexPathForItemAtPoint:pointInCollection];
         if (indexPath && indexPath.item < self.filteredApps.count) {
             CV3AppCell *cell = (CV3AppCell *)[self.collectionView cellForItemAtIndexPath:indexPath];
@@ -1234,6 +1244,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 }
 
 - (void)handleCategoryTap:(UIButton *)sender {
+    CV3ExitExposeModeIfNeeded(nil, NO);
     [self.selectionFeedback selectionChanged]; // 模拟物理拨轮的刻度感
     
     // 从标题中解析出原始分类名，如从 "社交 (12)" 解析出 "社交"
@@ -1381,6 +1392,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     
     
     if (gesture.state == UIGestureRecognizerStateBegan) {
+        CV3ExitExposeModeIfNeeded(nil, NO);
         if (location.y > 45.0) { return; }
         self.hasBeenMoved = YES;
         [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.5 initialSpringVelocity:1.0 options:0 animations:^{
@@ -1458,10 +1470,14 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 }
 
 - (void)handleDimmingTap:(UITapGestureRecognizer *)tap {
+    CV3ExitExposeModeIfNeeded(nil, NO);
     [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
 }
 
 - (void)handleResize:(UIPanGestureRecognizer *)gesture {
+    if (!gesture || gesture.state == UIGestureRecognizerStateBegan) {
+        CV3ExitExposeModeIfNeeded(nil, NO);
+    }
     // 增加 resize 锁
     self.isProcessing = YES; 
 
@@ -1687,6 +1703,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 }
 
 - (void)handleTrafficLight:(UIButton *)sender {
+    CV3ExitExposeModeIfNeeded(nil, NO);
     // 立即反馈
     [self.feedback impactOccurred];
     [self updateTrafficLightsFocus:NO];
@@ -2073,6 +2090,9 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
 - (void)animateSpotlight:(BOOL)visible fromPoint:(CGPoint)point velocity:(CGFloat)velocity {
     if (self.isAnimating) return;
+    if (visible) {
+        CV3ExitExposeModeIfNeeded(nil, NO);
+    }
     self.isPanelShowing = visible; self.isAnimating = YES;
     if (visible) {
         self.searchField.text = @"";
@@ -2618,6 +2638,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 }
 
 - (void)show {
+    CV3ExitExposeModeIfNeeded(nil, NO);
     [self attachToCurrentActiveScene];
     self.hidden = NO;
 
