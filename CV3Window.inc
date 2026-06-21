@@ -14,14 +14,41 @@ static void CV3OpenApplicationFast(NSString *bundleID, NSString *reason) {
     if (bundleID.length == 0) return;
 
     CV3ExitExposeModeIfNeeded(nil, NO);
+    
+    NSString *currentActive = CV3CurrentWorkspaceBundleID();
+    CV3LogToFile(@"[Launcher] Fast open 准备启动: %@, 当前前台App: %@, reason: %@", bundleID, currentActive, reason ?: @"Unknown");
 
     // 建议 2：使用高优先级全局队列异步启动，防止主线程 UI 渲染被阻塞以实现秒级跳转
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
         @try {
             id workspace = [CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace];
-            if (workspace && [workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
-                BOOL opened = ((BOOL (*)(id, SEL, id))objc_msgSend)(workspace, @selector(openApplicationWithBundleID:), bundleID);
-                CV3LogToFile(@"[Launcher] Fast open %@ -> %d (%@)", bundleID, opened, reason ?: @"Unknown");
+            BOOL opened = NO;
+            if (workspace) {
+                if ([workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
+                    opened = ((BOOL (*)(id, SEL, id))objc_msgSend)(workspace, @selector(openApplicationWithBundleID:), bundleID);
+                    CV3LogToFile(@"[Launcher] Fast open 调用结果: target=%@, 成功=%d, 前台App=%@", bundleID, opened, CV3CurrentWorkspaceBundleID());
+                } else {
+                    CV3LogToFile(@"[Launcher] Fast open 错误: LSApplicationWorkspace 不响应 openApplicationWithBundleID:");
+                }
+            } else {
+                CV3LogToFile(@"[Launcher] Fast open 错误: LSApplicationWorkspace 为 nil");
+            }
+
+            if (!opened) {
+                // 降级使用 SpringBoard 进程内直接启动机制，必须在主线程执行
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    @try {
+                        id sb = [UIApplication sharedApplication];
+                        if ([sb respondsToSelector:@selector(launchApplicationWithIdentifier:suspended:)]) {
+                            CV3LogToFile(@"[Launcher] 尝试 SpringBoard 级联降级启动: %@", bundleID);
+                            ((void (*)(id, SEL, id, BOOL))objc_msgSend)(sb, @selector(launchApplicationWithIdentifier:suspended:), bundleID, NO);
+                        } else {
+                            CV3LogToFile(@"[Launcher] SpringBoard 不支持 launchApplicationWithIdentifier:suspended:");
+                        }
+                    } @catch (NSException *ex) {
+                        CV3LogToFile(@"[Launcher] SpringBoard 级联降级异常: %@", ex);
+                    }
+                });
             }
         } @catch (NSException *e) {
             CV3LogToFile(@"[Launcher] Fast open 异常 %@: %@", bundleID, e);
@@ -237,7 +264,8 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     [launcherImpact impactOccurred];
 
     NSString *bid = [info.bundleId copy];
-    CV3LogToFile(@"[Launcher] 主App面板应用点击: %@", bid);
+    NSString *currentActive = CV3CurrentWorkspaceBundleID();
+    CV3LogToFile(@"[Launcher] 主App面板应用点击: 目标=%@, 当前前台App=%@", bid, currentActive);
 
     // 核心修复：检测是否已有该应用的分屏窗口，如果有则直接激活而非全屏开启
     CV3FloatingAppWindow *existingWindow = CV3FloatingWindowForBundleID(bid);
