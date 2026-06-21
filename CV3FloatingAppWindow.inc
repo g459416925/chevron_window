@@ -77,6 +77,12 @@ static void CV3ExitExposeModeSelectingWindow(CV3FloatingAppWindow *selectedWindo
     }];
 }
 
+static BOOL CV3ExitExposeModeIfNeeded(CV3FloatingAppWindow *selectedWindow, BOOL focusSelected) {
+    if (!isGlobalExposeActive) return NO;
+    CV3ExitExposeModeSelectingWindow(selectedWindow, focusSelected);
+    return YES;
+}
+
 void CV3ToggleExposeMode(void) {
     if (isGlobalExposeActive) {
         CV3ExitExposeModeSelectingWindow(nil, NO);
@@ -834,18 +840,21 @@ void CV3ToggleExposeMode(void) {
 }
 
 - (void)handleChromeCloseAction:(id)sender {
+    CV3ExitExposeModeIfNeeded(self, NO);
     // 隐藏窗口：触发中等关闭震动
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
     [self closeWindow];
 }
 
 - (void)handleChromeMinimizeAction:(id)sender {
+    CV3ExitExposeModeIfNeeded(self, NO);
     // 隐藏窗口：触发中等关闭震动
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
     [self handleHideAction];
 }
 
 - (void)handleChromeModeAction:(id)sender {
+    CV3ExitExposeModeIfNeeded(self, YES);
     // 绿色按钮点击时弹出多任务菜单（全屏/所有浮窗/关闭）
     CV3LogToFile(@"[MultitaskingMenu] handleChromeModeAction clicked!");
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
@@ -1188,6 +1197,7 @@ void CV3ToggleExposeMode(void) {
 
 - (void)handleHomeBarTap:(UITapGestureRecognizer *)gesture {
     if (gesture.state != UIGestureRecognizerStateEnded || self.isClosing || self.isStashed) return;
+    CV3ExitExposeModeIfNeeded(self, NO);
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
     [self handleHideAction];
 }
@@ -1201,6 +1211,7 @@ void CV3ToggleExposeMode(void) {
     if (self.isClosing || self.isStashed) return;
 
     if (gesture.state == UIGestureRecognizerStateBegan) {
+        CV3ExitExposeModeIfNeeded(self, YES);
         self.isFullscreenMode = NO;
         self.isCompactMode = NO;
         self.initialResizeFrame = self.frame;
@@ -1389,7 +1400,7 @@ void CV3ToggleExposeMode(void) {
                 CGFloat commandSignal = fabs(commandVelocity) > 520.0 ? commandVelocity : commandProjection;
                 [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
                 if (commandSignal > 0.0) {
-                    if (isGlobalExposeActive) CV3ExitExposeModeSelectingWindow(nil, NO);
+                    CV3ExitExposeModeIfNeeded(nil, NO);
                     [self activateHostedAppFullscreenAndClose];
                 } else {
                     CV3ToggleExposeMode();
@@ -1519,9 +1530,7 @@ void CV3ToggleExposeMode(void) {
 - (void)activateHostedAppFullscreenAndClose {
     if (self.isClosing || self.bundleID.length == 0) return;
 
-    if (isGlobalExposeActive) {
-        CV3ExitExposeModeSelectingWindow(nil, NO);
-    }
+    CV3ExitExposeModeIfNeeded(nil, NO);
 
     NSString *bundleID = [self.bundleID copy];
     [self closeWindow];
@@ -1761,9 +1770,7 @@ void CV3ToggleExposeMode(void) {
 
 - (void)handleFullscreenMenuAction:(id)sender {
     [self dismissMultitaskingMenu];
-    if (isGlobalExposeActive) {
-        CV3ExitExposeModeSelectingWindow(self, YES);
-    }
+    CV3ExitExposeModeIfNeeded(self, YES);
 
     if (self.isFullscreenMode && !CGRectIsEmpty(self.preFullscreenFrame)) {
         CGRect restoreFrame = self.preFullscreenFrame;
@@ -1814,6 +1821,7 @@ void CV3ToggleExposeMode(void) {
 
 - (void)handleCloseMenuAction:(id)sender {
     [self dismissMultitaskingMenu];
+    CV3ExitExposeModeIfNeeded(self, NO);
     [self closeWindow];
 }
 
@@ -2428,6 +2436,7 @@ void CV3ToggleExposeMode(void) {
 
 - (void)handleHideAction {
     [self dismissMultitaskingMenu];
+    CV3ExitExposeModeIfNeeded(self, NO);
     UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [gen impactOccurred];
 
@@ -3013,6 +3022,7 @@ void CV3ToggleExposeMode(void) {
     if (gesture.state == UIGestureRecognizerStateBegan) {
         CV3LogToFile(@"[MoveGesture] handleMoveLongPress state began. Dismissing multitaskingMenu");
         [self dismissMultitaskingMenu];
+        CV3ExitExposeModeIfNeeded(self, YES);
         if (!self.isStashed) {
             self.stashGrabber.alpha = 0;
             self.clippingContainer.alpha = 1.0;
@@ -3184,11 +3194,14 @@ void CV3ToggleExposeMode(void) {
     } completion:nil];
 }
 - (void)handleRestoreTap:(UITapGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateEnded) return;
+    CV3ExitExposeModeIfNeeded(self, YES);
     [self restoreFromStash];
 }
 
 - (void)restoreFromStash {
     [self dismissMultitaskingMenu];
+    CV3ExitExposeModeIfNeeded(self, YES);
     // 恢复为普通 App 之上的浮窗层级，保留系统通知栏/控制中心在上方
     self.windowLevel = CV3Style.floatingApp; 
     [self makeKeyAndVisible];
@@ -3310,6 +3323,7 @@ void CV3ToggleExposeMode(void) {
 - (void)handleStashLongPress:(UILongPressGestureRecognizer *)gesture {
     if (!self.isStashed) return;
     if (gesture.state == UIGestureRecognizerStateBegan) {
+        CV3ExitExposeModeIfNeeded(self, NO);
         UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
         [gen impactOccurred];
         
@@ -3329,6 +3343,7 @@ void CV3ToggleExposeMode(void) {
     CGRect screen = CV3DisplayBoundsForWindow(self);
     
     if (gesture.state == UIGestureRecognizerStateBegan) {
+        CV3ExitExposeModeIfNeeded(self, YES);
         [UIView animateWithDuration:0.2 animations:^{
             [self applyCurrentTransformWithScale:1.0];
             [self visualShadowLayer].shadowOpacity = 0;
@@ -3500,6 +3515,7 @@ void CV3ToggleExposeMode(void) {
 
     if (gesture.state == UIGestureRecognizerStateBegan) {
         [self dismissMultitaskingMenu];
+        CV3ExitExposeModeIfNeeded(self, YES);
         self.isFullscreenMode = NO;
         self.isCompactMode = NO;
         self.initialResizeFrame = self.frame;
@@ -3810,6 +3826,7 @@ void CV3ToggleExposeMode(void) {
 
 - (void)closeWindow {
     if (self.isClosing) return;
+    CV3ExitExposeModeIfNeeded(self, NO);
     self.isClosing = YES;
     
     if (self.assertionWatchdogTimer) {
