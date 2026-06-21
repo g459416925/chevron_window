@@ -726,6 +726,46 @@ static CGAffineTransform CV3RotationTransformForInterfaceOrientation(UIInterface
     }
 }
 
+typedef struct {
+    UIInterfaceOrientation orientation;
+    BOOL isLandscape;
+    CGAffineTransform transform;
+    CGRect sceneBounds;
+    CGSize portraitSize;
+    UIWindowScene *scene;
+} CV3SceneRotationContext;
+
+static CV3SceneRotationContext CV3MakeSceneRotationContext(UIWindowScene *scene) {
+    UIInterfaceOrientation orientation = CV3TrustedInterfaceOrientation(scene);
+    CGRect bounds = CGRectZero;
+    if (scene && !CGRectIsEmpty(scene.coordinateSpace.bounds)) {
+        bounds = scene.coordinateSpace.bounds;
+    } else {
+        bounds = [UIScreen mainScreen].bounds;
+    }
+
+    CGFloat shortSide = MIN(bounds.size.width, bounds.size.height);
+    CGFloat longSide = MAX(bounds.size.width, bounds.size.height);
+
+    CV3SceneRotationContext context;
+    context.orientation = orientation;
+    context.isLandscape = UIInterfaceOrientationIsLandscape(orientation);
+    context.transform = CV3RotationTransformForInterfaceOrientation(orientation);
+    context.sceneBounds = bounds;
+    context.portraitSize = CGSizeMake(shortSide, longSide);
+    context.scene = scene;
+    return context;
+}
+
+static BOOL CV3SceneRotationContextNeedsApply(UIInterfaceOrientation currentOrientation,
+                                              CGAffineTransform currentTransform,
+                                              CV3SceneRotationContext context,
+                                              BOOL force) {
+    if (force) return YES;
+    return currentOrientation != context.orientation ||
+           !CGAffineTransformEqualToTransform(currentTransform, context.transform);
+}
+
 static BOOL CV3SetIntegerSetting(id settings, SEL getter, SEL setter, NSString *key, NSInteger value, BOOL force) {
     if (!settings) return NO;
 
@@ -1054,6 +1094,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (UIEdgeInsets)currentSafeAreaInsets;
 - (void)dismissLaunchSplashAnimated;
 - (void)enforcePortraitWindowGeometry;
+- (void)applySceneRotationContext:(CV3SceneRotationContext)context force:(BOOL)force;
 - (void)applyInterfaceOrientation:(UIInterfaceOrientation)orientation force:(BOOL)force;
 - (void)applyTrustedOrientationNow;
 - (CGRect)visiblePortraitContentFrame;
@@ -1374,6 +1415,7 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 - (void)applyAgingEffectToCell:(CV3AppCell *)cell withInfo:(CV3AppInfo *)info;
 - (void)refreshGlassAccentSurfaces;
 - (void)applyGlassAccentToCategoryButton:(UIButton *)button selected:(BOOL)selected suggested:(BOOL)suggested;
+- (void)applySceneRotationContext:(CV3SceneRotationContext)context force:(BOOL)force;
 @end
 
 static NSCache *cv3IconCache = nil; 
@@ -1514,6 +1556,76 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
 #import "CV3Window.inc"
 
 static NSTimeInterval lastLogTime = 0;
+static BOOL CV3SceneRotationDispatching = NO;
+
+static void CV3ApplySceneRotationContextToProject(CV3SceneRotationContext context, NSString *reason, BOOL force) {
+    if (!CV3IsValidInterfaceOrientation(context.orientation)) return;
+
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CV3ApplySceneRotationContextToProject(context, reason, force);
+        });
+        return;
+    }
+    if (CV3SceneRotationDispatching) return;
+
+    BOOL needsDispatch = force;
+    if (!needsDispatch && sharedWindow) {
+        BOOL sharedIsLandscape = sharedWindow.bounds.size.width > sharedWindow.bounds.size.height;
+        needsDispatch = CV3SceneRotationContextNeedsApply(sharedWindow.targetOrientation,
+                                                          sharedWindow.baseRotationTransform,
+                                                          context,
+                                                          NO) ||
+                        sharedIsLandscape != context.isLandscape;
+    }
+    if (!needsDispatch && floatingWindows) {
+        for (CV3FloatingAppWindow *win in [floatingWindows copy]) {
+            if (![win isKindOfClass:[CV3FloatingAppWindow class]] || win.isClosing) continue;
+            if (CV3SceneRotationContextNeedsApply(win.lastLayoutOrientation,
+                                                 win.baseRotationTransform,
+                                                 context,
+                                                 NO)) {
+                needsDispatch = YES;
+                break;
+            }
+        }
+    }
+    if (!needsDispatch) return;
+
+    CV3SceneRotationDispatching = YES;
+    CV3LastTrustedInterfaceOrientation = context.orientation;
+
+    NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
+    if (currentTime - lastLogTime > 0.5) {
+        lastLogTime = currentTime;
+        CV3LogToFile(@"[Orientation] 全局应用 UIScene 旋转: %ld, reason=%@",
+                     (long)context.orientation,
+                     reason ?: @"Unknown");
+    }
+
+    @try {
+        if (sharedWindow) {
+            [sharedWindow applySceneRotationContext:context force:force];
+        }
+
+        if (floatingWindows) {
+            for (CV3FloatingAppWindow *win in [floatingWindows copy]) {
+                if (![win isKindOfClass:[CV3FloatingAppWindow class]] || win.isClosing) continue;
+                UIInterfaceOrientation previousOrientation = win.lastLayoutOrientation;
+                CGAffineTransform previousRotation = win.baseRotationTransform;
+                [win applySceneRotationContext:context force:force];
+                if (previousOrientation != context.orientation ||
+                    !CGAffineTransformEqualToTransform(previousRotation, win.baseRotationTransform)) {
+                    [win attachToCurrentActiveScene];
+                }
+            }
+        }
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Error] 全局方向同步异常: %@", e);
+    }
+
+    CV3SceneRotationDispatching = NO;
+}
 
 %hook UIWindow
 - (void)layoutSubviews {
@@ -1541,70 +1653,15 @@ static NSTimeInterval lastLogTime = 0;
         if (currentOrientation == UIInterfaceOrientationUnknown || currentOrientation == 0) {
             return;
         }
-        CV3LastTrustedInterfaceOrientation = currentOrientation;
-
-        NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
-
-        BOOL shouldLog = (currentTime - lastLogTime > 0.5);
-        if (shouldLog) {
-            lastLogTime = currentTime;
-
-            CV3LogToFile(@"[Orientation] 采信并应用方向改变: %ld, 来源 Role: %@", (long)currentOrientation, role);
-        }
-
-        BOOL isLandscape = UIInterfaceOrientationIsLandscape(currentOrientation);
-        CGAffineTransform targetRotation = CV3RotationTransformForInterfaceOrientation(currentOrientation);
-        BOOL needsDispatch = NO;
-        if (sharedWindow) {
-            BOOL sharedIsLandscape = sharedWindow.bounds.size.width > sharedWindow.bounds.size.height;
-            needsDispatch = (sharedWindow.targetOrientation != currentOrientation || sharedIsLandscape != isLandscape);
-        }
-        if (!needsDispatch && floatingWindows) {
-            for (CV3FloatingAppWindow *win in floatingWindows) {
-                if (![win isKindOfClass:[CV3FloatingAppWindow class]] || win.isClosing) continue;
-                BOOL winRotationChanged = !CGAffineTransformEqualToTransform(win.baseRotationTransform, targetRotation);
-                if (win.lastLayoutOrientation != currentOrientation || winRotationChanged) {
-                    needsDispatch = YES;
-                    break;
-                }
-            }
-        }
-        if (!needsDispatch) return;
 
         isUpdating = YES;
+        CV3SceneRotationContext context = CV3MakeSceneRotationContext(self.windowScene);
+        context.orientation = currentOrientation;
+        context.isLandscape = UIInterfaceOrientationIsLandscape(currentOrientation);
+        context.transform = CV3RotationTransformForInterfaceOrientation(currentOrientation);
         // 使用异步确保当前 layout 周期执行完毕，避免重入导致的错位
         dispatch_async(dispatch_get_main_queue(), ^{
-            @try {
-                if (sharedWindow) {
-                    BOOL sharedOrientationChanged = (sharedWindow.targetOrientation != currentOrientation);
-                    BOOL currentIsLandscape = sharedWindow.bounds.size.width > sharedWindow.bounds.size.height;
-                    if (sharedOrientationChanged || isLandscape != currentIsLandscape) {
-                        sharedWindow.targetOrientation = currentOrientation;
-                        if (isLandscape != currentIsLandscape) {
-                            CGRect b = sharedWindow.bounds;
-                            sharedWindow.bounds = CGRectMake(0, 0, b.size.height, b.size.width);
-                        }
-                        [sharedWindow attachToCurrentActiveScene];
-                        [sharedWindow setNeedsLayout];
-                    }
-                }
-                
-                if (floatingWindows) {
-                    for (CV3FloatingAppWindow *win in floatingWindows) {
-                        if ([win isKindOfClass:[CV3FloatingAppWindow class]] && !win.isClosing) {
-                            UIInterfaceOrientation previousOrientation = win.lastLayoutOrientation;
-                            CGAffineTransform previousRotation = win.baseRotationTransform;
-                            [win applyInterfaceOrientation:currentOrientation force:NO];
-                            if (previousOrientation != currentOrientation ||
-                                !CGAffineTransformEqualToTransform(previousRotation, win.baseRotationTransform)) {
-                                [win attachToCurrentActiveScene];
-                            }
-                        }
-                    }
-                }
-            } @catch (NSException *e) {
-                CV3LogToFile(@"[Error] 方向同步队列异常: %@", e);
-            }
+            CV3ApplySceneRotationContextToProject(context, @"UIWindowLayout", NO);
             isUpdating = NO;
         });
     }
@@ -1957,6 +2014,7 @@ static NSTimeInterval lastLogTime = 0;
 
 - (void)transaction:(id)arg1 willBeginLayoutTransitionWithContext:(id)arg2 {
     CV3ExitExposeModeIfNeeded(nil, NO);
+    CV3ApplySceneRotationContextToProject(CV3MakeSceneRotationContext(nil), @"WorkspaceLayoutWillBegin", NO);
     CV3LogToFile(@"[Workspace] Layout 转换即将开始...");
     CV3BeginWorkspaceTransitionProtection(@"LayoutWillBegin");
     %orig;
@@ -1974,6 +2032,7 @@ static NSTimeInterval lastLogTime = 0;
 
 - (void)executeTransitionRequest:(id)arg1 {
     CV3ExitExposeModeIfNeeded(nil, NO);
+    CV3ApplySceneRotationContextToProject(CV3MakeSceneRotationContext(nil), @"WorkspaceExecuteTransition", NO);
     if ([arg1 respondsToSelector:@selector(source)]) {
         CV3LogToFile(@"[Workspace] 执行转换请求, Source: %ld", (long)[(SBMainWorkspaceTransitionRequest *)arg1 source]);
     }
@@ -2112,6 +2171,7 @@ static NSTimeInterval lastLogTime = 0;
     sharedWindow.hidden = NO;
     sharedWindow.alpha = 1.0;
     [sharedWindow show];
+    CV3ApplySceneRotationContextToProject(CV3MakeSceneRotationContext(sharedWindow.windowScene), @"SpringBoardLaunch", YES);
 }
 %end
 
