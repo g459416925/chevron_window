@@ -1104,6 +1104,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
                         [floatingWindow makeKeyAndVisible];
                         floatingWindow.windowLevel = CV3Style.floatingApp;
                         CV3UpdateFloatingBackdrop(self.windowScene);
+                        [[NSNotificationCenter defaultCenter] postNotificationName:CV3FloatingWindowsDidChangeNotification object:nil];
                     }
                 });
                 
@@ -2670,6 +2671,10 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     self.needsFullReload = YES; 
 }
 
+- (void)handleFloatingWindowsDidChange {
+    [self.collectionView reloadData];
+}
+
 - (void)show {
     CV3ExitExposeModeIfNeeded(nil, NO);
     [self attachToCurrentActiveScene];
@@ -2688,6 +2693,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillShow:) name:UIKeyboardWillShowNotification object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillHide:) name:UIKeyboardWillHideNotification object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleFloatingWindowsDidChange) name:CV3FloatingWindowsDidChangeNotification object:nil];
         self.observersRegistered = YES;
     }
                                                
@@ -2920,7 +2926,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     
     // 增加首项判断逻辑，用于开启搜索首项高亮
     BOOL isFirst = (index == 0 && self.searchField.text.length > 0);
-    [cell configureWithInfo:info searchText:self.searchField.text isFirst:isFirst];
+    BOOL isSplitActive = (CV3FloatingWindowForBundleID(info.bundleId) != nil);
+    [cell configureWithInfo:info searchText:self.searchField.text isFirst:isFirst isSplitActive:isSplitActive];
 
     // 应用“熵减”衰老视觉效果
     [self applyAgingEffectToCell:cell withInfo:info];
