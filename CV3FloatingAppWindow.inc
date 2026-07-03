@@ -569,7 +569,11 @@ void CV3ToggleExposeMode(void) {
 
     if (self.isStashed) {
         CGPoint preferredCenter = CGRectIsEmpty(self.preStashFrame) ? self.center : CGPointMake(CGRectGetMidX(self.preStashFrame), CGRectGetMidY(self.preStashFrame));
-        self.preStashFrame = [self restorableFrameForOrientation:context.orientation preferredCenter:preferredCenter];
+        if (CGRectIsEmpty(self.preStashFrame)) {
+            self.preStashFrame = [self restorableFrameForOrientation:context.orientation preferredCenter:preferredCenter];
+        } else {
+            self.preStashFrame = [self safeAreaClampedFrame:self.preStashFrame preferredCenter:preferredCenter preserveSize:YES];
+        }
         if (orientationChanged || !CV3IsValidInterfaceOrientation(self.stashedRestoreSnapshotOrientation)) {
             [self updateStashedRestoreSnapshotForOrientation:context.orientation];
         }
@@ -673,8 +677,32 @@ void CV3ToggleExposeMode(void) {
                                     preferredCenter.y - targetSize.height * 0.5,
                                     targetSize.width,
                                     targetSize.height);
+    return [self safeAreaClampedFrame:targetFrame preferredCenter:preferredCenter preserveSize:YES];
+}
+
+- (CGRect)safeAreaClampedFrame:(CGRect)frame preferredCenter:(CGPoint)preferredCenter preserveSize:(BOOL)preserveSize {
+    CGRect screenBounds = CV3DisplayBoundsForWindow(self);
     UIEdgeInsets safeArea = [self currentSafeAreaInsets];
     CGFloat breath = CV3Style.safeAreaBreath;
+    CGFloat maxWidth = screenBounds.size.width - safeArea.left - safeArea.right - breath * 2.0;
+    CGFloat maxHeight = screenBounds.size.height - safeArea.top - safeArea.bottom - breath * 2.0;
+    CGSize targetSize = frame.size;
+
+    if (!preserveSize && targetSize.width > 0.0 && targetSize.height > 0.0) {
+        CGFloat widthScale = maxWidth / targetSize.width;
+        CGFloat heightScale = maxHeight / targetSize.height;
+        CGFloat scale = MIN(1.0, MIN(widthScale, heightScale));
+        if (scale > 0.0 && scale < 1.0) {
+            targetSize = CGSizeMake(targetSize.width * scale, targetSize.height * scale);
+        }
+    }
+
+    targetSize.width = MAX(1.0, targetSize.width);
+    targetSize.height = MAX(1.0, targetSize.height);
+    CGRect targetFrame = CGRectMake(preferredCenter.x - targetSize.width * 0.5,
+                                    preferredCenter.y - targetSize.height * 0.5,
+                                    targetSize.width,
+                                    targetSize.height);
     CGFloat minX = safeArea.left + breath;
     CGFloat minY = safeArea.top + breath;
     CGFloat maxX = screenBounds.size.width - safeArea.right - breath - targetFrame.size.width;
@@ -684,6 +712,13 @@ void CV3ToggleExposeMode(void) {
     targetFrame.origin.x = MIN(MAX(targetFrame.origin.x, minX), maxX);
     targetFrame.origin.y = MIN(MAX(targetFrame.origin.y, minY), maxY);
     return targetFrame;
+}
+
+- (CGRect)restorableFramePreservingStashedSizeForOrientation:(UIInterfaceOrientation)orientation preferredCenter:(CGPoint)preferredCenter {
+    if (CGRectIsEmpty(self.preStashFrame)) {
+        return [self restorableFrameForOrientation:orientation preferredCenter:preferredCenter];
+    }
+    return [self safeAreaClampedFrame:self.preStashFrame preferredCenter:preferredCenter preserveSize:NO];
 }
 
 - (CGRect)visiblePortraitContentFrame {
@@ -3374,8 +3409,7 @@ void CV3ToggleExposeMode(void) {
         CGRect iconFrame = self.frame;
         UIView *iconProxy = [self.stashGrabber snapshotViewAfterScreenUpdates:NO];
         CGPoint preferredCenter = CGRectIsEmpty(self.preStashFrame) ? self.center : CGPointMake(CGRectGetMidX(self.preStashFrame), CGRectGetMidY(self.preStashFrame));
-        CGRect targetFrame = [self restorableFrameForOrientation:self.targetOrientation preferredCenter:preferredCenter];
-        self.preStashFrame = targetFrame;
+        CGRect targetFrame = [self restorableFramePreservingStashedSizeForOrientation:self.targetOrientation preferredCenter:preferredCenter];
         self.stashGrabber.alpha = 0.0;
 
         self.isStashed = NO; // 先解除 Stash 标志，以便下面 updateSettings 时能被识别为前台
