@@ -1096,7 +1096,9 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (void)applyStashedGrabberOrientation;
 - (void)normalizeStashedGrabberLayout;
 - (void)updateStashIconAppearance;
+- (CGRect)safeAreaClampedFrame:(CGRect)frame preferredCenter:(CGPoint)preferredCenter preserveSize:(BOOL)preserveSize;
 - (CGRect)restorableFrameForOrientation:(UIInterfaceOrientation)orientation preferredCenter:(CGPoint)preferredCenter;
+- (CGRect)restorableFramePreservingStashedSizeForOrientation:(UIInterfaceOrientation)orientation preferredCenter:(CGPoint)preferredCenter;
 - (CGRect)currentVisualShadowFrame;
 - (UIImage *)snapshotImageForRestoreAnimation;
 - (void)updateStashedRestoreSnapshotForOrientation:(UIInterfaceOrientation)orientation;
