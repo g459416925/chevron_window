@@ -875,14 +875,27 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     }
 
     self.filteredApps = res;
-    
-    [self.collectionView reloadData];
+
+    BOOL isUserScrolling = CV3ScrollViewIsActivelyControlled(self.collectionView);
+    CGPoint preservedOffset = self.collectionView.contentOffset;
+
+    if (isUserScrolling) {
+        [UIView performWithoutAnimation:^{
+            [self.collectionView reloadData];
+            [self.collectionView layoutIfNeeded];
+            [self.collectionView setContentOffset:CV3ClampedContentOffsetForScrollView(self.collectionView, preservedOffset) animated:NO];
+        }];
+    } else {
+        [self.collectionView reloadData];
+    }
 
     // 列表刷新后只保留轻量入场动画，避免旧的磁吸/波纹 transform 干扰图标漂浮。
     NSInteger filterGeneration = self.interactionCount;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.01 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (filterGeneration != self.interactionCount) return;
-        [self animateIconsStaggered];
+        if (!CV3ScrollViewIsActivelyControlled(self.collectionView)) {
+            [self animateIconsStaggered];
+        }
         if (hasSearch && self.filteredApps.count > 0) {
             [self.feedback impactOccurredWithIntensity:0.75];
         }
@@ -1099,6 +1112,10 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
     if (gesture == self.systemEdgePan) {
+        if (self.isPanelShowing) {
+            return NO;
+        }
+
         // 使用与 handleEdgeInteraction 一致的安全绝对坐标系
         CGPoint location = [gesture locationInView:nil];
         
@@ -1150,6 +1167,9 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     if (gestureRecognizer == self.systemEdgePan || otherGestureRecognizer == self.systemEdgePan) {
+        if (self.isPanelShowing) {
+            return NO;
+        }
         return YES; // 允许与其他手势并发，避免被系统侧滑手势完全阻断
     }
 
@@ -1401,6 +1421,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     // 增加长按置顶手势
     UILongPressGestureRecognizer *pinLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleAppLongPress:)];
     pinLongPress.minimumPressDuration = 0.6;
+    pinLongPress.allowableMovement = kCV3AppDragLongPressAllowableMovement;
     pinLongPress.delegate = self;
     [self.collectionView addGestureRecognizer:pinLongPress];
 }
@@ -1531,6 +1552,16 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     CGPoint pointInPanel = [gesture locationInView:self.panelContainer];
     
     if (gesture.state == UIGestureRecognizerStateBegan) {
+        CGPoint scrollVelocity = [self.collectionView.panGestureRecognizer velocityInView:self.collectionView];
+        BOOL isScrollingApps = self.collectionView.dragging ||
+                               self.collectionView.decelerating ||
+                               fabs(scrollVelocity.y) > kCV3AppDragScrollVelocityGate;
+        if (isScrollingApps) {
+            self.draggedIconView = nil;
+            self.draggedAppInfo = nil;
+            return;
+        }
+
         [self hideSplitDropPreviewAnimated:NO];
         NSIndexPath *indexPath = [self.collectionView indexPathForItemAtPoint:pointInCollection];
         if (indexPath && indexPath.item < self.filteredApps.count) {
@@ -1854,9 +1885,14 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         [self.searchField resignFirstResponder];
         if (location.y > 45.0) { return; }
         self.hasBeenMoved = YES;
-        [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.5 initialSpringVelocity:1.0 options:0 animations:^{
+        [UIView animateWithDuration:kCV3PanelDragLiftDuration
+                              delay:0
+             usingSpringWithDamping:kCV3PanelDragLiftDamping
+              initialSpringVelocity:kCV3PanelDragLiftVelocity
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseInOut
+                         animations:^{
             CGAffineTransform currentTransform = self.panelContainer.transform;
-            self.panelContainer.transform = CGAffineTransformScale(currentTransform, 1.05, 1.05);
+            self.panelContainer.transform = CGAffineTransformScale(currentTransform, kCV3PanelDragLiftScale, kCV3PanelDragLiftScale);
         } completion:nil];
     }
 
@@ -1866,8 +1902,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         
         CGRect bounds = self.bounds;
         CGRect panelBounds = self.panelContainer.bounds;
-        CGFloat halfW = (panelBounds.size.width * 1.05) / 2.0;
-        CGFloat halfH = (panelBounds.size.height * 1.05) / 2.0;
+        CGFloat halfW = (panelBounds.size.width * kCV3PanelDragLiftScale) / 2.0;
+        CGFloat halfH = (panelBounds.size.height * kCV3PanelDragLiftScale) / 2.0;
         
         newCenter.x = MAX(halfW - panelBounds.size.width * 0.4, MIN(bounds.size.width - halfW + panelBounds.size.width * 0.4, newCenter.x));
         newCenter.y = MAX(halfH - panelBounds.size.height * 0.4, MIN(bounds.size.height - halfH + panelBounds.size.height * 0.4, newCenter.y));
@@ -1876,6 +1912,12 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         [gesture setTranslation:CGPointZero inView:self.panelContainer.superview];
     }
     if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        CALayer *presentationLayer = self.panelContainer.layer.presentationLayer;
+        if (presentationLayer) {
+            self.panelContainer.center = presentationLayer.position;
+            self.panelContainer.transform = CATransform3DGetAffineTransform(presentationLayer.transform);
+        }
+
         // 恢复原始缩放，但不重置 transform（保留旋转）
         CGAffineTransform current = self.panelContainer.transform;
         
@@ -1921,8 +1963,19 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             [rigid impactOccurredWithIntensity:1.0];
         }
 
-        [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.6 initialSpringVelocity:1.0 options:0 animations:^{
-            self.panelContainer.transform = CGAffineTransformScale(current, 1/1.05, 1/1.05);
+        CGPoint releaseVelocity = [gesture velocityInView:self.panelContainer.superview];
+        CGFloat springVelocity = CV3ClampedSpringVelocity(hypot(releaseVelocity.x, releaseVelocity.y),
+                                                          kCV3PanelDragReleaseVelocityDivisor,
+                                                          kCV3PanelDragReleaseMinVelocity,
+                                                          kCV3PanelDragReleaseMaxVelocity);
+
+        [UIView animateWithDuration:kCV3PanelDragReleaseDuration
+                              delay:0
+             usingSpringWithDamping:kCV3PanelDragReleaseDamping
+              initialSpringVelocity:springVelocity
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseInOut
+                         animations:^{
+            self.panelContainer.transform = CGAffineTransformScale(current, 1.0 / kCV3PanelDragLiftScale, 1.0 / kCV3PanelDragLiftScale);
             self.appPanel.alpha = 1.0; // 恢复全透明度
             self.panelContainer.center = targetCenter;
         } completion:nil];
@@ -2712,22 +2765,39 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         [self updateTrafficLightsFocus:NO];
         [self refreshGlassAccentSurfaces];
         
+        CALayer *presentationLayer = self.panelContainer.layer.presentationLayer;
+        if (presentationLayer) {
+            self.panelContainer.center = presentationLayer.position;
+            self.panelContainer.transform = CATransform3DGetAffineTransform(presentationLayer.transform);
+            self.panelContainer.alpha = presentationLayer.opacity;
+        }
+
         // 获取当前的旋转状态
         CGAffineTransform currentRotation = self.panelContainer.transform;
+        CGFloat springVelocity = CV3ClampedSpringVelocity(velocity,
+                                                          kCV3PanelDismissVelocityDivisor,
+                                                          kCV3PanelDismissMinVelocity,
+                                                          kCV3PanelDismissMaxVelocity);
+        CGPoint dismissTarget = CGPointEqualToPoint(self.lastTriggerPoint, CGPointZero) ? point : self.lastTriggerPoint;
         
-        [UIView animateWithDuration:0.25 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0.5 options:0 animations:^{ 
+        [UIView animateWithDuration:kCV3PanelDismissDuration
+                              delay:0
+             usingSpringWithDamping:kCV3PanelDismissDamping
+              initialSpringVelocity:springVelocity
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseInOut
+                         animations:^{
             self.backgroundColor = [UIColor clearColor];
             self.panelContainer.alpha = 0; 
             self.panelContainer.layer.shadowOpacity = 0.0;
-            self.panelContainer.center = self.lastTriggerPoint; // 回退 to 存储的触发点
-            self.panelContainer.transform = CGAffineTransformScale(currentRotation, 0.5, 0.5);
+            self.panelContainer.center = dismissTarget; // 回退到存储的触发点
+            self.panelContainer.transform = CGAffineTransformScale(currentRotation, kCV3PanelDismissScale, kCV3PanelDismissScale);
             
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
             // 消失时再次放大模糊层，模拟消散
             for (UIView *subview in self.appPanel.subviews) {
                 if ([NSStringFromClass([subview class]) containsString:@"Backdrop"]) {
-                    subview.transform = CGAffineTransformMakeScale(1.5, 1.5);
+                    subview.transform = CGAffineTransformMakeScale(kCV3PanelDismissBackdropScale, kCV3PanelDismissBackdropScale);
                 }
             }
             [CATransaction commit];
@@ -2740,6 +2810,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 }
 
 - (void)animateIconsStaggered {
+    if (CV3ScrollViewIsActivelyControlled(self.collectionView)) return;
+
     NSArray *items = [self.collectionView visibleCells];
     NSArray *sorted = [items sortedArrayUsingComparator:^NSComparisonResult(UICollectionViewCell *a, UICollectionViewCell *b) {
         return [[self.collectionView indexPathForCell:a] compare:[self.collectionView indexPathForCell:b]];
@@ -2758,6 +2830,12 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
 - (void)scrollViewWillBeginDragging:(UIScrollView *)scrollView {
     [self.searchField resignFirstResponder];
+    [self.collectionView.layer removeAllAnimations];
+    for (UICollectionViewCell *cell in self.collectionView.visibleCells) {
+        [cell.layer removeAllAnimations];
+        cell.transform = CGAffineTransformIdentity;
+        cell.alpha = 1.0;
+    }
 }
 
 - (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView {
@@ -2944,11 +3022,17 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 }
 
 - (void)handleFloatingWindowsDidChange {
-    [self.collectionView reloadData];
+    CGPoint preservedOffset = self.collectionView.contentOffset;
+    [UIView performWithoutAnimation:^{
+        [self.collectionView reloadData];
+        [self.collectionView layoutIfNeeded];
+        [self.collectionView setContentOffset:CV3ClampedContentOffsetForScrollView(self.collectionView, preservedOffset) animated:NO];
+    }];
 }
 
 - (void)refreshProtectedAppMarkers {
     if (!self.isPanelShowing || self.collectionView.hidden) return;
+    if (CV3ScrollViewIsActivelyControlled(self.collectionView)) return;
 
     NSArray<NSIndexPath *> *visibleIndexPaths = [self.collectionView indexPathsForVisibleItems];
     if (visibleIndexPaths.count == 0) return;

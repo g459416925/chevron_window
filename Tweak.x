@@ -1408,6 +1408,52 @@ static CGFloat CGPointDistance(CGPoint p1, CGPoint p2) {
     return sqrt(pow(p1.x - p2.x, 2) + pow(p1.y - p2.y, 2));
 }
 
+static const CGFloat kCV3PanelDragLiftScale = 1.025;
+static const NSTimeInterval kCV3PanelDragLiftDuration = 0.22;
+static const CGFloat kCV3PanelDragLiftDamping = 0.82;
+static const CGFloat kCV3PanelDragLiftVelocity = 0.6;
+static const NSTimeInterval kCV3PanelDragReleaseDuration = 0.52;
+static const CGFloat kCV3PanelDragReleaseDamping = 0.88;
+static const CGFloat kCV3PanelDragReleaseMinVelocity = 0.25;
+static const CGFloat kCV3PanelDragReleaseMaxVelocity = 2.2;
+static const CGFloat kCV3PanelDragReleaseVelocityDivisor = 1100.0;
+static const NSTimeInterval kCV3PanelDismissDuration = 0.42;
+static const CGFloat kCV3PanelDismissDamping = 0.9;
+static const CGFloat kCV3PanelDismissMinVelocity = 0.35;
+static const CGFloat kCV3PanelDismissMaxVelocity = 2.4;
+static const CGFloat kCV3PanelDismissVelocityDivisor = 1400.0;
+static const CGFloat kCV3PanelDismissScale = 0.62;
+static const CGFloat kCV3PanelDismissBackdropScale = 1.34;
+static const CGFloat kCV3AppDragLongPressAllowableMovement = 6.0;
+static const CGFloat kCV3AppDragScrollVelocityGate = 80.0;
+
+static CGFloat CV3ClampedSpringVelocity(CGFloat velocity, CGFloat divisor, CGFloat minVelocity, CGFloat maxVelocity) {
+    CGFloat normalizedVelocity = fabs(velocity) / divisor;
+    return MIN(maxVelocity, MAX(minVelocity, normalizedVelocity));
+}
+
+static BOOL CV3ScrollViewIsActivelyControlled(UIScrollView *scrollView) {
+    return scrollView.tracking || scrollView.dragging || scrollView.decelerating;
+}
+
+static CGPoint CV3ClampedContentOffsetForScrollView(UIScrollView *scrollView, CGPoint contentOffset) {
+    UIEdgeInsets inset;
+    if (@available(iOS 11.0, *)) {
+        inset = scrollView.adjustedContentInset;
+    } else {
+        inset = scrollView.contentInset;
+    }
+
+    CGFloat minX = -inset.left;
+    CGFloat minY = -inset.top;
+    CGFloat maxX = MAX(minX, scrollView.contentSize.width - scrollView.bounds.size.width + inset.right);
+    CGFloat maxY = MAX(minY, scrollView.contentSize.height - scrollView.bounds.size.height + inset.bottom);
+
+    contentOffset.x = MIN(maxX, MAX(minX, contentOffset.x));
+    contentOffset.y = MIN(maxY, MAX(minY, contentOffset.y));
+    return contentOffset;
+}
+
 static CV3AppInfo *CV3CopyAppInfo(CV3AppInfo *source) {
     if (!source) return nil;
 
