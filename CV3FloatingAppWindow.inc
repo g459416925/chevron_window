@@ -3317,7 +3317,7 @@ void CV3ToggleExposeMode(void) {
         [UIView animateWithDuration:0.3 animations:^{
             [self visualShadowLayer].shadowOpacity = CV3Style.shadowOpacityPeak;
             [self visualShadowLayer].shadowRadius = CV3Style.shadowRadiusPeak;
-            [self applyCurrentTransformWithScale:1.05];
+            self.layer.transform = CATransform3DMakeScale(1.015, 1.015, 1.0);
         }];
         
         self.lastTargetSnapFrame = CGRectZero;
@@ -3391,7 +3391,7 @@ void CV3ToggleExposeMode(void) {
         }
 
             [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:UIViewAnimationOptionCurveEaseInOut animations:^{
-                [self applyCurrentTransformWithScale:1.0];
+                self.layer.transform = CATransform3DIdentity;
                 self.windowLevel = CV3Style.floatingApp;
             
             self.isStashed = NO;
@@ -3421,8 +3421,6 @@ void CV3ToggleExposeMode(void) {
             }
         } completion:^(BOOL finished) {
             [self enforceSceneForegroundState];
-            [self refreshHostViewPresentation];
-            [self syncWindowBoundsToClient];
             CV3UpdateFloatingBackdrop(self.windowScene);
         }];
         
