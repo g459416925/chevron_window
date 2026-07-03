@@ -381,14 +381,10 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
 @property (nonatomic, strong) UIView *iconBackdrop;
 @property (nonatomic, strong) UIImageView *iconView;
 @property (nonatomic, strong) UILabel *nameLabel;
-@property (nonatomic, strong) CAGradientLayer *iconHighlight;
 @property (nonatomic, strong) UIView *pinnedIndicator; 
-@property (nonatomic, assign) CGPoint iconOffset; // 新增：图标视差偏移
 @property (nonatomic, assign) BOOL isFirstResult; // 新增：是否为搜索首项
 - (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst protectionState:(CV3AppPanelProtectionState)protectionState;
 - (void)startBreathing;
-- (void)startPulse; 
-- (void)stopPulse;  
 @end
 
 @implementation CV3AppCell
@@ -411,16 +407,6 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
         self.iconView.layer.cornerRadius = CV3Style.iconCornerRadius;
         self.iconView.clipsToBounds = YES;
         [self.contentView addSubview:self.iconView];
-
-        self.iconHighlight = [CAGradientLayer layer];
-        self.iconHighlight.frame = self.iconView.bounds;
-        self.iconHighlight.colors = @[(id)[[UIColor labelColor] colorWithAlphaComponent:0.0].CGColor,
-                                      (id)[[UIColor labelColor] colorWithAlphaComponent:CV3Style.highlightAlpha].CGColor,
-                                      (id)[[UIColor labelColor] colorWithAlphaComponent:0.0].CGColor];
-        self.iconHighlight.startPoint = CGPointMake(0, 0);
-        self.iconHighlight.endPoint = CGPointMake(1, 1);
-        self.iconHighlight.opacity = 0; 
-        [self.iconView.layer addSublayer:self.iconHighlight];
 
         self.pinnedIndicator = [[UIView alloc] initWithFrame:CGRectMake(iconSize - 12, -4, 16, 16)];
         self.pinnedIndicator.backgroundColor = [UIColor cyanColor];
@@ -446,13 +432,6 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
         [self startBreathing];
     }
     return self;
-}
-
-- (void)setIconOffset:(CGPoint)offset {
-    _iconOffset = offset;
-    // 应用反向视差位移，模拟物理深度
-    CGAffineTransform t = CGAffineTransformMakeTranslation(offset.x, offset.y);
-    self.iconView.transform = t;
 }
 
 - (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst protectionState:(CV3AppPanelProtectionState)protectionState {
@@ -482,13 +461,10 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
         }
         self.nameLabel.attributedText = as;
         
-        // 如果是首选结果，开启强烈脉冲
         if (isFirst) {
-            [self startPulse];
             self.iconView.layer.borderWidth = 1.5;
             self.iconView.layer.borderColor = (isProtected ? [protectionColor colorWithAlphaComponent:0.9] : [UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:0.6]).CGColor;
         } else {
-            [self stopPulse];
             self.iconView.layer.borderWidth = isProtected ? 1.5 : 0.0;
             self.iconView.layer.borderColor = isProtected ? [protectionColor colorWithAlphaComponent:0.9].CGColor : [UIColor clearColor].CGColor;
         }
@@ -502,31 +478,36 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
 }
 - (void)startBreathing {
     [self.contentView.layer removeAnimationForKey:@"breathing"];
-    CAKeyframeAnimation *anim = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation.y"];
-    CGFloat offset = 2.0 + (arc4random_uniform(20) / 10.0);
-    anim.values = @[@0, @(-offset), @0, @(offset), @0];
-    anim.duration = 3.5 + (arc4random_uniform(20) / 10.0);
-    anim.repeatCount = HUGE_VALF;
-    anim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-    anim.beginTime = CACurrentMediaTime() + (arc4random_uniform(100) / 25.0);
-    [self.contentView.layer addAnimation:anim forKey:@"breathing"];
-}
+    [self.iconBackdrop.layer removeAnimationForKey:@"breathing"];
+    [self.iconView.layer removeAnimationForKey:@"breathing"];
 
-- (void)startPulse {
-    [self.iconHighlight removeAnimationForKey:@"pulse"];
-    CABasicAnimation *pulse = [CABasicAnimation animationWithKeyPath:@"opacity"];
-    pulse.fromValue = @(0.05);
-    pulse.toValue = @(0.25);
-    pulse.duration = 2.0 + (arc4random_uniform(10) / 10.0);
-    pulse.autoreverses = YES;
-    pulse.repeatCount = HUGE_VALF;
-    pulse.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-    [self.iconHighlight addAnimation:pulse forKey:@"pulse"];
-}
+    CGFloat lift = 7.0 + (arc4random_uniform(18) / 10.0);
+    CGFloat duration = 6.8 + (arc4random_uniform(18) / 10.0);
+    CFTimeInterval beginTime = CACurrentMediaTime() + (arc4random_uniform(80) / 100.0);
 
-- (void)stopPulse {
-    [self.iconHighlight removeAnimationForKey:@"pulse"];
-    self.iconHighlight.opacity = 0;
+    CAAnimationGroup *(^makeFloatGroup)(void) = ^CAAnimationGroup *{
+        CAKeyframeAnimation *floatY = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation.y"];
+        floatY.values = @[@0.0, @(-lift * 0.42), @(-lift), @(-lift * 0.88), @(-lift * 0.36), @0.0];
+        floatY.keyTimes = @[@0.0, @0.16, @0.38, @0.58, @0.82, @1.0];
+        floatY.calculationMode = kCAAnimationCubic;
+
+        CAKeyframeAnimation *scale = [CAKeyframeAnimation animationWithKeyPath:@"transform.scale"];
+        scale.values = @[@1.0, @1.012, @1.026, @1.018, @1.006, @1.0];
+        scale.keyTimes = floatY.keyTimes;
+        scale.calculationMode = kCAAnimationCubic;
+
+        CAAnimationGroup *group = [CAAnimationGroup animation];
+        group.animations = @[floatY, scale];
+        group.duration = duration;
+        group.beginTime = beginTime;
+        group.repeatCount = HUGE_VALF;
+        group.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        group.removedOnCompletion = NO;
+        return group;
+    };
+
+    [self.iconBackdrop.layer addAnimation:makeFloatGroup() forKey:@"breathing"];
+    [self.iconView.layer addAnimation:makeFloatGroup() forKey:@"breathing"];
 }
 @end
 
@@ -1392,7 +1373,6 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 @property (nonatomic, strong) CAGradientLayer *triggerPreviewLayer;
 @property (nonatomic, assign) UIInterfaceOrientation targetOrientation;
 @property (nonatomic, assign) CGPoint lastTriggerPoint;
-@property (nonatomic, strong) NSIndexPath *lastWaveHapticIndexPath;
 @property (nonatomic, strong) CAShapeLayer *searchBackground;
 @property (nonatomic, strong) UIScrollView *categoryBar; 
 @property (nonatomic, copy) NSString *selectedCategory; 
@@ -1400,7 +1380,6 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 @property (nonatomic, strong) UIView *contrastBackdrop; 
 @property (nonatomic, assign) CGPoint cachedTargetCenter; 
 
-@property (nonatomic, assign) BOOL isMagneticLayoutActive; // 引力布局状态
 @property (nonatomic, assign) NSInteger interactionCount;
 
 
@@ -1409,12 +1388,13 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 @property (nonatomic, strong) CV3AppInfo *draggedAppInfo;
 @property (nonatomic, assign) CGPoint dragStartCenter;
 @property (nonatomic, assign) CGPoint dragTouchOffset; // 新增：记录触碰点与图标中心的偏移量
+@property (nonatomic, strong) UIView *splitDropPreviewView;
+@property (nonatomic, strong) CAShapeLayer *splitDropPreviewLayer;
 
 - (void)show;
 - (void)loadAppsAsync;
 - (void)applyBackgroundTint:(UIColor *)color;
 - (NSString *)_role; 
-- (void)updateMagneticLayout;
 - (void)applyAgingEffectToCell:(CV3AppCell *)cell withInfo:(CV3AppInfo *)info;
 - (void)refreshGlassAccentSurfaces;
 - (void)applyGlassAccentToCategoryButton:(UIButton *)button selected:(BOOL)selected suggested:(BOOL)suggested;

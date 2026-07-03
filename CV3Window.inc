@@ -877,11 +877,8 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     self.filteredApps = res;
     
     [self.collectionView reloadData];
-    
-    // 调用引力布局
-    [self updateMagneticLayout];
 
-    // 建议 4 & 5：涟漪动效与首项吸附
+    // 列表刷新后只保留轻量入场动画，避免旧的磁吸/波纹 transform 干扰图标漂浮。
     NSInteger filterGeneration = self.interactionCount;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.01 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (filterGeneration != self.interactionCount) return;
@@ -1034,36 +1031,8 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     }
 }
 
-- (void)collectionView:(UICollectionView *)cv didHighlightItemAtIndexPath:(NSIndexPath *)indexPath {
-    UICollectionViewCell *cell = [cv cellForItemAtIndexPath:indexPath];
-    [UIView animateWithDuration:0.2 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
-        // 放大 1.1x 并向上漂浮 5pt，模拟 macOS Dock 的悬停/追踪感
-        cell.transform = CGAffineTransformMakeScale(1.1, 1.1);
-        cell.contentView.transform = CGAffineTransformMakeTranslation(0, -5);
-    } completion:nil];
-}
-
-- (void)collectionView:(UICollectionView *)cv didUnhighlightItemAtIndexPath:(NSIndexPath *)indexPath {
-    UICollectionViewCell *cell = [cv cellForItemAtIndexPath:indexPath];
-    [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.5 initialSpringVelocity:0.5 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
-        cell.transform = CGAffineTransformIdentity;
-        cell.contentView.transform = CGAffineTransformIdentity;
-    } completion:nil];
-}
-
 - (void)collectionView:(UICollectionView *)cv didSelectItemAtIndexPath:(NSIndexPath *)indexPath {
     [cv deselectItemAtIndexPath:indexPath animated:NO];
-
-    UICollectionViewCell *cell = [cv cellForItemAtIndexPath:indexPath];
-    
-    // 立即提供物理点击感：微缩动画
-    [UIView animateWithDuration:0.15 delay:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
-        cell.transform = CGAffineTransformMakeScale(0.9, 0.9);
-    } completion:^(BOOL finished) {
-        [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.5 initialSpringVelocity:0.5 options:0 animations:^{
-            cell.transform = CGAffineTransformIdentity;
-        } completion:nil];
-    }];
 
     if (indexPath.item < self.filteredApps.count) {
         [self launchApp:self.filteredApps[indexPath.item]];
@@ -1429,13 +1398,6 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     [self.collectionView registerClass:[CV3AppCell class] forCellWithReuseIdentifier:@"C"];
     [self.appPanel.contentView addSubview:self.collectionView];
 
-    // 增加实时波纹追踪手势 (Fish-eye Effect)
-    UILongPressGestureRecognizer *waveTracker = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleWaveGesture:)];
-    waveTracker.minimumPressDuration = 0; // 触碰即开始追踪
-    waveTracker.delegate = self;
-    waveTracker.cancelsTouchesInView = NO; // 不拦截点击事件
-    [self.collectionView addGestureRecognizer:waveTracker];
-
     // 增加长按置顶手势
     UILongPressGestureRecognizer *pinLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleAppLongPress:)];
     pinLongPress.minimumPressDuration = 0.6;
@@ -1444,31 +1406,124 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 }
 
 
-// 建议 2：Magnetic Search Attraction (磁极引力搜索)
-- (void)updateMagneticLayout {
-    self.isMagneticLayoutActive = (self.searchField.text.length > 0);
-    
-    if (self.isMagneticLayoutActive) {
-        CGPoint center = CGPointMake(self.collectionView.bounds.size.width / 2, self.collectionView.bounds.size.height / 2);
-        
-        [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
-            NSArray *visibleCells = [self.collectionView visibleCells];
-            for (UICollectionViewCell *cell in visibleCells) {
-                NSIndexPath *indexPath = [self.collectionView indexPathForCell:cell];
-                CGFloat weight = 1.0 - (indexPath.item / (CGFloat)self.filteredApps.count);
-                
-                CGFloat tx = (center.x - cell.center.x) * weight * 0.5;
-                CGFloat ty = (center.y - cell.center.y) * weight * 0.5;
-                cell.transform = CGAffineTransformMakeTranslation(tx, ty);
-            }
+- (CGRect)splitDropPreviewFrameForCenter:(CGPoint)center {
+    CGRect screen = self.windowScene ? self.windowScene.coordinateSpace.bounds : self.bounds;
+    if (CGRectIsEmpty(screen)) screen = [UIScreen mainScreen].bounds;
+
+    CGFloat portraitW = MIN(screen.size.width, screen.size.height);
+    CGFloat portraitH = MAX(screen.size.width, screen.size.height);
+    CGFloat logicalW = portraitW * 0.45;
+    CGFloat logicalH = logicalW * (portraitH / MAX(portraitW, 1.0));
+    CGRect frame = CGRectMake(center.x - logicalW * 0.5,
+                              center.y - logicalH * 0.5,
+                              logicalW,
+                              logicalH);
+
+    UIEdgeInsets safe = self.safeAreaInsets;
+    CGFloat breath = CV3Style.safeAreaBreath;
+    CGFloat minX = safe.left + breath;
+    CGFloat minY = safe.top + breath;
+    CGFloat maxX = screen.size.width - safe.right - breath - frame.size.width;
+    CGFloat maxY = screen.size.height - safe.bottom - breath - frame.size.height;
+    if (maxX < minX) maxX = minX;
+    if (maxY < minY) maxY = minY;
+    frame.origin.x = MIN(MAX(frame.origin.x, minX), maxX);
+    frame.origin.y = MIN(MAX(frame.origin.y, minY), maxY);
+    return frame;
+}
+
+- (void)layoutSplitDropPreviewLayer {
+    if (!self.splitDropPreviewView || !self.splitDropPreviewLayer) return;
+
+    CGRect bounds = self.splitDropPreviewView.bounds;
+    CGFloat cornerRadius = CV3Style.floatingChromeCornerRadius;
+    UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(bounds, 2.0, 2.0)
+                                                    cornerRadius:cornerRadius];
+    self.splitDropPreviewLayer.frame = bounds;
+    self.splitDropPreviewLayer.path = path.CGPath;
+    self.splitDropPreviewLayer.cornerRadius = cornerRadius;
+}
+
+- (void)showSplitDropPreviewAtCenter:(CGPoint)center {
+    CGRect targetFrame = [self splitDropPreviewFrameForCenter:center];
+    if (!self.splitDropPreviewView) {
+        self.splitDropPreviewView = [[UIView alloc] initWithFrame:targetFrame];
+        self.splitDropPreviewView.userInteractionEnabled = NO;
+        self.splitDropPreviewView.backgroundColor = [[UIColor colorWithRed:0.0 green:0.62 blue:1.0 alpha:1.0] colorWithAlphaComponent:0.08];
+        self.splitDropPreviewView.alpha = 0.0;
+        self.splitDropPreviewView.layer.shadowColor = [UIColor cyanColor].CGColor;
+        self.splitDropPreviewView.layer.shadowOpacity = 0.22;
+        self.splitDropPreviewView.layer.shadowRadius = 18.0;
+        self.splitDropPreviewView.layer.shadowOffset = CGSizeMake(0, 12);
+        if (@available(iOS 13.0, *)) {
+            self.splitDropPreviewView.layer.cornerCurve = kCACornerCurveContinuous;
+        }
+
+        self.splitDropPreviewLayer = [CAShapeLayer layer];
+        self.splitDropPreviewLayer.fillColor = [UIColor clearColor].CGColor;
+        self.splitDropPreviewLayer.strokeColor = [[UIColor colorWithRed:0.0 green:0.75 blue:1.0 alpha:1.0] colorWithAlphaComponent:0.92].CGColor;
+        self.splitDropPreviewLayer.lineWidth = 2.0;
+        self.splitDropPreviewLayer.lineDashPattern = @[@10, @7];
+        self.splitDropPreviewLayer.lineCap = kCALineCapRound;
+        self.splitDropPreviewLayer.lineJoin = kCALineJoinRound;
+        [self.splitDropPreviewView.layer addSublayer:self.splitDropPreviewLayer];
+
+        CABasicAnimation *dashPhase = [CABasicAnimation animationWithKeyPath:@"lineDashPhase"];
+        dashPhase.fromValue = @0.0;
+        dashPhase.toValue = @34.0;
+        dashPhase.duration = 1.15;
+        dashPhase.repeatCount = HUGE_VALF;
+        dashPhase.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+        [self.splitDropPreviewLayer addAnimation:dashPhase forKey:@"dashPhase"];
+
+        [self insertSubview:self.splitDropPreviewView belowSubview:self.panelContainer];
+        [self layoutSplitDropPreviewLayer];
+
+        self.splitDropPreviewView.transform = CGAffineTransformMakeScale(0.94, 0.94);
+        [UIView animateWithDuration:0.18
+                              delay:0
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                         animations:^{
+            self.splitDropPreviewView.alpha = 1.0;
+            self.splitDropPreviewView.transform = CGAffineTransformIdentity;
         } completion:nil];
     } else {
-        [UIView animateWithDuration:0.3 animations:^{
-            for (UICollectionViewCell *cell in [self.collectionView visibleCells]) {
-                cell.transform = CGAffineTransformIdentity;
-            }
-        }];
+        if (self.draggedIconView.superview) {
+            [self.draggedIconView.superview bringSubviewToFront:self.draggedIconView];
+        }
+        [UIView animateWithDuration:0.12
+                              delay:0
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                         animations:^{
+            self.splitDropPreviewView.frame = targetFrame;
+        } completion:nil];
+        [self layoutSplitDropPreviewLayer];
     }
+}
+
+- (void)hideSplitDropPreviewAnimated:(BOOL)animated {
+    UIView *preview = self.splitDropPreviewView;
+    if (!preview) return;
+    self.splitDropPreviewView = nil;
+    self.splitDropPreviewLayer = nil;
+
+    void (^removeBlock)(void) = ^{
+        [preview removeFromSuperview];
+    };
+    if (!animated) {
+        removeBlock();
+        return;
+    }
+
+    [UIView animateWithDuration:0.16
+                          delay:0
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        preview.alpha = 0.0;
+        preview.transform = CGAffineTransformMakeScale(0.96, 0.96);
+    } completion:^(BOOL finished) {
+        removeBlock();
+    }];
 }
 
 - (void)handleAppLongPress:(UILongPressGestureRecognizer *)gesture {
@@ -1476,6 +1531,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     CGPoint pointInPanel = [gesture locationInView:self.panelContainer];
     
     if (gesture.state == UIGestureRecognizerStateBegan) {
+        [self hideSplitDropPreviewAnimated:NO];
         NSIndexPath *indexPath = [self.collectionView indexPathForItemAtPoint:pointInCollection];
         if (indexPath && indexPath.item < self.filteredApps.count) {
             CV3AppCell *cell = (CV3AppCell *)[self.collectionView cellForItemAtIndexPath:indexPath];
@@ -1522,10 +1578,19 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         if (self.draggedIconView) {
             // 应用偏移量，使图标跟随手指但保持初始抓取点
             self.draggedIconView.center = CGPointMake(pointInPanel.x - self.dragTouchOffset.x, pointInPanel.y - self.dragTouchOffset.y);
+
+            BOOL isOutside = !CGRectContainsPoint(self.panelContainer.bounds, pointInPanel);
+            if (isOutside) {
+                CGPoint previewCenter = [self.panelContainer convertPoint:self.draggedIconView.center toView:self];
+                [self showSplitDropPreviewAtCenter:previewCenter];
+            } else {
+                [self hideSplitDropPreviewAnimated:YES];
+            }
         }
     } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
         // 恢复 CollectionView 滚动
         self.collectionView.scrollEnabled = YES;
+        [self hideSplitDropPreviewAnimated:YES];
         
         if (self.draggedIconView && self.draggedAppInfo) {
             CV3AppPanelProtectionState protectionState = CV3AppPanelProtectionStateForBundleID(self.draggedAppInfo.bundleId);
@@ -1539,6 +1604,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
                     self.draggedIconView.alpha = 0.0;
                     self.draggedIconView.transform = CGAffineTransformMakeScale(0.1, 0.1);
                 } completion:^(BOOL finished) {
+                    [self hideSplitDropPreviewAnimated:NO];
                     [self.draggedIconView removeFromSuperview];
                     self.draggedIconView = nil;
                     self.draggedAppInfo = nil;
@@ -1599,6 +1665,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
                     self.draggedIconView.alpha = 0;
                     self.draggedIconView.transform = CGAffineTransformMakeScale(0.1, 0.1);
                 } completion:^(BOOL finished) {
+                    [self hideSplitDropPreviewAnimated:NO];
                     [self.draggedIconView removeFromSuperview];
                     self.draggedIconView = nil;
                     self.draggedAppInfo = nil;
@@ -1622,6 +1689,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
                     self.draggedIconView.center = self.dragStartCenter;
                     self.draggedIconView.transform = CGAffineTransformIdentity;
                 } completion:^(BOOL finished) {
+                    [self hideSplitDropPreviewAnimated:NO];
                     [self.draggedIconView removeFromSuperview];
                     self.draggedIconView = nil;
                     self.draggedAppInfo = nil;
@@ -1629,90 +1697,6 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
                 }];
             }
         }
-    }
-}
-
-- (void)handleWaveGesture:(UILongPressGestureRecognizer *)gesture {
-    CGPoint location = [gesture locationInView:self.collectionView];
-    
-    if (gesture.state == UIGestureRecognizerStateBegan) {
-        self.lastWaveHapticIndexPath = nil;
-        [self.selectionFeedback prepare];
-    }
-
-    if (gesture.state == UIGestureRecognizerStateBegan || gesture.state == UIGestureRecognizerStateChanged) {
-        NSArray *cells = [self.collectionView visibleCells];
-        UICollectionViewCell *closestCell = nil;
-        CGFloat minDistance = CGFLOAT_MAX;
-
-        for (UICollectionViewCell *cell in cells) {
-            CGPoint cellCenter = cell.center;
-            CGFloat dx = location.x - cellCenter.x;
-            CGFloat dy = location.y - cellCenter.y;
-            CGFloat distance = sqrt(dx*dx + dy*dy);
-            
-            if (distance < minDistance) {
-                minDistance = distance;
-                closestCell = cell;
-            }
-
-            CGFloat radius = 150.0;
-            CGFloat maxScale = 1.25;
-            
-            if (distance < radius) {
-                CGFloat ratio = (radius - distance) / radius;
-                CGFloat smoothRatio = 0.5 * (1.0 + cos(M_PI * (1.0 - ratio))); 
-                CGFloat scale = 1.0 + (maxScale - 1.0) * smoothRatio;
-                
-                // 移除 3D 姿态偏转，仅保留 2D 缩放
-                CATransform3D transform = CATransform3DMakeScale(scale, scale, 1.0);
-
-                // 建议 4：Pressure Wavefronts (触控压感波动 - 物理推开效果)
-                // 计算远离手指的推力位移
-                CGFloat pushAmount = 18.0 * smoothRatio;
-                CGFloat pushX = (distance > 0) ? -(dx / distance) * pushAmount : 0;
-                CGFloat pushY = (distance > 0) ? -(dy / distance) * pushAmount : 0;
-
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                cell.layer.transform = transform;
-                // 应用“推开”位移 + 基础浮动偏移
-                cell.contentView.transform = CGAffineTransformMakeTranslation(pushX, pushY - 10 * smoothRatio);
-
-                if ([cell isKindOfClass:[CV3AppCell class]]) {
-                    CV3AppCell *appCell = (CV3AppCell *)cell;
-                    appCell.iconHighlight.opacity = 0;
-                }
-                [CATransaction commit];
-            } else {
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                cell.layer.transform = CATransform3DIdentity;
-                cell.contentView.transform = CGAffineTransformIdentity;
-                if ([cell isKindOfClass:[CV3AppCell class]]) {
-                    ((CV3AppCell *)cell).iconHighlight.opacity = 0;
-                }
-                [CATransaction commit];
-            }
-        }
-
-        if (closestCell && minDistance < 40.0) {
-            NSIndexPath *indexPath = [self.collectionView indexPathForCell:closestCell];
-            if (indexPath && (!self.lastWaveHapticIndexPath || ![indexPath isEqual:self.lastWaveHapticIndexPath])) {
-                [self.selectionFeedback selectionChanged];
-                self.lastWaveHapticIndexPath = indexPath;
-            }
-        }
-    } else {
-        [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.6 initialSpringVelocity:0.5 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
-            for (UICollectionViewCell *cell in [self.collectionView visibleCells]) {
-                cell.layer.transform = CATransform3DIdentity;
-                cell.contentView.transform = CGAffineTransformIdentity;
-                if ([cell isKindOfClass:[CV3AppCell class]]) {
-                    ((CV3AppCell *)cell).iconHighlight.opacity = 0;
-                }
-            }
-        } completion:nil];
     }
 }
 
