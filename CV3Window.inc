@@ -689,6 +689,7 @@ static NSString *CV3AppPanelProtectionReason(CV3AppPanelProtectionState state) {
 static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     if (!launcherWindow) return;
 
+    CV3SetKeyboardSuppressedByPanel(NO);
     launcherWindow.isPanelShowing = NO;
     launcherWindow.isAnimating = NO;
     launcherWindow.backgroundColor = [UIColor clearColor];
@@ -956,6 +957,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 
 - (void)textFieldDidBeginEditing:(UITextField *)textField {
     if (textField == self.searchField) {
+        CV3SetKeyboardSuppressedByPanel(self.isPanelShowing);
         CV3ExitExposeModeIfNeeded(nil, NO);
         UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
         CV3LogToFile(@"[Warning][KeyboardDebug] didBegin searchField orientation=%ld isFirstResponder=%d window=%@ keyWindow=%d accessory=%@ inputView=%@",
@@ -1023,6 +1025,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 
 - (void)textFieldDidEndEditing:(UITextField *)textField {
     if (textField == self.searchField) {
+        CV3SetKeyboardSuppressedByPanel(self.isPanelShowing);
         UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
         CV3LogToFile(@"[Warning][KeyboardDebug] didEnd searchField orientation=%ld isFirstResponder=%d window=%@ keyWindow=%d",
                      (long)orientation,
@@ -2488,6 +2491,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         self.cachedTargetCenter = [self calculateTargetCenter];
 
         if (!self.isPanelShowing) {
+            CV3SetKeyboardSuppressedByPanel(YES);
             [self.feedback impactOccurred];
             [self.selectionFeedback prepare];
             self.lastHapticX = 0;
@@ -2545,6 +2549,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
                 self.panelContainer.alpha = 0;
                 self.backgroundColor = [UIColor clearColor];
                 self.isAnimating = NO;
+                CV3SetKeyboardSuppressedByPanel(NO);
             }];
             
             // Jelly Physics for Exit
@@ -2647,6 +2652,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     }
     self.isPanelShowing = visible; self.isAnimating = YES;
     if (visible) {
+        CV3SetKeyboardSuppressedByPanel(YES);
         [self startPanelStateRefreshTimer];
         self.searchField.text = @"";
         self.selectedCategory = @"全部";
@@ -2805,6 +2811,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             self.isAnimating = NO; 
             self.panelContainer.hidden = YES; 
             self.contrastBackdrop.hidden = YES;
+            CV3SetKeyboardSuppressedByPanel(NO);
         }];
     }
 }
@@ -3098,6 +3105,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     }
 
     [self stopPanelStateRefreshTimer];
+    CV3SetKeyboardSuppressedByPanel(NO);
 }
 
 - (void)dealloc {
@@ -3122,6 +3130,13 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
                  self.searchField.isFirstResponder,
                  self.windowScene,
                  self.searchField.inputAccessoryView);
+
+    if (self.isPanelShowing && !self.searchField.isFirstResponder) {
+        self.isKeyboardVisible = NO;
+        CV3SetKeyboardSuppressedByPanel(YES);
+        CV3LogToFile(@"[Warning][KeyboardDebug] suppressed background keyboard while panel is showing");
+        return;
+    }
 
     if (UIInterfaceOrientationIsLandscape(debugOrientation)) {
         CV3LogToFile(@"[Warning][KeyboardDebug] skip panel keyboard avoidance in landscape center=%@ keyboardFrame=%@",
@@ -3368,6 +3383,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     
     // 状态同步
     if (hidden) {
+        CV3SetKeyboardSuppressedByPanel(NO);
         self.alpha = 0;
     } else {
         self.alpha = 1.0;

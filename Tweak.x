@@ -1476,6 +1476,9 @@ static void CV3UpdateAdaptiveTint(NSString *bundleId) {
     [sharedWindow applyBackgroundTint:nil];
 }
 
+static BOOL CV3KeyboardSuppressedByPanel = NO;
+static void CV3SetKeyboardSuppressedByPanel(BOOL suppressed);
+
 @protocol LSApplicationWorkspaceObserverProtocol <NSObject>
 @optional
 - (void)applicationsDidInstall:(NSArray *)applications;
@@ -2218,8 +2221,12 @@ static void CV3ApplySceneRotationContextToProject(CV3SceneRotationContext contex
 
 @interface CV3PassthroughWindow : UIWindow
 @end
+static BOOL CV3ShouldSuppressKeyboardWindow(void);
+
 @implementation CV3PassthroughWindow
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    if (CV3ShouldSuppressKeyboardWindow()) return nil;
+
     UIView *hitView = [super hitTest:point withEvent:event];
     if (hitView == self) return nil;
     return hitView;
@@ -2227,6 +2234,22 @@ static void CV3ApplySceneRotationContextToProject(CV3SceneRotationContext contex
 @end
 
 static CV3PassthroughWindow *cv3_keyboardWindow = nil;
+
+static BOOL CV3ShouldSuppressKeyboardWindow(void) {
+    if (!CV3KeyboardSuppressedByPanel) return NO;
+    if (sharedWindow && sharedWindow.searchField && sharedWindow.searchField.isFirstResponder) return NO;
+    return YES;
+}
+
+static void CV3SetKeyboardSuppressedByPanel(BOOL suppressed) {
+    CV3KeyboardSuppressedByPanel = suppressed;
+    if (!cv3_keyboardWindow) return;
+
+    BOOL shouldSuppressWindow = CV3ShouldSuppressKeyboardWindow();
+    cv3_keyboardWindow.userInteractionEnabled = !shouldSuppressWindow;
+    cv3_keyboardWindow.alpha = shouldSuppressWindow ? 0.0 : 1.0;
+    cv3_keyboardWindow.hidden = shouldSuppressWindow;
+}
 
 static UIWindowScene *CV3KeyboardHostScene(void) {
     if (@available(iOS 13.0, *)) {
@@ -2296,14 +2319,20 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
                 }
                 cv3_keyboardWindow.windowLevel = CV3Style.keyboard;
                 cv3_keyboardWindow.backgroundColor = [UIColor clearColor];
-                cv3_keyboardWindow.hidden = NO;
+                BOOL shouldSuppressKeyboardWindow = CV3ShouldSuppressKeyboardWindow();
+                cv3_keyboardWindow.hidden = shouldSuppressKeyboardWindow;
+                cv3_keyboardWindow.alpha = shouldSuppressKeyboardWindow ? 0.0 : 1.0;
+                cv3_keyboardWindow.userInteractionEnabled = !shouldSuppressKeyboardWindow;
             } else if (@available(iOS 13.0, *)) {
                 if (keyboardScene && cv3_keyboardWindow.windowScene != keyboardScene) {
                     cv3_keyboardWindow.hidden = YES;
                     cv3_keyboardWindow = [[CV3PassthroughWindow alloc] initWithWindowScene:keyboardScene];
                     cv3_keyboardWindow.windowLevel = CV3Style.keyboard;
                     cv3_keyboardWindow.backgroundColor = [UIColor clearColor];
-                    cv3_keyboardWindow.hidden = NO;
+                    BOOL shouldSuppressKeyboardWindow = CV3ShouldSuppressKeyboardWindow();
+                    cv3_keyboardWindow.hidden = shouldSuppressKeyboardWindow;
+                    cv3_keyboardWindow.alpha = shouldSuppressKeyboardWindow ? 0.0 : 1.0;
+                    cv3_keyboardWindow.userInteractionEnabled = !shouldSuppressKeyboardWindow;
                 }
             }
 
