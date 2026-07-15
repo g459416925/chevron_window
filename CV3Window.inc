@@ -2214,6 +2214,37 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     return CGPointMake(CGRectGetMidX(safeBounds), CGRectGetMidY(safeBounds));
 }
 
+- (CGPoint)clampedPanelCenterForCenter:(CGPoint)center {
+    CGRect bounds = self.bounds;
+    UIEdgeInsets safe = self.safeAreaInsets;
+    CGFloat breath = CV3Style.safeAreaBreath;
+    CGRect safeFrame = CGRectMake(safe.left + breath,
+                                  safe.top + breath,
+                                  bounds.size.width - safe.left - safe.right - 2.0 * breath,
+                                  bounds.size.height - safe.top - safe.bottom - 2.0 * breath);
+
+    CGRect panelBounds = self.panelContainer.bounds;
+    CGSize sizeInRoot = CGRectApplyAffineTransform(panelBounds, self.panelContainer.transform).size;
+    CGFloat rootHalfW = fabs(sizeInRoot.width) / 2.0;
+    CGFloat rootHalfH = fabs(sizeInRoot.height) / 2.0;
+
+    if (CGRectGetWidth(safeFrame) < rootHalfW * 2.0) {
+        center.x = CGRectGetMidX(safeFrame);
+    } else {
+        center.x = MAX(CGRectGetMinX(safeFrame) + rootHalfW,
+                       MIN(CGRectGetMaxX(safeFrame) - rootHalfW, center.x));
+    }
+
+    if (CGRectGetHeight(safeFrame) < rootHalfH * 2.0) {
+        center.y = CGRectGetMidY(safeFrame);
+    } else {
+        center.y = MAX(CGRectGetMinY(safeFrame) + rootHalfH,
+                       MIN(CGRectGetMaxY(safeFrame) - rootHalfH, center.y));
+    }
+
+    return center;
+}
+
 - (void)handleTrafficLight:(UIButton *)sender {
     CV3ExitExposeModeIfNeeded(nil, NO);
     // 立即反馈
@@ -3138,43 +3169,58 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         return;
     }
 
-    if (UIInterfaceOrientationIsLandscape(debugOrientation)) {
-        CV3LogToFile(@"[Warning][KeyboardDebug] skip panel keyboard avoidance in landscape center=%@ keyboardFrame=%@",
-                     NSStringFromCGPoint(self.panelContainer.center),
-                     NSStringFromCGRect(keyboardFrame));
-        if (!self.hasBeenMoved) {
-            [UIView animateWithDuration:duration delay:0 options:options animations:^{
-                self.panelContainer.center = [self calculateTargetCenter];
-            } completion:nil];
-        }
+    UIView *searchContainer = self.searchField.superview;
+    if (!searchContainer || !searchContainer.superview) return;
+
+    CGRect keyboardFrameInWindow = [self convertRect:keyboardFrame fromView:nil];
+    keyboardFrameInWindow = CGRectIntersection(keyboardFrameInWindow, self.bounds);
+    if (CGRectIsNull(keyboardFrameInWindow) || CGRectIsEmpty(keyboardFrameInWindow)) {
+        CV3LogToFile(@"[Warning][KeyboardDebug] keyboard avoidance skipped empty intersection frame=%@ bounds=%@",
+                     NSStringFromCGRect(keyboardFrame),
+                     NSStringFromCGRect(self.bounds));
         return;
     }
-    
-    // 建议2：最小化键盘避让 (Minimized Displacement)
-    // 不再以面板底部为基准，而是以“搜索框 + 关键结果区”的可见性为基准
-    UIView *searchContainer = self.searchField.superview;
-    // 计算搜索框底部在屏幕坐标系中的位置 (额外预留 60pt 给顶部几条搜索结果)
-    CGRect searchFrameInScreen = [searchContainer.superview convertRect:searchContainer.frame toView:nil];
-    CGFloat criticalBottom = CGRectGetMaxY(searchFrameInScreen) + 60.0;
-    CGFloat keyboardTop = keyboardFrame.origin.y;
-    
-    CGFloat overlap = criticalBottom - keyboardTop;
-    
-    if (overlap > 0) { // 仅当搜索框或关键区域被遮挡时才移动
-        CGFloat offset = overlap + 10.0; // 仅推移刚好避开的距离，增加 10pt 呼吸间距
-        
+
+    CGRect searchFrameInWindow = [searchContainer.superview convertRect:searchContainer.frame toView:self];
+    CGRect criticalFrame = CGRectInset(searchFrameInWindow, 0.0, -kCV3KeyboardCriticalResultsReserve * 0.5);
+
+    CGFloat overlap = 0.0;
+    CGPoint moveVector = CGPointZero;
+    switch (debugOrientation) {
+        case UIInterfaceOrientationLandscapeLeft:
+            overlap = CGRectGetMaxX(keyboardFrameInWindow) - CGRectGetMinX(criticalFrame);
+            moveVector = CGPointMake(1.0, 0.0);
+            break;
+        case UIInterfaceOrientationLandscapeRight:
+            overlap = CGRectGetMaxX(criticalFrame) - CGRectGetMinX(keyboardFrameInWindow);
+            moveVector = CGPointMake(-1.0, 0.0);
+            break;
+        case UIInterfaceOrientationPortraitUpsideDown:
+            overlap = CGRectGetMaxY(keyboardFrameInWindow) - CGRectGetMinY(criticalFrame);
+            moveVector = CGPointMake(0.0, 1.0);
+            break;
+        case UIInterfaceOrientationPortrait:
+        default:
+            overlap = CGRectGetMaxY(criticalFrame) - CGRectGetMinY(keyboardFrameInWindow);
+            moveVector = CGPointMake(0.0, -1.0);
+            break;
+    }
+
+    CV3LogToFile(@"[Warning][KeyboardDebug] avoidance orientation=%ld keyboardInWindow=%@ critical=%@ overlap=%.2f center=%@",
+                 (long)debugOrientation,
+                 NSStringFromCGRect(keyboardFrameInWindow),
+                 NSStringFromCGRect(criticalFrame),
+                 overlap,
+                 NSStringFromCGPoint(self.panelContainer.center));
+
+    if (overlap > 0.0) {
+        CGFloat offset = overlap + kCV3KeyboardAvoidanceBreath;
+
         [UIView animateWithDuration:duration delay:0 options:options animations:^{
             CGPoint center = self.panelContainer.center;
-            UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
-            
-            switch (orientation) {
-                case UIInterfaceOrientationLandscapeLeft: center.x += offset; break;
-                case UIInterfaceOrientationLandscapeRight: center.x -= offset; break;
-                case UIInterfaceOrientationPortraitUpsideDown: center.y += offset; break;
-                case UIInterfaceOrientationPortrait:
-                default: center.y -= offset; break;
-            }
-            self.panelContainer.center = center;
+            center.x += moveVector.x * offset;
+            center.y += moveVector.y * offset;
+            self.panelContainer.center = [self clampedPanelCenterForCenter:center];
         } completion:nil];
     }
 }
