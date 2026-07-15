@@ -1434,17 +1434,30 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     CGRect screen = self.windowScene ? self.windowScene.coordinateSpace.bounds : self.bounds;
     if (CGRectIsEmpty(screen)) screen = [UIScreen mainScreen].bounds;
 
+    UIInterfaceOrientation orientation = CV3TrustedInterfaceOrientation(self.windowScene);
+    BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
     CGFloat portraitW = MIN(screen.size.width, screen.size.height);
     CGFloat portraitH = MAX(screen.size.width, screen.size.height);
     CGFloat logicalW = portraitW * 0.45;
     CGFloat logicalH = logicalW * (portraitH / MAX(portraitW, 1.0));
-    CGRect frame = CGRectMake(center.x - logicalW * 0.5,
-                              center.y - logicalH * 0.5,
-                              logicalW,
-                              logicalH);
+    CGSize physicalSize = isLandscape ? CGSizeMake(logicalH, logicalW) : CGSizeMake(logicalW, logicalH);
 
     UIEdgeInsets safe = self.safeAreaInsets;
     CGFloat breath = CV3Style.safeAreaBreath;
+    CGFloat visibleW = MAX(1.0, screen.size.width - safe.left - safe.right - breath * 2.0);
+    CGFloat visibleH = MAX(1.0, screen.size.height - safe.top - safe.bottom - breath * 2.0);
+    CGFloat fitScale = MIN(1.0, MIN(visibleW / MAX(physicalSize.width, 1.0),
+                                   visibleH / MAX(physicalSize.height, 1.0)));
+    if (fitScale < 1.0) {
+        physicalSize.width *= fitScale;
+        physicalSize.height *= fitScale;
+    }
+
+    CGRect frame = CGRectMake(center.x - physicalSize.width * 0.5,
+                              center.y - physicalSize.height * 0.5,
+                              physicalSize.width,
+                              physicalSize.height);
+
     CGFloat minX = safe.left + breath;
     CGFloat minY = safe.top + breath;
     CGFloat maxX = screen.size.width - safe.right - breath - frame.size.width;
@@ -1460,12 +1473,23 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     if (!self.splitDropPreviewView || !self.splitDropPreviewLayer) return;
 
     CGRect bounds = self.splitDropPreviewView.bounds;
-    CGFloat cornerRadius = CV3Style.floatingChromeCornerRadius;
-    UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(bounds, 2.0, 2.0)
+    UIInterfaceOrientation orientation = CV3TrustedInterfaceOrientation(self.windowScene);
+    BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
+    CGSize logicalSize = isLandscape
+        ? CGSizeMake(MIN(bounds.size.width, bounds.size.height), MAX(bounds.size.width, bounds.size.height))
+        : bounds.size;
+    CGRect logicalBounds = CGRectMake(0, 0, logicalSize.width, logicalSize.height);
+    CGFloat cornerRadius = MIN(CV3Style.floatingChromeCornerRadius, MIN(logicalSize.width, logicalSize.height) * 0.5);
+    UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(logicalBounds, 2.0, 2.0)
                                                     cornerRadius:cornerRadius];
-    self.splitDropPreviewLayer.frame = bounds;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.splitDropPreviewLayer.bounds = logicalBounds;
+    self.splitDropPreviewLayer.position = CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds));
     self.splitDropPreviewLayer.path = path.CGPath;
     self.splitDropPreviewLayer.cornerRadius = cornerRadius;
+    [self.splitDropPreviewLayer setAffineTransform:CV3RotationTransformForInterfaceOrientation(orientation)];
+    [CATransaction commit];
 }
 
 - (void)showSplitDropPreviewAtCenter:(CGPoint)center {
