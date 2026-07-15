@@ -312,6 +312,29 @@ void CV3ToggleExposeMode(void) {
             return;
         }
 
+        CV3FloatingAppWindow *preferredFirstWindow = nil;
+        for (CV3FloatingAppWindow *win in activeWindows) {
+            if (win.isFocused && !win.isClosing) {
+                preferredFirstWindow = win;
+                break;
+            }
+        }
+        if (!preferredFirstWindow) {
+            for (NSInteger i = (NSInteger)floatingWindows.count - 1; i >= 0; i--) {
+                id obj = floatingWindows[i];
+                if (![obj isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+                CV3FloatingAppWindow *win = (CV3FloatingAppWindow *)obj;
+                if (!win.isClosing && [activeWindows containsObject:win]) {
+                    preferredFirstWindow = win;
+                    break;
+                }
+            }
+        }
+        if (preferredFirstWindow && activeWindows.firstObject != preferredFirstWindow) {
+            [activeWindows removeObject:preferredFirstWindow];
+            [activeWindows insertObject:preferredFirstWindow atIndex:0];
+        }
+
         // Enter Exposé
         isGlobalExposeActive = YES;
         
