@@ -19,6 +19,7 @@ static const CGFloat kCV3ExposeCardCornerRadius = 22.0;
 static const CGFloat kCV3ExposeCardShadowOpacity = 0.22;
 static const CGFloat kCV3ExposeCardShadowRadius = 20.0;
 static const CGFloat kCV3ExposeCardSelectedScale = 1.03;
+static const CGFloat kCV3FloatingDefaultWidthRatio = 0.45;
 
 static CGRect CV3DisplayBoundsForWindow(UIWindow *window) {
     if (window.windowScene) {
@@ -624,6 +625,50 @@ void CV3ToggleExposeMode(void) {
     self.rootTransformContainer.transform = context.transform;
 }
 
+- (CGSize)portraitLogicalSizeForDisplayBounds:(CGRect)displayBounds widthRatio:(CGFloat)widthRatio {
+    if (CGRectIsEmpty(displayBounds)) {
+        displayBounds = CV3DisplayBoundsForWindow(self);
+    }
+
+    CGFloat shortSide = MIN(displayBounds.size.width, displayBounds.size.height);
+    CGFloat longSide = MAX(displayBounds.size.width, displayBounds.size.height);
+    CGFloat aspect = longSide / MAX(shortSide, 1.0);
+    CGFloat logicalW = shortSide * widthRatio;
+    return CGSizeMake(MAX(1.0, logicalW), MAX(1.0, logicalW * aspect));
+}
+
+- (CGSize)physicalFloatingSizeForLogicalWidth:(CGFloat)logicalWidth displayBounds:(CGRect)displayBounds orientation:(UIInterfaceOrientation)orientation {
+    if (CGRectIsEmpty(displayBounds)) {
+        displayBounds = CV3DisplayBoundsForWindow(self);
+    }
+
+    CGFloat shortSide = MIN(displayBounds.size.width, displayBounds.size.height);
+    CGFloat longSide = MAX(displayBounds.size.width, displayBounds.size.height);
+    CGFloat aspect = longSide / MAX(shortSide, 1.0);
+    CGSize logicalSize = CGSizeMake(MAX(1.0, logicalWidth), MAX(1.0, logicalWidth * aspect));
+    CGSize physicalSize = UIInterfaceOrientationIsLandscape(orientation)
+        ? CGSizeMake(logicalSize.height, logicalSize.width)
+        : logicalSize;
+
+    UIEdgeInsets safeArea = [self currentSafeAreaInsets];
+    CGFloat breath = CV3Style.safeAreaBreath;
+    CGFloat visibleW = MAX(1.0, displayBounds.size.width - safeArea.left - safeArea.right - breath * 2.0);
+    CGFloat visibleH = MAX(1.0, displayBounds.size.height - safeArea.top - safeArea.bottom - breath * 2.0);
+    CGFloat fitScale = MIN(1.0, MIN(visibleW / MAX(physicalSize.width, 1.0),
+                                   visibleH / MAX(physicalSize.height, 1.0)));
+    if (fitScale < 1.0) {
+        physicalSize.width *= fitScale;
+        physicalSize.height *= fitScale;
+    }
+
+    return CGSizeMake(MAX(1.0, physicalSize.width), MAX(1.0, physicalSize.height));
+}
+
+- (CGSize)defaultPhysicalFloatingSizeForOrientation:(UIInterfaceOrientation)orientation displayBounds:(CGRect)displayBounds {
+    CGSize logicalSize = [self portraitLogicalSizeForDisplayBounds:displayBounds widthRatio:kCV3FloatingDefaultWidthRatio];
+    return [self physicalFloatingSizeForLogicalWidth:logicalSize.width displayBounds:displayBounds orientation:orientation];
+}
+
 - (void)applyInterfaceOrientation:(UIInterfaceOrientation)orientation force:(BOOL)force {
     if (!CV3IsValidInterfaceOrientation(orientation)) return;
 
@@ -639,7 +684,6 @@ void CV3ToggleExposeMode(void) {
 
     BOOL orientationChanged = (self.lastLayoutOrientation != context.orientation);
     BOOL rotationChanged = !CGAffineTransformEqualToTransform(self.baseRotationTransform, context.transform);
-    BOOL targetIsLandscape = context.isLandscape;
 
     CV3LastTrustedInterfaceOrientation = context.orientation;
     self.targetOrientation = context.orientation;
@@ -666,26 +710,8 @@ void CV3ToggleExposeMode(void) {
     }
 
     CGPoint oldCenter = self.center;
-    CGSize newSize;
-    
     CGRect screenBounds = CGRectIsEmpty(context.sceneBounds) ? CV3DisplayBoundsForWindow(self) : context.sceneBounds;
-    CGFloat portraitW = MIN(screenBounds.size.width, screenBounds.size.height);
-    CGFloat portraitH = MAX(screenBounds.size.width, screenBounds.size.height);
-    CGFloat screenScale = portraitH / portraitW; // 真机物理分辨率长宽比例
-
-    if (targetIsLandscape) {
-        // 横屏状态下：仍维持竖直窗口，仅以可用高度为上限做等比缩放。
-        UIEdgeInsets safeArea = [self currentSafeAreaInsets];
-        CGFloat breath = CV3Style.safeAreaBreath;
-        CGFloat maxH = portraitW - safeArea.top - safeArea.bottom - breath * 2.0;
-        CGFloat targetH = MAX(1.0, maxH);
-        CGFloat targetW = targetH / MAX(screenScale, 1.0);
-        newSize = CGSizeMake(targetW, targetH);
-    } else {
-        // 竖屏状态下：默认占屏幕宽度的 45%，高度按物理分辨率比例缩放
-        CGFloat targetW = portraitW * 0.45;
-        newSize = CGSizeMake(targetW, targetW * screenScale);
-    }
+    CGSize newSize = [self defaultPhysicalFloatingSizeForOrientation:context.orientation displayBounds:screenBounds];
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
@@ -733,22 +759,7 @@ void CV3ToggleExposeMode(void) {
 
 - (CGRect)restorableFrameForOrientation:(UIInterfaceOrientation)orientation preferredCenter:(CGPoint)preferredCenter {
     CGRect screenBounds = CV3DisplayBoundsForWindow(self);
-    CGFloat portraitW = MIN(screenBounds.size.width, screenBounds.size.height);
-    CGFloat portraitH = MAX(screenBounds.size.width, screenBounds.size.height);
-    CGFloat screenScale = portraitH / MAX(portraitW, 1.0);
-
-    CGSize targetSize;
-    if (UIInterfaceOrientationIsLandscape(orientation)) {
-        UIEdgeInsets safeArea = [self currentSafeAreaInsets];
-        CGFloat breath = CV3Style.safeAreaBreath;
-        CGFloat maxH = portraitW - safeArea.top - safeArea.bottom - breath * 2.0;
-        CGFloat targetH = MAX(1.0, maxH);
-        CGFloat targetW = targetH / MAX(screenScale, 1.0);
-        targetSize = CGSizeMake(targetW, targetH);
-    } else {
-        CGFloat targetW = portraitW * 0.45;
-        targetSize = CGSizeMake(targetW, targetW * screenScale);
-    }
+    CGSize targetSize = [self defaultPhysicalFloatingSizeForOrientation:orientation displayBounds:screenBounds];
 
     CGRect targetFrame = CGRectMake(preferredCenter.x - targetSize.width * 0.5,
                                     preferredCenter.y - targetSize.height * 0.5,
@@ -856,6 +867,7 @@ void CV3ToggleExposeMode(void) {
 
 - (BOOL)syncHostedSceneLayoutForce:(BOOL)force {
     if (!self.targetScene || self.isClosing || self.isStashed) return NO;
+    if (!force && (self.isMovingWindow || CACurrentMediaTime() < self.moveSceneSyncSuppressedUntil)) return NO;
 
     BOOL didUpdate = NO;
     @try {
@@ -1582,7 +1594,7 @@ void CV3ToggleExposeMode(void) {
             return;
         }
 
-        CGFloat initialLogicalWidth = self.initialResizeFrame.size.width;
+        CGFloat initialLogicalWidth = MIN(self.initialResizeFrame.size.width, self.initialResizeFrame.size.height);
         CGFloat targetWidth = initialLogicalWidth + dominantTranslation * 0.9;
 
         CGFloat overshoot = 0;
@@ -1610,9 +1622,11 @@ void CV3ToggleExposeMode(void) {
 
         CGFloat finalWidth = MIN(MAX(targetWidth, minAllowedWidth), maxAllowedWidth);
 
-        CGFloat finalHeight = finalWidth * aspect;
         CGPoint preferredCenter = CGPointMake(CGRectGetMidX(self.initialResizeFrame), CGRectGetMidY(self.initialResizeFrame));
-        CGRect newFrame = [self constrainedFloatingFrameForSize:CGSizeMake(finalWidth, finalHeight) preferredCenter:preferredCenter];
+        CGSize physicalSize = [self physicalFloatingSizeForLogicalWidth:finalWidth
+                                                           displayBounds:screenBounds
+                                                            orientation:self.targetOrientation];
+        CGRect newFrame = [self constrainedFloatingFrameForSize:physicalSize preferredCenter:preferredCenter];
 
         UIEdgeInsets safeArea = [self currentSafeAreaInsets];
         if (newFrame.origin.y < safeArea.top && !hasTriggeredTopHaptic) {
@@ -1731,7 +1745,7 @@ void CV3ToggleExposeMode(void) {
         });
 
         if (gesture.state == UIGestureRecognizerStateEnded) {
-            CGFloat finalWidth = self.bounds.size.width;
+            CGFloat finalWidth = MIN(self.bounds.size.width, self.bounds.size.height);
             CGPoint velocity = [gesture velocityInView:nil];
             CGPoint axis = self.homeBarResizeAxis;
             CGFloat axisLength = sqrt(axis.x * axis.x + axis.y * axis.y);
@@ -1759,13 +1773,14 @@ void CV3ToggleExposeMode(void) {
             else if (fabs(currentRatio - 0.75) < 0.03) finalWidth = shortSide * 0.75;
             finalWidth = MAX(minAllowedWidth, MIN(maxAllowedWidth, finalWidth));
 
-            CGFloat finalHeight = finalWidth * aspect;
-            CGSize finalSize = CGSizeMake(finalWidth, finalHeight);
+            CGSize finalSize = [self physicalFloatingSizeForLogicalWidth:finalWidth
+                                                            displayBounds:screenBounds
+                                                             orientation:self.targetOrientation];
             snapFrame.size = finalSize;
 
             if (fabs(finalWidth - previousLogicalWidth) > 0.1) {
-                snapFrame.origin.x = initialCenter.x - finalWidth / 2.0;
-                snapFrame.origin.y = initialCenter.y - finalHeight / 2.0;
+                snapFrame.origin.x = initialCenter.x - finalSize.width / 2.0;
+                snapFrame.origin.y = initialCenter.y - finalSize.height / 2.0;
                 [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
             }
 
@@ -2107,22 +2122,11 @@ void CV3ToggleExposeMode(void) {
     }
     
     if (self) {
-        CGRect screen = CV3DisplayBoundsForWindow(self);
-        // 始终获取竖屏比例作为基准计算，确保弹出的窗口比例正确
-        CGFloat portraitW = MIN(screen.size.width, screen.size.height);
-        CGFloat portraitH = MAX(screen.size.width, screen.size.height);
-        
-        // 默认逻辑尺寸：宽占屏幕 45%，高按屏幕比例缩放
-        CGFloat logicalW = portraitW * 0.45;
-        CGFloat logicalH = logicalW * (portraitH / portraitW);
-        
         UIInterfaceOrientation currentOrientation = CV3TrustedInterfaceOrientation(windowScene);
+        CGSize physicalSize = [self defaultPhysicalFloatingSizeForOrientation:currentOrientation
+                                                                displayBounds:CV3DisplayBoundsForWindow(self)];
         
-        // 外层 UIWindow 使用当前可信方向坐标；横屏创建时直接使用宽屏窗口，不再退回竖屏尺寸。
-        CGFloat physicalW = logicalW;
-        CGFloat physicalH = logicalH;
-        
-        self.frame = CGRectMake(0, 0, physicalW, physicalH);
+        self.frame = CGRectMake(0, 0, physicalSize.width, physicalSize.height);
         self.lastLayoutOrientation = currentOrientation;
         self.targetOrientation = currentOrientation;
         
@@ -2452,6 +2456,8 @@ void CV3ToggleExposeMode(void) {
 }
 
 - (void)enforceSceneForegroundState {
+    if (self.isMovingWindow || CACurrentMediaTime() < self.moveSceneSyncSuppressedUntil) return;
+
     if (!self.targetScene) {
         CV3LogToFile(@"[Recovery] enforceSceneForegroundState 缺失 targetScene，触发冷启动: %@", self.bundleID);
         [self ensureLaunchSplashVisible];
@@ -3051,7 +3057,7 @@ void CV3ToggleExposeMode(void) {
         CGFloat scaleY = logicalH / MAX(virtualBounds.size.height, 1.0);
         CGFloat uniformScale = MIN(scaleX, scaleY);
         
-        if (!self.liveResizeSnapshotView) {
+        if (!self.liveResizeSnapshotView && !self.isMovingWindow) {
             [self syncHostedSceneLayoutForce:NO];
         }
 
@@ -3292,6 +3298,8 @@ void CV3ToggleExposeMode(void) {
     
     if (gesture.state == UIGestureRecognizerStateBegan) {
         CV3LogToFile(@"[MoveGesture] handleMoveLongPress state began. Dismissing multitaskingMenu");
+        self.isMovingWindow = YES;
+        self.moveSceneSyncSuppressedUntil = DBL_MAX;
         [self dismissMultitaskingMenu];
         CV3ExitExposeModeIfNeeded(self, YES);
         if (!self.isStashed) {
@@ -3308,7 +3316,6 @@ void CV3ToggleExposeMode(void) {
         CGPoint centerInWindow = self.center;
         initialTouchOffset = CGPointMake(currentPoint.x - centerInWindow.x, currentPoint.y - centerInWindow.y);
         
-        self.windowLevel = CV3Style.floatingApp + 10;
         [self startLiquidMotion];
         
         CGFloat minEdge = MIN(self.bounds.size.width, self.bounds.size.height);
@@ -3317,7 +3324,6 @@ void CV3ToggleExposeMode(void) {
         [UIView animateWithDuration:0.3 animations:^{
             [self visualShadowLayer].shadowOpacity = CV3Style.shadowOpacityPeak;
             [self visualShadowLayer].shadowRadius = CV3Style.shadowRadiusPeak;
-            self.layer.transform = CATransform3DMakeScale(1.015, 1.015, 1.0);
         }];
         
         self.lastTargetSnapFrame = CGRectZero;
@@ -3369,7 +3375,9 @@ void CV3ToggleExposeMode(void) {
         }
     }
     
-    if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+    if (gesture.state == UIGestureRecognizerStateEnded ||
+        gesture.state == UIGestureRecognizerStateCancelled ||
+        gesture.state == UIGestureRecognizerStateFailed) {
         [self stopLiquidMotion];
         CGFloat velMag = sqrt(lastVelocity.x * lastVelocity.x + lastVelocity.y * lastVelocity.y);
         if (velMag > 2500.0) {
@@ -3390,10 +3398,7 @@ void CV3ToggleExposeMode(void) {
             }
         }
 
-            [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:UIViewAnimationOptionCurveEaseInOut animations:^{
-                self.layer.transform = CATransform3DIdentity;
-                self.windowLevel = CV3Style.floatingApp;
-            
+        [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:UIViewAnimationOptionCurveEaseInOut animations:^{
             self.isStashed = NO;
             self.stashedSide = 0;
             self.stashGrabber.alpha = 0;
@@ -3417,11 +3422,11 @@ void CV3ToggleExposeMode(void) {
             targetFrame.origin.y = MIN(MAX(targetFrame.origin.y, minY), maxY);
             
             if (!CGRectEqualToRect(targetFrame, self.frame)) {
-                self.frame = targetFrame;
+                self.center = CGPointMake(CGRectGetMidX(targetFrame), CGRectGetMidY(targetFrame));
             }
         } completion:^(BOOL finished) {
-            [self enforceSceneForegroundState];
-            CV3UpdateFloatingBackdrop(self.windowScene);
+            self.moveSceneSyncSuppressedUntil = CACurrentMediaTime() + 0.8;
+            self.isMovingWindow = NO;
         }];
         
         [self animateFocusShadow:self.isFocused];
