@@ -1025,6 +1025,8 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 @property (nonatomic, assign) BOOL isFocused;
 @property (nonatomic, assign) BOOL isClosing;
 @property (nonatomic, assign) BOOL isInLayout;
+@property (nonatomic, assign) BOOL isMovingWindow;
+@property (nonatomic, assign) NSTimeInterval moveSceneSyncSuppressedUntil;
 @property (nonatomic, assign) CGPoint lastVelocity;
 @property (nonatomic, strong) UIView *crystalPreviewContainer;
 @property (nonatomic, strong) UIView *splashView;
@@ -1426,6 +1428,8 @@ static const CGFloat kCV3PanelDismissScale = 0.62;
 static const CGFloat kCV3PanelDismissBackdropScale = 1.34;
 static const CGFloat kCV3AppDragLongPressAllowableMovement = 6.0;
 static const CGFloat kCV3AppDragScrollVelocityGate = 80.0;
+static const CGFloat kCV3KeyboardCriticalResultsReserve = 60.0;
+static const CGFloat kCV3KeyboardAvoidanceBreath = 10.0;
 
 static CGFloat CV3ClampedSpringVelocity(CGFloat velocity, CGFloat divisor, CGFloat minVelocity, CGFloat maxVelocity) {
     CGFloat normalizedVelocity = fabs(velocity) / divisor;
@@ -2325,7 +2329,10 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
                 cv3_keyboardWindow.userInteractionEnabled = !shouldSuppressKeyboardWindow;
             } else if (@available(iOS 13.0, *)) {
                 if (keyboardScene && cv3_keyboardWindow.windowScene != keyboardScene) {
-                    cv3_keyboardWindow.hidden = YES;
+                    CV3PassthroughWindow *oldKeyboardWindow = cv3_keyboardWindow;
+                    oldKeyboardWindow.userInteractionEnabled = NO;
+                    oldKeyboardWindow.alpha = 0.0;
+                    oldKeyboardWindow.hidden = YES;
                     cv3_keyboardWindow = [[CV3PassthroughWindow alloc] initWithWindowScene:keyboardScene];
                     cv3_keyboardWindow.windowLevel = CV3Style.keyboard;
                     cv3_keyboardWindow.backgroundColor = [UIColor clearColor];
