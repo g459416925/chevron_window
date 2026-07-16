@@ -204,6 +204,65 @@ static void CV3UpdateExposeSelectionForViewportCenter(void) {
     CV3UpdateExposeSelection(bestIndex);
 }
 
+static void CV3LayoutExposeLiveContent(CV3FloatingAppWindow *win) {
+    UIView *cardView = win.exposeOverlayView;
+    UIView *contentContainer = win.exposeLiveContentContainer;
+    UIView *liveContent = win.appContentWrapper;
+    if (!cardView || !contentContainer || !liveContent) return;
+
+    contentContainer.frame = cardView.bounds;
+    contentContainer.layer.cornerRadius = kCV3ExposeCardCornerRadius;
+
+    CGRect sourceBounds = win.exposeContentOriginalBounds;
+    if (CGRectIsEmpty(sourceBounds)) sourceBounds = liveContent.bounds;
+    if (CGRectIsEmpty(sourceBounds)) return;
+
+    CGFloat scaleX = CGRectGetWidth(contentContainer.bounds) / MAX(CGRectGetWidth(sourceBounds), 1.0);
+    CGFloat scaleY = CGRectGetHeight(contentContainer.bounds) / MAX(CGRectGetHeight(sourceBounds), 1.0);
+    CGFloat scale = MIN(scaleX, scaleY);
+
+    liveContent.bounds = sourceBounds;
+    liveContent.center = CGPointMake(CGRectGetMidX(contentContainer.bounds), CGRectGetMidY(contentContainer.bounds));
+    liveContent.transform = CGAffineTransformMakeScale(scale, scale);
+}
+
+static void CV3RestoreExposeLiveContent(CV3FloatingAppWindow *win, BOOL preserveCardImage) {
+    UIView *cardView = win.exposeOverlayView;
+    UIView *contentContainer = win.exposeLiveContentContainer;
+    UIView *liveContent = win.appContentWrapper;
+    if (!contentContainer || !liveContent || liveContent.superview != contentContainer) return;
+
+    if (preserveCardImage && cardView && !CGRectIsEmpty(contentContainer.bounds)) {
+        UIView *transitionSnapshot = [contentContainer snapshotViewAfterScreenUpdates:NO];
+        if (transitionSnapshot) {
+            transitionSnapshot.frame = contentContainer.frame;
+            transitionSnapshot.userInteractionEnabled = NO;
+            transitionSnapshot.layer.cornerRadius = kCV3ExposeCardCornerRadius;
+            transitionSnapshot.layer.masksToBounds = YES;
+            [cardView insertSubview:transitionSnapshot atIndex:0];
+        }
+    }
+
+    UIView *originalSuperview = win.exposeContentOriginalSuperview ?: win.rootTransformContainer;
+    if (originalSuperview) {
+        NSInteger insertionIndex = MAX(0, win.exposeContentOriginalIndex);
+        insertionIndex = MIN(insertionIndex, (NSInteger)originalSuperview.subviews.count);
+        [originalSuperview insertSubview:liveContent atIndex:(NSUInteger)insertionIndex];
+    }
+
+    liveContent.bounds = win.exposeContentOriginalBounds;
+    liveContent.center = win.exposeContentOriginalCenter;
+    liveContent.transform = win.exposeContentOriginalTransform;
+    liveContent.autoresizingMask = win.exposeContentOriginalAutoresizingMask;
+    liveContent.userInteractionEnabled = win.exposeContentOriginalUserInteractionEnabled;
+
+    [contentContainer removeFromSuperview];
+    win.exposeLiveContentContainer = nil;
+    win.exposeContentOriginalSuperview = nil;
+    [win setNeedsLayout];
+    [win layoutIfNeeded];
+}
+
 static void CV3LayoutExposeWindowsAnimated(BOOL animated) {
     if (!globalExposeWindows || globalExposeWindows.count == 0 || !globalExposeBackdrop) return;
 
@@ -222,6 +281,7 @@ static void CV3LayoutExposeWindowsAnimated(BOOL animated) {
             if (!cardView) continue;
             cardView.frame = cellFrame;
             cardView.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:cardView.bounds cornerRadius:kCV3ExposeCardCornerRadius].CGPath;
+            CV3LayoutExposeLiveContent(win);
         }
     };
 
@@ -235,6 +295,40 @@ static void CV3LayoutExposeWindowsAnimated(BOOL animated) {
     }
 
     CV3UpdateExposeSelection(globalExposeSelectedIndex);
+}
+
+static void CV3UpdateExposeForSceneRotation(CV3SceneRotationContext context, BOOL animated) {
+    if (!isGlobalExposeActive || !globalExposeBackdrop || !globalExposeContentView) return;
+
+    CGRect sceneBounds = context.sceneBounds;
+    if (CGRectIsEmpty(sceneBounds)) sceneBounds = [UIScreen mainScreen].bounds;
+
+    CGFloat shortSide = MIN(sceneBounds.size.width, sceneBounds.size.height);
+    CGFloat longSide = MAX(sceneBounds.size.width, sceneBounds.size.height);
+    CGSize layoutSize = context.isLandscape
+        ? CGSizeMake(longSide, shortSide)
+        : CGSizeMake(shortSide, longSide);
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    globalExposeBackdrop.frame = sceneBounds;
+    for (UIView *subview in globalExposeBackdrop.subviews) {
+        if (subview != globalExposeContentView) subview.frame = globalExposeBackdrop.bounds;
+    }
+    globalExposeContentView.bounds = CGRectMake(0, 0, layoutSize.width, layoutSize.height);
+    globalExposeContentView.center = CGPointMake(CGRectGetMidX(globalExposeBackdrop.bounds),
+                                                 CGRectGetMidY(globalExposeBackdrop.bounds));
+    BOOL backingBoundsLandscape = CGRectGetWidth(globalExposeBackdrop.bounds) > CGRectGetHeight(globalExposeBackdrop.bounds);
+    globalExposeContentView.transform = (backingBoundsLandscape == context.isLandscape)
+        ? CGAffineTransformIdentity
+        : context.transform;
+    [CATransaction commit];
+
+    BOOL layoutAxisChanged = (globalExposeIsLandscape != context.isLandscape);
+    globalExposeIsLandscape = context.isLandscape;
+    if (layoutAxisChanged) globalExposeScrollOffset = 0.0;
+    CV3LayoutExposeWindowsAnimated(animated);
+    CV3UpdateExposeSelectionForViewportCenter();
 }
 
 static void CV3ExitExposeModeSelectingWindow(CV3FloatingAppWindow *selectedWindow, BOOL focusSelected) {
@@ -252,6 +346,12 @@ static void CV3ExitExposeModeSelectingWindow(CV3FloatingAppWindow *selectedWindo
     globalExposeScrollOffset = 0.0;
     globalExposeSelectedIndex = 0;
 
+    for (id obj in windowsSnapshot) {
+        if (![obj isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+        CV3FloatingAppWindow *win = (CV3FloatingAppWindow *)obj;
+        CV3RestoreExposeLiveContent(win, YES);
+    }
+
     if (focusSelected && selectedWindow && !selectedWindow.isClosing) {
         [selectedWindow promoteFloatingWindowInZOrder];
     }
@@ -261,8 +361,7 @@ static void CV3ExitExposeModeSelectingWindow(CV3FloatingAppWindow *selectedWindo
             if (![obj isKindOfClass:[CV3FloatingAppWindow class]]) continue;
             CV3FloatingAppWindow *win = (CV3FloatingAppWindow *)obj;
             win.alpha = 1.0;
-            [win.exposeOverlayView removeFromSuperview];
-            win.exposeOverlayView = nil;
+            win.exposeOverlayView.alpha = 0.0;
         }
         if (backdrop) backdrop.alpha = 0.0;
     } completion:^(BOOL finished) {
@@ -428,14 +527,38 @@ void CV3ToggleExposeMode(void) {
                     cardView.layer.masksToBounds = NO;
                     cardView.clipsToBounds = NO;
 
-                    UIView *snapshotSourceView = win.appContentWrapper ?: win.rootTransformContainer ?: win;
-                    UIView *snapshotView = [snapshotSourceView snapshotViewAfterScreenUpdates:NO];
-                    if (snapshotView) {
-                        snapshotView.frame = cardView.bounds;
-                        snapshotView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-                        snapshotView.layer.cornerRadius = kCV3ExposeCardCornerRadius;
-                        snapshotView.layer.masksToBounds = YES;
-                        [cardView addSubview:snapshotView];
+                    UIView *liveContent = win.appContentWrapper;
+                    if (liveContent && liveContent.superview) {
+                        UIView *originalSuperview = liveContent.superview;
+                        win.exposeContentOriginalSuperview = originalSuperview;
+                        win.exposeContentOriginalIndex = (NSInteger)[originalSuperview.subviews indexOfObject:liveContent];
+                        win.exposeContentOriginalBounds = liveContent.bounds;
+                        win.exposeContentOriginalCenter = liveContent.center;
+                        win.exposeContentOriginalTransform = liveContent.transform;
+                        win.exposeContentOriginalAutoresizingMask = liveContent.autoresizingMask;
+                        win.exposeContentOriginalUserInteractionEnabled = liveContent.userInteractionEnabled;
+
+                        UIView *contentContainer = [[UIView alloc] initWithFrame:cardView.bounds];
+                        contentContainer.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                        contentContainer.backgroundColor = [UIColor clearColor];
+                        contentContainer.userInteractionEnabled = NO;
+                        contentContainer.clipsToBounds = YES;
+                        contentContainer.layer.cornerRadius = kCV3ExposeCardCornerRadius;
+                        [cardView addSubview:contentContainer];
+                        [contentContainer addSubview:liveContent];
+                        liveContent.autoresizingMask = UIViewAutoresizingNone;
+                        liveContent.userInteractionEnabled = NO;
+                        win.exposeLiveContentContainer = contentContainer;
+                    } else {
+                        UIView *snapshotSourceView = win.rootTransformContainer ?: win;
+                        UIView *snapshotView = [snapshotSourceView snapshotViewAfterScreenUpdates:NO];
+                        if (snapshotView) {
+                            snapshotView.frame = cardView.bounds;
+                            snapshotView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                            snapshotView.layer.cornerRadius = kCV3ExposeCardCornerRadius;
+                            snapshotView.layer.masksToBounds = YES;
+                            [cardView addSubview:snapshotView];
+                        }
                     }
 
                     UIView *scrim = [[UIView alloc] initWithFrame:cardView.bounds];
@@ -672,9 +795,10 @@ void CV3ToggleExposeMode(void) {
     } else if (sender.state == UIGestureRecognizerStateEnded ||
                sender.state == UIGestureRecognizerStateCancelled ||
                sender.state == UIGestureRecognizerStateFailed) {
+        CGRect layoutBounds = globalExposeContentView ? globalExposeContentView.bounds : globalExposeBackdrop.bounds;
         globalExposeScrollOffset = CV3ClampCGFloat(globalExposeScrollOffset,
                                                    0.0,
-                                                   CV3ExposeMaxScrollForWindows(globalExposeWindows, globalExposeBackdrop.bounds, globalExposeIsLandscape));
+                                                   CV3ExposeMaxScrollForWindows(globalExposeWindows, layoutBounds, globalExposeIsLandscape));
         CV3LayoutExposeWindowsAnimated(YES);
         CV3UpdateExposeSelectionForViewportCenter();
     }

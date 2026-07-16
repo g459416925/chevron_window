@@ -1044,6 +1044,14 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 @property (nonatomic, assign) CGRect preExposeFrame;
 @property (nonatomic, assign) CGAffineTransform preExposeTransform;
 @property (nonatomic, strong) UIView *exposeOverlayView;
+@property (nonatomic, strong) UIView *exposeLiveContentContainer;
+@property (nonatomic, weak) UIView *exposeContentOriginalSuperview;
+@property (nonatomic, assign) NSInteger exposeContentOriginalIndex;
+@property (nonatomic, assign) CGRect exposeContentOriginalBounds;
+@property (nonatomic, assign) CGPoint exposeContentOriginalCenter;
+@property (nonatomic, assign) CGAffineTransform exposeContentOriginalTransform;
+@property (nonatomic, assign) UIViewAutoresizing exposeContentOriginalAutoresizingMask;
+@property (nonatomic, assign) BOOL exposeContentOriginalUserInteractionEnabled;
 @property (nonatomic, strong) NSTimer *assertionWatchdogTimer;
 @property (nonatomic, assign) BOOL isLiveResizing;
 @property (nonatomic, strong) CAGradientLayer *specularHighlight;
@@ -1657,6 +1665,8 @@ static void CV3ApplySceneRotationContextToProject(CV3SceneRotationContext contex
                 }
             }
         }
+
+        CV3UpdateExposeForSceneRotation(context, YES);
     } @catch (NSException *e) {
         CV3LogToFile(@"[Error] 全局方向同步异常: %@", e);
     }
