@@ -2220,6 +2220,34 @@ static void CV3ApplySceneRotationContextToProject(CV3SceneRotationContext contex
 }
 %end
 
+%hook SBIconController
+- (BOOL)isAppLibraryAllowed {
+    return NO;
+}
+
+- (BOOL)isAppLibrarySupported {
+    return NO;
+}
+%end
+
+%hook SBFloatingDockDefaults
+- (BOOL)appLibraryEnabled {
+    return NO;
+}
+%end
+
+%hook SBRootFolderController
+- (id)trailingCustomViewController {
+    return nil;
+}
+%end
+
+%hook SBRootFolderView
+- (id)trailingCustomView {
+    return nil;
+}
+%end
+
 %hook SpringBoard
 - (void)applicationDidFinishLaunching:(id)application {
     %orig;
