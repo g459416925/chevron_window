@@ -2535,6 +2535,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     }
 
     if (gesture.state == UIGestureRecognizerStateBegan) {
+        CV3PanelWakeGestureActive = YES;
         // 1. 手势预警效果 (Trigger Preview Flare)
         [CATransaction begin];
         [CATransaction setAnimationDuration:0.2];
@@ -2588,7 +2589,10 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
                 gesture.enabled = NO; gesture.enabled = YES; 
             }
         }
-    } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+    } else if (gesture.state == UIGestureRecognizerStateEnded ||
+               gesture.state == UIGestureRecognizerStateCancelled ||
+               gesture.state == UIGestureRecognizerStateFailed) {
+        CV3PanelWakeGestureActive = NO;
         // 移除预警效果
         [CATransaction begin];
         [CATransaction setAnimationDuration:0.3];
