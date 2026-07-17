@@ -1811,6 +1811,45 @@ static void CV3ApplySceneRotationContextToProject(CV3SceneRotationContext contex
 }
 %end
 
+static BOOL CV3SpoofPadIdiomDuringSwitcherLoad = NO;
+
+%hook SBAppSwitcherSettings
+- (long long)switcherStyle {
+    return 2;
+}
+
+- (void)setSwitcherStyle:(long long)style {
+    %orig(2);
+}
+%end
+
+%hook SBFluidSwitcherViewController
+- (BOOL)isDevicePad {
+    return YES;
+}
+%end
+
+%hook SBMainSwitcherControllerCoordinator
+- (void)_loadContentViewControllerIfNecessaryForWindowScene:(id)windowScene {
+    BOOL previousSpoofState = CV3SpoofPadIdiomDuringSwitcherLoad;
+    CV3SpoofPadIdiomDuringSwitcherLoad = YES;
+    @try {
+        %orig(windowScene);
+    } @finally {
+        CV3SpoofPadIdiomDuringSwitcherLoad = previousSpoofState;
+    }
+}
+%end
+
+%hook UIDevice
+- (UIUserInterfaceIdiom)userInterfaceIdiom {
+    if (CV3SpoofPadIdiomDuringSwitcherLoad) {
+        return UIUserInterfaceIdiomPad;
+    }
+    return %orig;
+}
+%end
+
 @interface SBSwitcherModifier : NSObject
 - (NSArray *)appLayouts;
 - (id)activeAppLayout;
