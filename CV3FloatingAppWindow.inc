@@ -636,7 +636,13 @@ void CV3ToggleExposeMode(void) {
     }
     UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
     UIGraphicsEndImageContext();
-    return image;
+
+    UIInterfaceOrientation orientation = CV3IsValidInterfaceOrientation(self.targetOrientation)
+        ? self.targetOrientation
+        : CV3TrustedInterfaceOrientation(self.windowScene);
+    return [self imageByRotatingImage:image
+                      fromOrientation:UIInterfaceOrientationPortrait
+                        toOrientation:orientation];
 }
 
 - (void)updateStashedRestoreSnapshotForOrientation:(UIInterfaceOrientation)orientation {
