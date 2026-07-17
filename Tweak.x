@@ -41,6 +41,8 @@
 - (id)iconViewForIcon:(id)arg1 location:(id)arg2;
 @end
 
+static BOOL CV3ShouldBlockHomeScreenSearch(void);
+
 @interface SBIconModel : NSObject
 - (id)leafIcons;
 @end
@@ -1413,6 +1415,30 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 
 static NSCache *cv3IconCache = nil; 
 static CV3Window *sharedWindow = nil;
+static BOOL CV3PanelWakeGestureActive = NO;
+
+static BOOL CV3ShouldBlockHomeScreenSearch(void) {
+    return CV3PanelWakeGestureActive || (sharedWindow && (sharedWindow.isPanelShowing || sharedWindow.isAnimating));
+}
+
+%hook SBIconController
+- (void)presentSpotlightAnimated:(BOOL)animated completion:(id)completion {
+    if (CV3ShouldBlockHomeScreenSearch()) return;
+    %orig(animated, completion);
+}
+
+- (void)presentSpotlightAnimated:(BOOL)animated {
+    if (CV3ShouldBlockHomeScreenSearch()) return;
+    %orig(animated);
+}
+%end
+
+%hook SBHomeScreenSpotlightViewController
+- (void)viewWillAppear:(BOOL)animated {
+    if (CV3ShouldBlockHomeScreenSearch()) return;
+    %orig(animated);
+}
+%end
 
 static CGFloat CGPointDistance(CGPoint p1, CGPoint p2) {
     return sqrt(pow(p1.x - p2.x, 2) + pow(p1.y - p2.y, 2));
