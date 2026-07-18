@@ -7,6 +7,22 @@ static void CV3CascadeUpdateSovereigntyAssertions(void) {
         }
     }
 }
+static void CV3StashPeerWindowsForFullscreen(CV3FloatingAppWindow *activeWindow) {
+    if (!activeWindow || !floatingWindows || floatingWindows.count <= 1) return;
+
+    NSArray *windowsSnapshot = [floatingWindows copy];
+    for (id obj in windowsSnapshot) {
+        if (![obj isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+        CV3FloatingAppWindow *win = (CV3FloatingAppWindow *)obj;
+        if (win == activeWindow || win.isClosing || win.isStashed) continue;
+        [win handleHideAction];
+    }
+
+    [activeWindow promoteFloatingWindowInZOrder];
+    [activeWindow makeKeyAndVisible];
+    activeWindow.windowLevel = CV3Style.floatingApp;
+    [activeWindow setWindowFocused:YES];
+}
 static const CGFloat kCV3RotationCascadeStep = 20.0;
 static const CGFloat kCV3StashIconSize = 54.0;
 static const CGFloat kCV3StashIconInset = 7.0;
@@ -44,6 +60,30 @@ static NSArray<CV3FloatingAppWindow *> *globalExposeWindows = nil;
 static CGFloat globalExposeScrollOffset = 0.0;
 static NSInteger globalExposeSelectedIndex = 0;
 static BOOL globalExposeIsLandscape = NO;
+static void CV3ExitExposeModeSelectingWindow(CV3FloatingAppWindow *selectedWindow, BOOL focusSelected);
+
+static BOOL CV3WindowIsExpandedForExpose(id object) {
+    if (![object isKindOfClass:[CV3FloatingAppWindow class]]) return NO;
+    CV3FloatingAppWindow *window = (CV3FloatingAppWindow *)object;
+    if (window.isClosing || window.isStashed) return NO;
+
+    // During the genie transition restoreFromStash clears isStashed before the
+    // full window is visible. Treat that interval as icon state so Expose only
+    // contains windows whose expanded content is actually on screen.
+    UIView *content = window.appContentWrapper;
+    UIView *chrome = window.clippingContainer;
+    return content && chrome && content.alpha > 0.01 && chrome.alpha > 0.01;
+}
+
+static NSArray<CV3FloatingAppWindow *> *CV3ExpandedWindowsForExpose(void) {
+    NSMutableArray<CV3FloatingAppWindow *> *expandedWindows = [NSMutableArray array];
+    for (id object in [floatingWindows copy]) {
+        if (CV3WindowIsExpandedForExpose(object)) {
+            [expandedWindows addObject:(CV3FloatingAppWindow *)object];
+        }
+    }
+    return [expandedWindows copy];
+}
 
 static CGFloat CV3ClampCGFloat(CGFloat value, CGFloat minValue, CGFloat maxValue) {
     if (maxValue < minValue) return minValue;
@@ -348,6 +388,34 @@ static void CV3LayoutExposeWindowsAnimated(BOOL animated) {
 static void CV3UpdateExposeForSceneRotation(CV3SceneRotationContext context, BOOL animated) {
     if (!isGlobalExposeActive || !globalExposeBackdrop || !globalExposeContentView) return;
 
+    CV3FloatingAppWindow *selectedWindow = nil;
+    if (globalExposeSelectedIndex >= 0 && globalExposeSelectedIndex < (NSInteger)globalExposeWindows.count) {
+        selectedWindow = globalExposeWindows[globalExposeSelectedIndex];
+    }
+
+    NSMutableArray<CV3FloatingAppWindow *> *expandedSnapshot = [NSMutableArray array];
+    for (CV3FloatingAppWindow *window in globalExposeWindows) {
+        if (CV3WindowIsExpandedForExpose(window)) {
+            [expandedSnapshot addObject:window];
+        } else {
+            CV3RestoreExposeLiveContent(window, NO);
+            [window.exposeOverlayView removeFromSuperview];
+            window.exposeOverlayView = nil;
+        }
+    }
+    if (expandedSnapshot.count != globalExposeWindows.count) {
+        globalExposeWindows = [expandedSnapshot copy];
+        NSInteger preservedIndex = selectedWindow ? [globalExposeWindows indexOfObject:selectedWindow] : NSNotFound;
+        globalExposeSelectedIndex = preservedIndex == NSNotFound
+            ? MIN(globalExposeSelectedIndex, MAX(0, (NSInteger)globalExposeWindows.count - 1))
+            : preservedIndex;
+        globalExposeScrollOffset = 0.0;
+    }
+    if (globalExposeWindows.count < 2) {
+        CV3ExitExposeModeSelectingWindow(globalExposeWindows.firstObject, globalExposeWindows.count == 1);
+        return;
+    }
+
     CGRect sceneBounds = context.sceneBounds;
     if (CGRectIsEmpty(sceneBounds)) sceneBounds = [UIScreen mainScreen].bounds;
 
@@ -388,7 +456,7 @@ static void CV3ExitExposeModeSelectingWindow(CV3FloatingAppWindow *selectedWindo
     }
 
     isGlobalExposeActive = NO;
-    NSArray *windowsSnapshot = [floatingWindows copy];
+    NSArray *windowsSnapshot = [globalExposeWindows copy] ?: @[];
     UIWindow *backdrop = globalExposeBackdrop;
     globalExposeWindows = nil;
     globalExposeScrollOffset = 0.0;
@@ -447,12 +515,7 @@ void CV3ToggleExposeMode(void) {
     } else {
         if (!floatingWindows || floatingWindows.count == 0) return;
 
-        NSMutableArray *activeWindows = [NSMutableArray array];
-        for (id obj in floatingWindows) {
-            if (![obj isKindOfClass:[CV3FloatingAppWindow class]]) continue;
-            CV3FloatingAppWindow *win = (CV3FloatingAppWindow *)obj;
-            if (!win.isClosing) [activeWindows addObject:win];
-        }
+        NSMutableArray<CV3FloatingAppWindow *> *activeWindows = [CV3ExpandedWindowsForExpose() mutableCopy];
         if (activeWindows.count < 2) {
             CV3FloatingAppWindow *onlyWindow = activeWindows.firstObject;
             if (onlyWindow) [onlyWindow setWindowFocused:YES];
@@ -461,7 +524,7 @@ void CV3ToggleExposeMode(void) {
 
         CV3FloatingAppWindow *preferredFirstWindow = nil;
         for (CV3FloatingAppWindow *win in activeWindows) {
-            if (win.isFocused && !win.isClosing) {
+            if (win.isFocused && CV3WindowIsExpandedForExpose(win)) {
                 preferredFirstWindow = win;
                 break;
             }
@@ -471,7 +534,7 @@ void CV3ToggleExposeMode(void) {
                 id obj = floatingWindows[i];
                 if (![obj isKindOfClass:[CV3FloatingAppWindow class]]) continue;
                 CV3FloatingAppWindow *win = (CV3FloatingAppWindow *)obj;
-                if (!win.isClosing && [activeWindows containsObject:win]) {
+                if (CV3WindowIsExpandedForExpose(win) && [activeWindows containsObject:win]) {
                     preferredFirstWindow = win;
                     break;
                 }
@@ -2123,6 +2186,7 @@ void CV3ToggleExposeMode(void) {
     if (self.isClosing || self.bundleID.length == 0) return;
 
     CV3ExitExposeModeIfNeeded(nil, NO);
+    CV3StashPeerWindowsForFullscreen(self);
 
     NSString *bundleID = [self.bundleID copy];
     [self closeWindow];
@@ -2387,6 +2451,7 @@ void CV3ToggleExposeMode(void) {
     }
 
     if (!self.isFullscreenMode) {
+        CV3StashPeerWindowsForFullscreen(self);
         self.preFullscreenFrame = self.frame;
         self.isFullscreenMode = YES;
         self.isCompactMode = NO;
@@ -3842,17 +3907,50 @@ void CV3ToggleExposeMode(void) {
         // ... (保持原有的图标堆叠视觉逻辑) ...
     }
 
-    // 核心修复：由于窗口本身已缩小为图标，堆叠时需要移动整个窗口的位置
-    CGFloat stackOffset = 48.0; // 每个图标之间的垂直间距
-    CGRect currentFrame = self.frame;
-    currentFrame.origin.y = self.preStashFrame.origin.y + self.preStashFrame.size.height / 2.0 - (kCV3StashIconSize * 0.5) + (stackIndex * stackOffset);
-
     CGRect screen = CV3DisplayBoundsForWindow(self);
     UIEdgeInsets safeArea = [self currentSafeAreaInsets];
-    currentFrame.origin.y = MIN(MAX(currentFrame.origin.y, safeArea.top), screen.size.height - safeArea.bottom - currentFrame.size.height);
+    CGFloat minY = safeArea.top;
+    CGFloat maxY = screen.size.height - safeArea.bottom - kCV3StashIconSize;
+    if (maxY < minY) maxY = minY;
+
+    [sameSideStashedWindows sortUsingComparator:^NSComparisonResult(CV3FloatingAppWindow *a, CV3FloatingAppWindow *b) {
+        CGFloat aCenterY = CGRectIsEmpty(a.preStashFrame) ? CGRectGetMidY(a.frame) : CGRectGetMidY(a.preStashFrame);
+        CGFloat bCenterY = CGRectIsEmpty(b.preStashFrame) ? CGRectGetMidY(b.frame) : CGRectGetMidY(b.preStashFrame);
+        if (aCenterY < bCenterY) return NSOrderedAscending;
+        if (aCenterY > bCenterY) return NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+
+    stackIndex = [sameSideStashedWindows indexOfObject:self];
+    if (stackIndex == NSNotFound) stackIndex = 0;
+
+    CGFloat desiredTop = CGFLOAT_MAX;
+    for (CV3FloatingAppWindow *win in sameSideStashedWindows) {
+        CGFloat centerY = CGRectIsEmpty(win.preStashFrame) ? CGRectGetMidY(win.frame) : CGRectGetMidY(win.preStashFrame);
+        desiredTop = MIN(desiredTop, centerY - kCV3StashIconSize * 0.5);
+    }
+    if (desiredTop == CGFLOAT_MAX) desiredTop = self.frame.origin.y;
+
+    CGFloat defaultStackOffset = kCV3StashIconSize + 8.0;
+    CGFloat availableHeight = MAX(0.0, maxY - minY);
+    CGFloat stackOffset = defaultStackOffset;
+    if (sameSideStashedWindows.count > 1) {
+        CGFloat maxFittingOffset = availableHeight / (CGFloat)(sameSideStashedWindows.count - 1);
+        stackOffset = MIN(defaultStackOffset, MAX(kCV3StashIconSize * 0.72, maxFittingOffset));
+    }
+
+    CGFloat stackHeight = kCV3StashIconSize + stackOffset * MAX(0, (NSInteger)sameSideStashedWindows.count - 1);
+    CGFloat maxTop = screen.size.height - safeArea.bottom - stackHeight;
+    if (maxTop < minY) maxTop = minY;
+    CGFloat anchoredTop = MIN(MAX(desiredTop, minY), maxTop);
+
+    CGRect currentFrame = self.frame;
+    currentFrame.size = CGSizeMake(kCV3StashIconSize, kCV3StashIconSize);
+    currentFrame.origin.y = MIN(MAX(anchoredTop + stackIndex * stackOffset, minY), maxY);
 
     [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0 options:0 animations:^{
         self.frame = currentFrame;
+        [self normalizeStashedGrabberLayout];
     } completion:nil];
 }
 - (void)handleRestoreTap:(UITapGestureRecognizer *)gesture {
@@ -4542,14 +4640,7 @@ void CV3ToggleExposeMode(void) {
 
     // 如果没有剩下活跃的分屏窗口，且 Expose 模式处于开启状态，自动退出 Expose 模式
     if (isGlobalExposeActive) {
-        BOOL hasActiveExpose = NO;
-        for (CV3FloatingAppWindow *win in floatingWindows) {
-            if (!win.isClosing) {
-                hasActiveExpose = YES;
-                break;
-            }
-        }
-        if (!hasActiveExpose) {
+        if (CV3ExpandedWindowsForExpose().count < 2) {
             CV3ToggleExposeMode();
         }
     }

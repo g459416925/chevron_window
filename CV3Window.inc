@@ -2653,6 +2653,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
     CGFloat stretch = 0;
     CGFloat vel = 0;
+    CGFloat triggerDistance = kCV3PanelTriggerDistance;
 
     switch (orientation) {
         case UIInterfaceOrientationLandscapeLeft:
@@ -2719,16 +2720,17 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
             // 仅进行手势拉伸图形绘制，延迟 dimmingView 等呈现准备工作至阈值触发后
             // 建议 3：Tactile Granularity (触觉颗粒感)
-            CGFloat hapticInterval = MAX(8.0, 20.0 - (stretch / 45.0) * 12.0);
+            CGFloat triggerProgress = MIN(1.0, MAX(0.0, stretch / MAX(triggerDistance, 1.0)));
+            CGFloat hapticInterval = MAX(8.0, 20.0 - triggerProgress * 12.0);
             if (fabs(stretch - self.lastHapticX) > hapticInterval) {
                 UIImpactFeedbackGenerator *rigid = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid];
-                [rigid impactOccurredWithIntensity:0.3 + (stretch / 45.0) * 0.4];
+                [rigid impactOccurredWithIntensity:0.3 + triggerProgress * 0.4];
                 
                 AudioServicesPlaySystemSound(1104); 
                 self.lastHapticX = stretch;
             }
 
-            if (stretch > 45) { 
+            if (stretch > triggerDistance) {
                 [self requestPanelPresentationFromPoint:location velocity:vel];
                 gesture.enabled = NO; gesture.enabled = YES; 
             }
@@ -2934,10 +2936,12 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
         // Start compact and asymmetrical so the spring visibly overshoots in
         // both axes, producing the launcher panel's jelly-like pop.
-        CGFloat velocityStretch = MIN(fabs(velocity) / 8000.0, 0.08);
-        CGFloat initialScaleX = 0.58 - velocityStretch;
-        CGFloat initialScaleY = 0.76 + velocityStretch * 0.25;
+        CGFloat jellyStrength = kCV3PanelJellyStrength;
+        CGFloat velocityStretch = MIN(fabs(velocity) / 8000.0, 0.08) * jellyStrength;
+        CGFloat initialScaleX = 0.90 - jellyStrength * 0.43 - velocityStretch;
+        CGFloat initialScaleY = 0.90 - jellyStrength * 0.19 + velocityStretch * 0.25;
         CGFloat springVelocity = MIN(2.4, MAX(1.15, fabs(velocity) / 1400.0));
+        CGFloat springDamping = 0.82 - jellyStrength * 0.42;
         self.panelPresentationStartTransform = CGAffineTransformScale(initialRotation,
                                                                        initialScaleX,
                                                                        initialScaleY);
@@ -2951,12 +2955,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         CGPoint targetCenter = (self.cachedTargetCenter.x > 0) ? self.cachedTargetCenter : [self calculateTargetCenter];
         self.panelContainer.center = targetCenter;
 
-        [UIView animateWithDuration:kCV3PanelPresentDuration
-                              delay:0
-             usingSpringWithDamping:kCV3PanelPresentDamping
-              initialSpringVelocity:springVelocity
-                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
-                         animations:^{
+        void (^presentationAnimations)(void) = ^{
             self.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:CV3Style.maskAlpha];
             self.panelContainer.transform = initialRotation;
             self.panelContainer.alpha = 1;
@@ -2964,9 +2963,18 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
             // 实时汲取当前活跃 App 的色调注入遮罩
             CV3UpdateAdaptiveTint([self currentActiveBundleID]);
-        } completion:^(BOOL f){ 
+        };
+        void (^presentationCompletion)(BOOL) = ^(BOOL finished) {
             self.isAnimating = NO; 
-        }];
+        };
+
+        [UIView animateWithDuration:kCV3PanelPresentDuration
+                              delay:0
+             usingSpringWithDamping:springDamping
+              initialSpringVelocity:springVelocity
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                         animations:presentationAnimations
+                         completion:presentationCompletion];
     } else {
         [self stopPanelStateRefreshTimer];
         // 关键修复：不要同步收起键盘，因为 resignFirstResponder 是重度同步操作，会阻塞动画开始
@@ -2984,14 +2992,24 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             self.panelContainer.alpha = presentationLayer.opacity;
         }
 
+        // Flatten the visual-effect subtree for the short closing transition.
+        // This permits a subtle settle without asking Backdrop to resample every
+        // transformed frame, which previously produced visible edge trails.
+        self.panelContainer.layer.shouldRasterize = YES;
+        self.panelContainer.layer.rasterizationScale = [UIScreen mainScreen].scale;
+        CGAffineTransform dismissTransform = CGAffineTransformScale(self.panelContainer.transform, 0.985, 0.985);
+
         [UIView animateWithDuration:kCV3PanelDismissDuration
                               delay:0
-                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseIn
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseInOut
                          animations:^{
             self.backgroundColor = [UIColor clearColor];
             self.panelContainer.alpha = 0;
+            self.panelContainer.transform = dismissTransform;
             self.panelContainer.layer.shadowOpacity = 0.0;
-        } completion:^(BOOL f){ 
+        } completion:^(BOOL f){
+            self.panelContainer.layer.shouldRasterize = NO;
+            self.panelContainer.layer.rasterizationScale = 1.0;
             self.isAnimating = NO;
             CV3FinalizePanelHiddenState(self);
             CV3SetKeyboardSuppressedByPanel(NO);
@@ -3050,10 +3068,9 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         return NO;
     }
     
-    // 2. 必须有图标
+    // 2. 必须有有效 Bundle ID
     NSString *bundleId = CV3InvokeObject(appProxy, @selector(bundleIdentifier));
-    UIImage *icon = [UIImage _applicationIconImageForBundleIdentifier:bundleId format:10 scale:[UIScreen mainScreen].scale];
-    if (!icon) return NO;
+    if (bundleId.length == 0) return NO;
 
     // 3. 排除特定系统组件（通过 Bundle ID 前缀）
     static NSArray *excludedPrefixes = nil;
@@ -3067,70 +3084,88 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     return YES;
 }
 
-- (NSArray<CV3AppInfo *> *)buildAppSnapshotOnMainThread {
-    NSAssert([NSThread isMainThread], @"SpringBoard icon state must be read on the main thread");
-
-    [cv3IconCache removeAllObjects];
+- (NSArray<CV3AppInfo *> *)buildAppSnapshotOnAppLoadQueue {
     NSMutableArray<CV3AppInfo *> *snapshot = [NSMutableArray array];
-    id iconController = [CV3ClassNamed(@"SBIconController") sharedInstance];
-    id iconManager = CV3InvokeObject(iconController, @selector(iconManager));
-    id iconModel = CV3InvokeObject(iconManager, @selector(model));
-    if (!iconModel) iconModel = CV3InvokeObject(iconController, @selector(model));
 
-    for (id icon in CV3InvokeObject(iconModel, @selector(leafIcons))) {
-        if (!CV3InvokeBool(icon, @selector(isApplicationIcon), NO)) continue;
+    id workspace = [CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace];
+    for (id proxy in CV3InvokeObject(workspace, @selector(allInstalledApplications))) {
+        if (![self shouldIncludeApp:proxy]) continue;
 
-        NSString *bundleID = CV3InvokeObject(icon, @selector(applicationBundleID));
-        if (bundleID.length == 0) bundleID = CV3InvokeObject(icon, @selector(leafIdentifier));
-        NSString *name = CV3InvokeObject1(icon, @selector(displayNameForLocation:), nil);
-        if (name.length == 0) name = CV3InvokeObject(icon, @selector(displayName));
+        NSString *bundleID = CV3InvokeObject(proxy, @selector(bundleIdentifier));
+        NSString *name = CV3InvokeObject(proxy, @selector(localizedName));
+        if (name.length == 0) name = CV3InvokeObject(proxy, @selector(itemName));
+        if (name.length == 0) name = bundleID;
         if (bundleID.length == 0 || name.length == 0) continue;
-
-        UIImage *image = [UIImage _applicationIconImageForBundleIdentifier:bundleID
-                                                                     format:10
-                                                                      scale:[UIScreen mainScreen].scale];
-        if (!image) continue;
 
         CV3AppInfo *info = [[CV3AppInfo alloc] init];
         info.name = name;
         info.bundleId = bundleID;
-        info.icon = image;
-        info.sbIcon = icon;
-        id proxy = CV3InvokeObject1(CV3ClassNamed(@"LSApplicationProxy"),
-                                    @selector(applicationProxyForIdentifier:),
-                                    bundleID);
-        if (!proxy) {
-            proxy = CV3InvokeObject1(CV3ClassNamed(@"LSApplicationProxy"),
-                                     @selector(applicationProxyForBundleIdentifier:),
-                                     bundleID);
-        }
+        info.icon = [cv3IconCache objectForKey:bundleID];
         info.category = CV3InvokeObject(proxy, @selector(genre)) ?: @"其他";
-        [cv3IconCache setObject:image forKey:bundleID];
         [snapshot addObject:info];
     }
-
-    if (snapshot.count == 0) {
-        id workspace = [CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace];
-        for (id proxy in CV3InvokeObject(workspace, @selector(allInstalledApplications))) {
-            if (![self shouldIncludeApp:proxy]) continue;
-
-            NSString *bundleID = CV3InvokeObject(proxy, @selector(bundleIdentifier));
-            NSString *name = CV3InvokeObject(proxy, @selector(localizedName));
-            UIImage *image = [UIImage _applicationIconImageForBundleIdentifier:bundleID
-                                                                         format:10
-                                                                          scale:[UIScreen mainScreen].scale];
-            if (bundleID.length == 0 || name.length == 0 || !image) continue;
-
-            CV3AppInfo *info = [[CV3AppInfo alloc] init];
-            info.name = name;
-            info.bundleId = bundleID;
-            info.icon = image;
-            info.category = CV3InvokeObject(proxy, @selector(genre)) ?: @"其他";
-            [cv3IconCache setObject:image forKey:bundleID];
-            [snapshot addObject:info];
-        }
-    }
     return [snapshot copy];
+}
+
+static NSUInteger CV3IconCacheCost(UIImage *image) {
+    if (!image) return 0;
+    CGSize size = image.size;
+    CGFloat scale = image.scale > 0 ? image.scale : [UIScreen mainScreen].scale;
+    return (NSUInteger)MAX(1.0, size.width * scale * size.height * scale * 4.0);
+}
+
+- (void)loadIconForAppInfo:(CV3AppInfo *)info cell:(CV3AppCell *)cell {
+    NSString *bundleID = [info.bundleId copy];
+    if (bundleID.length == 0) return;
+
+    UIImage *cachedImage = info.icon ?: [cv3IconCache objectForKey:bundleID];
+    if (cachedImage) {
+        info.icon = cachedImage;
+        [cell setIconImage:cachedImage forBundleId:bundleID];
+        return;
+    }
+
+    static NSMutableSet<NSString *> *inFlightBundleIDs = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        inFlightBundleIDs = [NSMutableSet set];
+    });
+
+    if ([inFlightBundleIDs containsObject:bundleID]) return;
+    [inFlightBundleIDs addObject:bundleID];
+
+    CGFloat scale = [UIScreen mainScreen].scale;
+    __weak typeof(self) weakSelf = self;
+    __weak CV3AppCell *weakCell = cell;
+    dispatch_async(CV3AppLoadQueue(), ^{
+        @autoreleasepool {
+            UIImage *image = [cv3IconCache objectForKey:bundleID];
+            if (!image) {
+                image = [UIImage _applicationIconImageForBundleIdentifier:bundleID format:10 scale:scale];
+                if (image) {
+                    [cv3IconCache setObject:image forKey:bundleID cost:CV3IconCacheCost(image)];
+                }
+            }
+
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [inFlightBundleIDs removeObject:bundleID];
+                if (!image) return;
+
+                CV3Window *strongSelf = weakSelf;
+                if (!strongSelf) return;
+                for (CV3AppInfo *candidate in strongSelf.apps) {
+                    if ([candidate.bundleId isEqualToString:bundleID]) {
+                        candidate.icon = image;
+                        break;
+                    }
+                }
+                [weakCell setIconImage:image forBundleId:bundleID];
+                for (CV3AppCell *visibleCell in strongSelf.collectionView.visibleCells) {
+                    [visibleCell setIconImage:image forBundleId:bundleID];
+                }
+            });
+        }
+    });
 }
 
 - (void)loadAppsAsync {
@@ -3145,7 +3180,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     BOOL needsFullReload = self.needsFullReload || self.apps.count == 0;
     NSArray<CV3AppInfo *> *appsSnapshot = [self.apps copy] ?: @[];
     NSSet *pinnedSnapshot = [self.pinnedBundleIDs copy] ?: [NSSet set];
-    NSArray<CV3AppInfo *> *fullReloadSnapshot = needsFullReload ? [self buildAppSnapshotOnMainThread] : nil;
 
     dispatch_async(CV3AppLoadQueue(), ^{
         @autoreleasepool {
@@ -3159,6 +3193,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
                 CV3LogToFile(@"[Debug] 命中增量更新，仅刷新置顶与排序状态 (generation=%lu)", (unsigned long)requestedGeneration);
             } else {
                 CV3LogToFile(@"[Debug] 执行全量应用资源同步 (needsFullReload=%d, generation=%lu)", needsFullReload, (unsigned long)requestedGeneration);
+                NSArray<CV3AppInfo *> *fullReloadSnapshot = [self buildAppSnapshotOnAppLoadQueue];
                 workingApps = [NSMutableArray arrayWithCapacity:fullReloadSnapshot.count];
                 for (CV3AppInfo *source in fullReloadSnapshot) {
                     CV3AppInfo *copiedInfo = CV3CopyAppInfo(source);
@@ -3574,6 +3609,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     BOOL isFirst = (index == 0 && self.searchField.text.length > 0);
     CV3AppPanelProtectionState protectionState = CV3AppPanelProtectionStateForBundleID(info.bundleId);
     [cell configureWithInfo:info searchText:self.searchField.text isFirst:isFirst protectionState:protectionState];
+    [self loadIconForAppInfo:info cell:cell];
 
     // 应用“熵减”衰老视觉效果
     [self applyAgingEffectToCell:cell withInfo:info];

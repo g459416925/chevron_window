@@ -396,6 +396,11 @@ struct {
     .dragLagShadowElevationMax = 15.0
 };
 
+static const CGFloat kCV3PanelJellyStrength = 1.0;
+static const NSTimeInterval kCV3PanelPresentDuration = 0.62;
+static const NSTimeInterval kCV3PanelDismissDuration = 0.30;
+static const CGFloat kCV3PanelTriggerDistance = 45.0;
+
 #pragma mark - Custom Cell
 typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
     CV3AppPanelProtectionStateNone = 0,
@@ -409,7 +414,9 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
 @property (nonatomic, strong) UILabel *nameLabel;
 @property (nonatomic, strong) UIView *pinnedIndicator; 
 @property (nonatomic, assign) BOOL isFirstResult; // 新增：是否为搜索首项
+@property (nonatomic, copy) NSString *representedBundleId;
 - (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst protectionState:(CV3AppPanelProtectionState)protectionState;
+- (void)setIconImage:(UIImage *)image forBundleId:(NSString *)bundleId;
 - (void)startBreathing;
 @end
 
@@ -460,7 +467,14 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
     return self;
 }
 
+- (void)prepareForReuse {
+    [super prepareForReuse];
+    self.representedBundleId = nil;
+    self.iconView.image = nil;
+}
+
 - (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst protectionState:(CV3AppPanelProtectionState)protectionState {
+    self.representedBundleId = info.bundleId;
     self.iconView.image = info.icon;
     self.pinnedIndicator.hidden = !info.isPinned;
     self.isFirstResult = isFirst;
@@ -502,6 +516,12 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
         self.iconView.layer.borderColor = isProtected ? [protectionColor colorWithAlphaComponent:0.9].CGColor : [UIColor clearColor].CGColor;
     }
 }
+
+- (void)setIconImage:(UIImage *)image forBundleId:(NSString *)bundleId {
+    if (bundleId.length == 0 || ![self.representedBundleId isEqualToString:bundleId]) return;
+    self.iconView.image = image;
+}
+
 - (void)startBreathing {
     [self.contentView.layer removeAnimationForKey:@"breathing"];
     [self.iconBackdrop.layer removeAnimationForKey:@"breathing"];
@@ -1145,6 +1165,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (void)promoteFloatingWindowInZOrder;
 - (void)animateFocusShadow:(BOOL)focused;
 - (void)restoreFromStash;
+- (void)handleHideAction;
 - (void)enforceSceneForegroundState;
 - (void)attemptToHostSceneWithRetries:(int)retries delay:(double)delay;
 - (void)setTargetOrientation:(UIInterfaceOrientation)orientation;
@@ -1815,9 +1836,6 @@ static const CGFloat kCV3PanelDragReleaseDamping = 0.88;
 static const CGFloat kCV3PanelDragReleaseMinVelocity = 0.25;
 static const CGFloat kCV3PanelDragReleaseMaxVelocity = 2.2;
 static const CGFloat kCV3PanelDragReleaseVelocityDivisor = 1100.0;
-static const NSTimeInterval kCV3PanelPresentDuration = 0.62;
-static const CGFloat kCV3PanelPresentDamping = 0.50;
-static const NSTimeInterval kCV3PanelDismissDuration = 0.18;
 static const CGFloat kCV3AppDragLongPressAllowableMovement = 6.0;
 static const CGFloat kCV3AppDragScrollVelocityGate = 80.0;
 static const CGFloat kCV3KeyboardCriticalResultsReserve = 60.0;
