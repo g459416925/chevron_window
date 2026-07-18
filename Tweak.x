@@ -1988,6 +1988,779 @@ static void CV3SetKeyboardSuppressedByPanel(BOOL suppressed);
 #import "CV3WorkspaceSupport.h"
 #import "CV3Window.inc"
 
+#pragma mark - Notification tap -> floating split
+
+static BOOL CV3LooksLikeBundleIdentifier(NSString *candidate) {
+    if (![candidate isKindOfClass:[NSString class]] || candidate.length < 3 || candidate.length > 256) return NO;
+    if (![candidate containsString:@"."] || [candidate containsString:@" "]) return NO;
+
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
+                               @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"];
+    for (NSUInteger index = 0; index < candidate.length; index++) {
+        if (![allowed characterIsMember:[candidate characterAtIndex:index]]) return NO;
+    }
+    return YES;
+}
+
+static NSString *CV3NotificationBundleIDFromObject(id object, NSUInteger depth) {
+    if (!object || depth > 5) return nil;
+
+    if ([object isKindOfClass:[NSString class]]) {
+        return CV3LooksLikeBundleIdentifier(object) ? object : nil;
+    }
+
+    if ([object isKindOfClass:[NSArray class]] || [object isKindOfClass:[NSSet class]]) {
+        for (id child in object) {
+            NSString *bundleID = CV3NotificationBundleIDFromObject(child, depth + 1);
+            if (bundleID.length > 0) return bundleID;
+        }
+        return nil;
+    }
+
+    if ([object isKindOfClass:[NSDictionary class]]) {
+        NSArray<NSString *> *preferredKeys = @[
+            @"sectionIdentifier", @"sectionID", @"clientIdentifier", @"bundleIdentifier",
+            @"applicationBundleIdentifier", @"applicationIdentifier", @"displayIdentifier",
+            @"publisher", @"targetBundleIdentifier"
+        ];
+        NSDictionary *dictionary = (NSDictionary *)object;
+        for (NSString *key in preferredKeys) {
+            NSString *bundleID = CV3NotificationBundleIDFromObject(dictionary[key], depth + 1);
+            if (bundleID.length > 0) return bundleID;
+        }
+        for (id value in [dictionary allValues]) {
+            NSString *bundleID = CV3NotificationBundleIDFromObject(value, depth + 1);
+            if (bundleID.length > 0) return bundleID;
+        }
+        return nil;
+    }
+
+    NSArray<NSString *> *selectors = @[
+        @"sectionIdentifier", @"sectionID", @"clientIdentifier", @"bundleIdentifier",
+        @"applicationBundleIdentifier", @"applicationIdentifier", @"displayIdentifier",
+        @"publisher", @"targetBundleIdentifier", @"notificationRequest", @"notification",
+        @"request", @"bulletin", @"content", @"userInfo", @"source", @"section",
+        @"destination", @"target", @"displayItem", @"displayItems", @"item", @"items",
+        @"entities", @"activatedEntities", @"application", @"applicationContext",
+        @"transitionContext", @"layout", @"appLayout", @"identifier"
+    ];
+    for (NSString *selectorName in selectors) {
+        id value = CV3InvokeObject(object, NSSelectorFromString(selectorName));
+        NSString *bundleID = CV3NotificationBundleIDFromObject(value, depth + 1);
+        if (bundleID.length > 0) return bundleID;
+    }
+
+    return nil;
+}
+
+static NSString *CV3PendingNotificationBundleID = nil;
+static NSTimeInterval CV3PendingNotificationTimestamp = 0;
+
+static BOOL CV3PendingNotificationIsFresh(void) {
+    if (CV3PendingNotificationBundleID.length == 0 || CV3PendingNotificationTimestamp <= 0) return NO;
+
+    NSTimeInterval age = [NSDate timeIntervalSinceReferenceDate] - CV3PendingNotificationTimestamp;
+    return age >= 0.0 && age <= 10.0;
+}
+
+static BOOL CV3PendingNotificationMatchesBundleID(NSString *bundleID) {
+    return bundleID.length > 0 &&
+           CV3PendingNotificationIsFresh() &&
+           [bundleID isEqualToString:CV3PendingNotificationBundleID];
+}
+
+static BOOL CV3HandleNotificationTap(id primaryObject, id secondaryObject, NSString *source) {
+    NSString *bundleID = CV3NotificationBundleIDFromObject(primaryObject, 0);
+    if (bundleID.length == 0) bundleID = CV3NotificationBundleIDFromObject(secondaryObject, 0);
+    if (bundleID.length == 0) return NO;
+
+    // A banner may contain several nested objects. Use the SpringBoard lookup
+    // only as a diagnostic; a notification can arrive before SBApplication has
+    // materialized its object, while sectionIdentifier is already authoritative.
+    id appController = [CV3ClassNamed(@"SBApplicationController") sharedInstance];
+    if ([appController respondsToSelector:@selector(applicationWithBundleIdentifier:)]) {
+        id application = CV3InvokeObject1(appController,
+                                          @selector(applicationWithBundleIdentifier:), bundleID);
+        CV3LogToFile(@"[NotificationSplit] 识别通知应用: %@, SBApplication=%@", bundleID, application ? @"已找到" : @"未物化");
+    }
+
+    CV3PendingNotificationBundleID = nil;
+    CV3PendingNotificationTimestamp = 0;
+    CV3ExitExposeModeIfNeeded(nil, NO);
+    if (sharedWindow) CV3HidePanelImmediately(sharedWindow);
+    return CV3OpenBundleInFloatingWindow(bundleID, source);
+}
+
+static void CV3RememberNotificationBundle(id notificationObject, NSString *source) {
+    NSString *bundleID = CV3NotificationBundleIDFromObject(notificationObject, 0);
+    if (bundleID.length == 0) return;
+
+    CV3PendingNotificationBundleID = [bundleID copy];
+    CV3PendingNotificationTimestamp = [NSDate timeIntervalSinceReferenceDate];
+    CV3LogToFile(@"[NotificationSplit] 记录待点击通知: %@ (%@)", bundleID, source ?: @"Unknown");
+}
+
+static BOOL CV3ConsumePendingNotificationForLaunch(NSString *bundleID) {
+    BOOL matches = CV3PendingNotificationMatchesBundleID(bundleID);
+    if (matches) {
+        CV3PendingNotificationBundleID = nil;
+        CV3PendingNotificationTimestamp = 0;
+    }
+    return matches;
+}
+
+static BOOL CV3RedirectPendingNotificationLaunch(NSString *bundleID) {
+    if (!CV3ConsumePendingNotificationForLaunch(bundleID)) return NO;
+
+    CV3LogToFile(@"[NotificationSplit] 拦截通知默认启动并改为分屏: %@", bundleID);
+    CV3ExitExposeModeIfNeeded(nil, NO);
+    if (sharedWindow) CV3HidePanelImmediately(sharedWindow);
+    return CV3OpenBundleInFloatingWindow(bundleID, @"LaunchFromNotification");
+}
+
+static BOOL CV3RedirectPendingNotificationTransition(id transitionRequest, NSString *source) {
+    if (!CV3PendingNotificationIsFresh()) return NO;
+
+    NSString *bundleID = CV3NotificationBundleIDFromObject(transitionRequest, 0);
+    if (bundleID.length == 0) {
+        NSString *description = [transitionRequest description];
+        if ([description containsString:CV3PendingNotificationBundleID]) {
+            bundleID = CV3PendingNotificationBundleID;
+        }
+    }
+    if (!CV3PendingNotificationMatchesBundleID(bundleID)) return NO;
+
+    CV3PendingNotificationBundleID = nil;
+    CV3PendingNotificationTimestamp = 0;
+    CV3LogToFile(@"[NotificationSplit] 拦截通知 Workspace 转场并改为分屏: %@ (%@)", bundleID, source ?: @"Unknown");
+    CV3ExitExposeModeIfNeeded(nil, NO);
+    if (sharedWindow) CV3HidePanelImmediately(sharedWindow);
+    return CV3OpenBundleInFloatingWindow(bundleID, source ?: @"WorkspaceTransitionFromNotification");
+}
+
+static const char *CV3SimulatedNotificationName = "com.xu.chevronv3.simulate-notification";
+static id CV3CapturedBulletinServer = nil;
+static id CV3CapturedBulletinNotificationSource = nil;
+
+static void CV3SetUnsignedIntegerArgument(NSInvocation *invocation, NSUInteger index, unsigned long long value) {
+    if (!invocation || index >= invocation.methodSignature.numberOfArguments) return;
+
+    const char *type = [invocation.methodSignature getArgumentTypeAtIndex:index];
+    while (type && (*type == 'r' || *type == 'n' || *type == 'N' || *type == 'o' ||
+                    *type == 'O' || *type == 'R' || *type == 'V')) {
+        type++;
+    }
+
+    if (!type) return;
+    switch (type[0]) {
+        case 'Q': {
+            unsigned long long argument = value;
+            [invocation setArgument:&argument atIndex:index];
+            break;
+        }
+        case 'q': {
+            long long argument = (long long)value;
+            [invocation setArgument:&argument atIndex:index];
+            break;
+        }
+        case 'L':
+        case 'I': {
+            unsigned int argument = (unsigned int)value;
+            [invocation setArgument:&argument atIndex:index];
+            break;
+        }
+        case 'l':
+        case 'i': {
+            int argument = (int)value;
+            [invocation setArgument:&argument atIndex:index];
+            break;
+        }
+        case 'S': {
+            unsigned short argument = (unsigned short)value;
+            [invocation setArgument:&argument atIndex:index];
+            break;
+        }
+        case 's': {
+            short argument = (short)value;
+            [invocation setArgument:&argument atIndex:index];
+            break;
+        }
+        case 'C':
+        case 'B': {
+            BOOL argument = value != 0;
+            [invocation setArgument:&argument atIndex:index];
+            break;
+        }
+        case 'c': {
+            char argument = value != 0;
+            [invocation setArgument:&argument atIndex:index];
+            break;
+        }
+        default: {
+            unsigned long long argument = value;
+            [invocation setArgument:&argument atIndex:index];
+            break;
+        }
+    }
+}
+
+static void CV3SetBulletinValue(id bulletin, NSString *key, id value) {
+    if (!bulletin || key.length == 0 || !value) return;
+    @try {
+        [bulletin setValue:value forKey:key];
+    } @catch (NSException *exception) {
+        CV3LogToFile(@"[NotificationSplit][NativeTest] 无法设置 %@.%@: %@",
+                     NSStringFromClass([bulletin class]), key, exception.reason);
+    }
+}
+
+static __attribute__((unused)) id CV3CreateNativeTestBulletin(NSString *bundleID) {
+    Class bulletinClass = CV3ClassNamed(@"BBBulletinRequest");
+    if (!bulletinClass) {
+        CV3LogToFile(@"[NotificationSplit][NativeTest] BBBulletinRequest 不存在");
+        return nil;
+    }
+
+    id proxy = CV3InvokeObject1(CV3ClassNamed(@"LSApplicationProxy"),
+                                @selector(applicationProxyForIdentifier:),
+                                bundleID);
+    if (!proxy) {
+        proxy = CV3InvokeObject1(CV3ClassNamed(@"LSApplicationProxy"),
+                                 @selector(applicationProxyForBundleIdentifier:),
+                                 bundleID);
+    }
+    NSString *appName = CV3InvokeObject(proxy, @selector(localizedName));
+    if (appName.length == 0) appName = bundleID;
+
+    id bulletin = [[bulletinClass alloc] init];
+    NSString *identifier = [[NSUUID UUID] UUIDString];
+    NSDate *now = [NSDate date];
+    CV3SetBulletinValue(bulletin, @"sectionID", bundleID);
+    CV3SetBulletinValue(bulletin, @"section", bundleID);
+    CV3SetBulletinValue(bulletin, @"bulletinID", identifier);
+    CV3SetBulletinValue(bulletin, @"bulletinVersionID", identifier);
+    CV3SetBulletinValue(bulletin, @"publisherBulletinID", identifier);
+    CV3SetBulletinValue(bulletin, @"recordID", identifier);
+    CV3SetBulletinValue(bulletin, @"title", appName);
+    CV3SetBulletinValue(bulletin, @"subtitle", @"ChevronV3 原生通知测试");
+    CV3SetBulletinValue(bulletin, @"message", @"点击此系统通知，应直接开启分屏窗口");
+    CV3SetBulletinValue(bulletin, @"date", now);
+    CV3SetBulletinValue(bulletin, @"publicationDate", now);
+    CV3SetBulletinValue(bulletin, @"lastInterruptDate", now);
+    CV3SetBulletinValue(bulletin, @"clearable", @YES);
+    CV3SetBulletinValue(bulletin, @"showsUnreadIndicator", @YES);
+    CV3SetBulletinValue(bulletin, @"turnsOnDisplay", @YES);
+    CV3SetBulletinValue(bulletin, @"context", @{
+        @"CV3NativeNotificationTest": @YES,
+        @"bundleIdentifier": bundleID
+    });
+
+    Class actionClass = CV3ClassNamed(@"BBAction");
+    id action = CV3InvokeObject(actionClass, @selector(action));
+    if (!action && actionClass) action = [[actionClass alloc] init];
+    if (action) {
+        CV3SetBulletinValue(action, @"identifier", @"com.xu.chevronv3.native-test.open");
+        CV3SetBulletinValue(action, @"launchBundleID", bundleID);
+        CV3SetBulletinValue(bulletin, @"defaultAction", action);
+    }
+
+    return bulletin;
+}
+
+static id CV3BulletinServerFromObject(id object) {
+    if (!object) return nil;
+    if ([object respondsToSelector:NSSelectorFromString(@"publishBulletin:destinations:")]) return object;
+
+    NSArray<NSString *> *selectors = @[
+        @"bulletinServer", @"_bulletinServer", @"bbServer", @"_bbServer", @"server", @"_server"
+    ];
+    for (NSString *selectorName in selectors) {
+        id candidate = CV3InvokeObject(object, NSSelectorFromString(selectorName));
+        if ([candidate respondsToSelector:NSSelectorFromString(@"publishBulletin:destinations:")]) {
+            return candidate;
+        }
+    }
+    return nil;
+}
+
+static __attribute__((unused)) id CV3ResolveBulletinServer(void) {
+    if ([CV3CapturedBulletinServer respondsToSelector:NSSelectorFromString(@"publishBulletin:destinations:")]) {
+        return CV3CapturedBulletinServer;
+    }
+
+    Class serverClass = CV3ClassNamed(@"BBServer");
+    id server = CV3BulletinServerFromObject(CV3InvokeObject(serverClass, @selector(sharedInstance)));
+    if (server) return server;
+
+    id bannerController = CV3InvokeObject(CV3ClassNamed(@"SBBulletinBannerController"), @selector(sharedInstance));
+    id applicationDelegate = [UIApplication sharedApplication].delegate;
+    id mainWorkspace = CV3InvokeObject(CV3ClassNamed(@"SBMainWorkspace"), @selector(sharedInstance));
+    NSArray *roots = @[
+        bannerController ?: [NSNull null],
+        [UIApplication sharedApplication],
+        applicationDelegate ?: [NSNull null],
+        mainWorkspace ?: [NSNull null]
+    ];
+    for (id root in roots) {
+        if (root == [NSNull null]) continue;
+        server = CV3BulletinServerFromObject(root);
+        if (server) return server;
+    }
+    return nil;
+}
+
+static __attribute__((unused)) BOOL CV3PublishBulletinWithServer(id server, id bulletin) {
+    SEL selector = NSSelectorFromString(@"publishBulletin:destinations:");
+    if (!server || !bulletin || ![server respondsToSelector:selector]) return NO;
+
+    @try {
+        NSMethodSignature *signature = [server methodSignatureForSelector:selector];
+        if (!signature || signature.numberOfArguments < 4) return NO;
+        NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
+        invocation.target = server;
+        invocation.selector = selector;
+        __unsafe_unretained id bulletinArgument = bulletin;
+        [invocation setArgument:&bulletinArgument atIndex:2];
+        CV3SetUnsignedIntegerArgument(invocation, 3, 15ULL);
+        [invocation invoke];
+        return YES;
+    } @catch (NSException *exception) {
+        CV3LogToFile(@"[NotificationSplit][NativeTest] BBServer 发布异常: %@", exception);
+        return NO;
+    }
+}
+
+static __attribute__((unused)) BOOL CV3PublishBulletinWithBannerController(id bulletin) {
+    id controller = CV3InvokeObject(CV3ClassNamed(@"SBBulletinBannerController"), @selector(sharedInstance));
+    SEL selector = NSSelectorFromString(@"observer:addBulletin:forFeed:playLightsAndSirens:withReply:");
+    if (!controller || ![controller respondsToSelector:selector]) return NO;
+
+    @try {
+        NSMethodSignature *signature = [controller methodSignatureForSelector:selector];
+        if (!signature || signature.numberOfArguments < 7) return NO;
+        NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
+        invocation.target = controller;
+        invocation.selector = selector;
+        __unsafe_unretained id observer = nil;
+        __unsafe_unretained id bulletinArgument = bulletin;
+        __unsafe_unretained id reply = nil;
+        [invocation setArgument:&observer atIndex:2];
+        [invocation setArgument:&bulletinArgument atIndex:3];
+        CV3SetUnsignedIntegerArgument(invocation, 4, 2);
+        CV3SetUnsignedIntegerArgument(invocation, 5, 1);
+        [invocation setArgument:&reply atIndex:6];
+        [invocation invoke];
+        return YES;
+    } @catch (NSException *exception) {
+        CV3LogToFile(@"[NotificationSplit][NativeTest] BannerController 发布异常: %@", exception);
+        return NO;
+    }
+}
+
+static BOOL CV3PublishBulletinThroughNotificationSource(id bulletin) {
+    id source = CV3CapturedBulletinNotificationSource;
+    SEL selector = NSSelectorFromString(@"observer:addBulletin:forFeed:playLightsAndSirens:withReply:");
+    if (!source || !bulletin || ![source respondsToSelector:selector]) return NO;
+
+    id observer = CV3InvokeObject(source, @selector(observer));
+    dispatch_queue_t sourceQueue = nil;
+    @try {
+        sourceQueue = [source valueForKey:@"queue"];
+        if (!sourceQueue) sourceQueue = [source valueForKey:@"_queue"];
+    } @catch (__unused NSException *exception) {
+        sourceQueue = nil;
+    }
+    if (!observer || !sourceQueue) {
+        CV3LogToFile(@"[NotificationSplit][NativeTest] 原生通知源尚未就绪 observer=%@ queue=%@",
+                     observer, sourceQueue);
+        return NO;
+    }
+
+    dispatch_async(sourceQueue, ^{
+        @try {
+            void (^reply)(void) = ^{
+                CV3LogToFile(@"[NotificationSplit][NativeTest] 原生通知已进入 NCNotificationDispatcher");
+            };
+            ((void (*)(id, SEL, id, id, NSUInteger, BOOL, id))objc_msgSend)(
+                source, selector, observer, bulletin, (NSUInteger)2, YES, reply);
+        } @catch (NSException *exception) {
+            CV3LogToFile(@"[NotificationSplit][NativeTest] NotificationSource 发布异常: %@", exception);
+        }
+    });
+    return YES;
+}
+
+@interface CV3NotificationTestWindow : UIWindow
+@property (nonatomic, weak) UIView *interactiveView;
+@end
+
+@implementation CV3NotificationTestWindow
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *interactiveView = self.interactiveView;
+    if (!interactiveView || interactiveView.hidden || interactiveView.alpha < 0.01) return nil;
+    CGPoint localPoint = [interactiveView convertPoint:point fromView:self];
+    if (!CGRectContainsPoint(interactiveView.bounds, localPoint)) return nil;
+    return [super hitTest:point withEvent:event];
+}
+@end
+
+@interface CV3NotificationTestController : NSObject
+@property (nonatomic, strong) CV3NotificationTestWindow *window;
+@property (nonatomic, strong) UIControl *banner;
+@property (nonatomic, copy) NSString *bundleID;
++ (instancetype)sharedController;
+- (void)showForBundleID:(NSString *)bundleID;
+@end
+
+@implementation CV3NotificationTestController
+
++ (instancetype)sharedController {
+    static CV3NotificationTestController *controller;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        controller = [[self alloc] init];
+    });
+    return controller;
+}
+
+- (void)dismissBanner {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(dismissBanner) object:nil];
+    CV3NotificationTestWindow *window = self.window;
+    UIControl *banner = self.banner;
+    self.banner = nil;
+    self.window = nil;
+    [UIView animateWithDuration:0.2 animations:^{
+        banner.alpha = 0.0;
+        banner.transform = CGAffineTransformMakeTranslation(0, -24.0);
+    } completion:^(__unused BOOL finished) {
+        window.hidden = YES;
+    }];
+}
+
+- (void)openTestNotification {
+    NSString *bundleID = [self.bundleID copy];
+    [self dismissBanner];
+    if (bundleID.length == 0) return;
+    CV3HandleNotificationTap(@{ @"bundleIdentifier": bundleID }, nil, @"ChevronV3SafeTestBanner");
+}
+
+- (void)showForBundleID:(NSString *)bundleID {
+    [self dismissBanner];
+    self.bundleID = bundleID;
+
+    UIWindowScene *activeScene = nil;
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]] &&
+                scene.activationState == UISceneActivationStateForegroundActive) {
+                activeScene = (UIWindowScene *)scene;
+                break;
+            }
+        }
+    }
+
+    CV3NotificationTestWindow *window;
+    if (@available(iOS 13.0, *)) {
+        if (!activeScene) {
+            CV3LogToFile(@"[NotificationSplit][SafeTest] 未找到前台 UIWindowScene");
+            return;
+        }
+        window = [[CV3NotificationTestWindow alloc] initWithWindowScene:activeScene];
+    } else {
+        window = [[CV3NotificationTestWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    }
+    window.frame = window.screen.bounds;
+    window.backgroundColor = UIColor.clearColor;
+    window.windowLevel = CV3Style.maxBound;
+
+    UIViewController *rootController = [[UIViewController alloc] init];
+    rootController.view.backgroundColor = UIColor.clearColor;
+    window.rootViewController = rootController;
+
+    CGFloat width = MIN(CGRectGetWidth(window.bounds) - 24.0, 430.0);
+    CGFloat topInset = activeScene ? activeScene.windows.firstObject.safeAreaInsets.top : 20.0;
+    UIControl *banner = [[UIControl alloc] initWithFrame:CGRectMake((CGRectGetWidth(window.bounds) - width) / 2.0,
+                                                                   MAX(topInset + 6.0, 12.0),
+                                                                   width,
+                                                                   88.0)];
+    banner.layer.cornerRadius = 18.0;
+    if (@available(iOS 13.0, *)) banner.layer.cornerCurve = kCACornerCurveContinuous;
+    banner.layer.masksToBounds = YES;
+    [banner addTarget:self action:@selector(openTestNotification) forControlEvents:UIControlEventTouchUpInside];
+
+    UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:
+                                [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+    blur.frame = banner.bounds;
+    blur.userInteractionEnabled = NO;
+    blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [banner addSubview:blur];
+
+    UIImageView *iconView = [[UIImageView alloc] initWithFrame:CGRectMake(14.0, 18.0, 52.0, 52.0)];
+    iconView.image = [UIImage _applicationIconImageForBundleIdentifier:bundleID format:2 scale:[UIScreen mainScreen].scale];
+    iconView.layer.cornerRadius = 11.0;
+    iconView.layer.masksToBounds = YES;
+    [banner addSubview:iconView];
+
+    id proxy = CV3InvokeObject1(CV3ClassNamed(@"LSApplicationProxy"),
+                                @selector(applicationProxyForIdentifier:), bundleID);
+    NSString *appName = CV3InvokeObject(proxy, @selector(localizedName));
+    if (appName.length == 0) appName = bundleID;
+
+    UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(78.0, 15.0, width - 94.0, 25.0)];
+    titleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
+    titleLabel.textColor = UIColor.labelColor;
+    titleLabel.text = appName;
+    [banner addSubview:titleLabel];
+
+    UILabel *messageLabel = [[UILabel alloc] initWithFrame:CGRectMake(78.0, 39.0, width - 94.0, 36.0)];
+    messageLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightRegular];
+    messageLabel.textColor = UIColor.secondaryLabelColor;
+    messageLabel.numberOfLines = 2;
+    messageLabel.text = @"ChevronV3 测试通知：点击后应直接开启分屏窗口";
+    [banner addSubview:messageLabel];
+
+    banner.alpha = 0.0;
+    banner.transform = CGAffineTransformMakeTranslation(0, -24.0);
+    [rootController.view addSubview:banner];
+    window.interactiveView = banner;
+    self.window = window;
+    self.banner = banner;
+    window.hidden = NO;
+
+    [UIView animateWithDuration:0.28 delay:0.0 usingSpringWithDamping:0.82 initialSpringVelocity:0.2 options:0 animations:^{
+        banner.alpha = 1.0;
+        banner.transform = CGAffineTransformIdentity;
+    } completion:nil];
+    [self performSelector:@selector(dismissBanner) withObject:nil afterDelay:8.0];
+    CV3LogToFile(@"[NotificationSplit][SafeTest] 已显示安全测试通知: %@", bundleID);
+}
+
+@end
+
+static void CV3HandleSimulatedNotificationRequest(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.xu.chevronv3"];
+            NSString *bundleID = [defaults stringForKey:@"CV3TestNotificationBundleID"];
+            if (!CV3LooksLikeBundleIdentifier(bundleID)) bundleID = @"com.apple.MobileSMS";
+
+            CV3LogToFile(@"[NotificationSplit][NativeTest] 收到原生通知请求: %@", bundleID);
+            id bulletin = CV3CreateNativeTestBulletin(bundleID);
+            if (!bulletin || !CV3PublishBulletinThroughNotificationSource(bulletin)) {
+                CV3LogToFile(@"[NotificationSplit][NativeTest] 发布失败：系统原生通知源不可用");
+            }
+        } @catch (NSException *exception) {
+            CV3LogToFile(@"[NotificationSplit][NativeTest] 处理测试通知异常: %@", exception);
+        }
+    });
+}
+
+static void CV3RegisterSimulatedNotificationBridge(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        int token = 0;
+        int status = notify_register_dispatch(CV3SimulatedNotificationName,
+                                              &token,
+                                              dispatch_get_main_queue(),
+                                              ^(int registeredToken) {
+            CV3HandleSimulatedNotificationRequest();
+        });
+        if (status != NOTIFY_STATUS_OK) {
+            CV3LogToFile(@"[NotificationSplit][Simulation] Darwin 通知注册失败: %d", status);
+        }
+    });
+}
+
+// These callbacks cover the banner implementations used across recent
+// SpringBoard releases. If a callback is not used by the current OS, Logos
+// leaves the original behavior untouched.
+%hook NCBulletinNotificationSource
+- (id)initWithDispatcher:(id)dispatcher observer:(id)observer queue:(id)queue {
+    id source = %orig(dispatcher, observer, queue);
+    if (source) {
+        CV3CapturedBulletinNotificationSource = source;
+        CV3LogToFile(@"[NotificationSplit][NativeTest] 已捕获系统 NCBulletinNotificationSource");
+    }
+    return source;
+}
+%end
+
+%hook SBBannerController
+- (void)presentBannerForNotificationRequest:(id)request {
+    CV3RememberNotificationBundle(request, @"SBBannerController.present");
+    %orig(request);
+}
+
+- (void)_presentBannerForNotificationRequest:(id)request {
+    CV3RememberNotificationBundle(request, @"SBBannerController._present");
+    %orig(request);
+}
+
+- (void)bannerViewController:(id)viewController didReceiveResponse:(id)response {
+    if (CV3HandleNotificationTap(response, viewController, @"SBBannerController")) return;
+    %orig(viewController, response);
+}
+
+- (void)handleTapForBanner:(id)banner {
+    if (CV3HandleNotificationTap(banner, nil, @"SBBannerController.handleTap")) return;
+    %orig(banner);
+}
+%end
+
+%hook SBBulletinBannerController
+- (void)_presentBannerForItem:(id)item {
+    CV3RememberNotificationBundle(item, @"SBBulletinBannerController.present");
+    %orig(item);
+}
+
+- (void)presentBannerForNotificationRequest:(id)request {
+    CV3RememberNotificationBundle(request, @"SBBulletinBannerController.present");
+    %orig(request);
+}
+
+- (void)handleTapForBanner:(id)banner {
+    if (CV3HandleNotificationTap(banner, nil, @"SBBulletinBannerController.handleTap")) return;
+    %orig(banner);
+}
+
+- (void)_handleTapForBanner:(id)banner {
+    if (CV3HandleNotificationTap(banner, nil, @"SBBulletinBannerController._handleTap")) return;
+    %orig(banner);
+}
+%end
+
+%hook SBNotificationBannerController
+- (void)bannerViewController:(id)viewController didReceiveResponse:(id)response {
+    if (CV3HandleNotificationTap(response, viewController, @"SBNotificationBannerController")) return;
+    %orig(viewController, response);
+}
+%end
+
+%hook SBNotificationBannerDestination
+- (void)postNotificationRequest:(id)request forCoalescedNotification:(id)notification {
+    CV3RememberNotificationBundle(request ?: notification, @"SBNotificationBannerDestination.post");
+    %orig(request, notification);
+}
+
+- (void)handleNotificationResponse:(id)response forNotificationRequest:(id)request {
+    if (CV3HandleNotificationTap(response, request, @"SBNotificationBannerDestination")) return;
+    %orig(response, request);
+}
+
+- (void)notificationResponse:(id)response forRequest:(id)request {
+    if (CV3HandleNotificationTap(response, request, @"SBNotificationBannerDestination.response")) return;
+    %orig(response, request);
+}
+%end
+
+%hook NCNotificationViewController
+- (void)notificationViewController:(id)viewController didReceiveResponse:(id)response {
+    if (CV3HandleNotificationTap(response, viewController, @"NCNotificationViewController")) return;
+    %orig(viewController, response);
+}
+%end
+
+%hook NCNotificationAlertQueue
+- (void)postNotificationRequest:(id)request forCoalescedNotification:(id)notification {
+    CV3RememberNotificationBundle(request ?: notification, @"NCNotificationAlertQueue.post");
+    %orig(request, notification);
+}
+%end
+
+%hook NCNotificationShortLookViewController
+- (void)setNotificationRequest:(id)request {
+    CV3RememberNotificationBundle(request, @"NCNotificationShortLookViewController.setRequest");
+    %orig(request);
+}
+
+- (void)_setNotificationRequest:(id)request {
+    CV3RememberNotificationBundle(request, @"NCNotificationShortLookViewController._setRequest");
+    %orig(request);
+}
+
+- (void)handleNotificationResponse:(id)response {
+    if (CV3HandleNotificationTap(response, self, @"NCNotificationShortLookViewController.response")) return;
+    %orig(response);
+}
+%end
+
+%hook NCNotificationListCell
+- (void)setNotificationRequest:(id)request {
+    CV3RememberNotificationBundle(request, @"NCNotificationListCell.setRequest");
+    %orig(request);
+}
+
+- (void)_setNotificationRequest:(id)request {
+    CV3RememberNotificationBundle(request, @"NCNotificationListCell._setRequest");
+    %orig(request);
+}
+%end
+
+static BOOL CV3IsDefaultBulletinAction(id action, id bulletin) {
+    if (!action || !bulletin) return NO;
+
+    id defaultAction = CV3InvokeObject(bulletin, @selector(defaultAction));
+    if (defaultAction == action) return YES;
+
+    NSString *identifier = CV3InvokeObject(action, @selector(identifier));
+    NSString *defaultIdentifier = CV3InvokeObject(defaultAction, @selector(identifier));
+    if (identifier.length > 0 && defaultIdentifier.length > 0 &&
+        [identifier isEqualToString:defaultIdentifier]) {
+        return YES;
+    }
+
+    NSString *lowercaseIdentifier = identifier.lowercaseString;
+    if ([lowercaseIdentifier containsString:@"defaultaction"] ||
+        [lowercaseIdentifier containsString:@"default-action"]) {
+        return YES;
+    }
+
+    NSString *launchBundleID = CV3InvokeObject(action, @selector(launchBundleID));
+    NSString *sectionID = CV3NotificationBundleIDFromObject(bulletin, 0);
+    return launchBundleID.length > 0 && [launchBundleID isEqualToString:sectionID];
+}
+
+// This is the common default-action runner used by real BulletinBoard
+// notifications on iOS 14 through current releases. Recording the token here
+// keeps custom notification buttons on their original path.
+%hook NCBulletinActionRunner
+- (void)executeAction:(id)action
+           fromOrigin:(id)origin
+             endpoint:(id)endpoint
+       withParameters:(id)parameters
+           completion:(id)completion {
+    id bulletin = CV3InvokeObject(self, @selector(bulletin));
+    id runnerAction = CV3InvokeObject(self, @selector(action)) ?: action;
+    if (CV3IsDefaultBulletinAction(runnerAction, bulletin)) {
+        NSString *bundleID = CV3NotificationBundleIDFromObject(bulletin, 0);
+        if (bundleID.length > 0) {
+            SEL forwardSelector = @selector(setShouldForwardAction:);
+            if ([(id)self respondsToSelector:forwardSelector]) {
+                ((void (*)(id, SEL, BOOL))objc_msgSend)(self, forwardSelector, NO);
+            }
+
+            CV3LogToFile(@"[NotificationSplit] 捕获系统原生通知默认点击并接管启动: %@", bundleID);
+            %orig(action, origin, endpoint, parameters, completion);
+
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                BOOL opened = CV3HandleNotificationTap(bulletin, nil, @"NCBulletinActionRunner.defaultAction");
+                CV3LogToFile(@"[NotificationSplit] 原生通知点击分屏结果: %@ success=%d", bundleID, opened);
+            });
+            return;
+        }
+    }
+    %orig(action, origin, endpoint, parameters, completion);
+}
+%end
+
+%hook LSApplicationWorkspace
+- (BOOL)openApplicationWithBundleID:(NSString *)bundleID {
+    if (CV3RedirectPendingNotificationLaunch(bundleID)) return YES;
+    return %orig(bundleID);
+}
+%end
+
 static NSTimeInterval lastLogTime = 0;
 static BOOL CV3SceneRotationDispatching = NO;
 
@@ -2620,6 +3393,7 @@ static BOOL CV3SpoofPadIdiomDuringSwitcherLoad = NO;
     if ([arg1 respondsToSelector:@selector(source)]) {
         CV3LogToFile(@"[Workspace] 执行转换请求, Source: %ld", (long)[(SBMainWorkspaceTransitionRequest *)arg1 source]);
     }
+    if (CV3RedirectPendingNotificationTransition(arg1, @"SBMainWorkspace.executeTransitionRequest")) return;
     CV3BeginWorkspaceTransitionProtection(@"ExecuteTransitionRequest");
     %orig(arg1);
 }
@@ -2776,6 +3550,12 @@ static BOOL CV3SpoofPadIdiomDuringSwitcherLoad = NO;
 
 %hook SpringBoard
 - (BOOL)launchApplicationWithIdentifier:(NSString *)identifier suspended:(BOOL)suspended {
+    // When a notification banner falls through to SpringBoard's normal app
+    // launch path, convert that launch into a hosted window before the app can
+    // take over the screen. The short-lived, bundle-matched token prevents
+    // ordinary app launches from being affected.
+    if (!suspended && CV3RedirectPendingNotificationLaunch(identifier)) return YES;
+
     if (!suspended) {
         CV3BeginWorkspaceTransitionProtection(@"ApplicationLaunchBegan");
     }
@@ -3218,6 +3998,7 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
 %ctor {
     @autoreleasepool {
         CV3RegisterVideoOrientationBridge();
+        CV3RegisterSimulatedNotificationBridge();
         %init;
     }
 }

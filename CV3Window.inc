@@ -635,6 +635,62 @@ static CV3FloatingAppWindow *CV3FloatingWindowForBundleID(NSString *bundleID) {
     return nil;
 }
 
+// Entry point shared by the launcher and notification taps. Notification
+// callbacks are owned by SpringBoard, so keep all hosted-window work on the
+// main thread and do not require the launcher panel to be visible.
+static BOOL CV3OpenBundleInFloatingWindow(NSString *bundleID, NSString *reason) {
+    if (bundleID.length == 0) return NO;
+
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CV3OpenBundleInFloatingWindow(bundleID, reason);
+        });
+        return YES;
+    }
+
+    CV3FloatingAppWindow *existingWindow = CV3FloatingWindowForBundleID(bundleID);
+    if (existingWindow) {
+        [existingWindow restoreFromStash];
+        [existingWindow setWindowFocused:YES];
+        CV3LogToFile(@"[NotificationSplit] 聚焦已有分屏: %@ (%@)", bundleID, reason ?: @"Unknown");
+        return YES;
+    }
+
+    if (!floatingWindows) floatingWindows = [NSMutableArray array];
+
+    UIWindowScene *scene = sharedWindow.windowScene;
+    if (!scene) {
+        for (UIScene *candidate in [[UIApplication sharedApplication].connectedScenes allObjects]) {
+            if ([candidate isKindOfClass:[UIWindowScene class]] &&
+                candidate.activationState != UISceneActivationStateUnattached) {
+                scene = (UIWindowScene *)candidate;
+                break;
+            }
+        }
+    }
+
+    if (!scene) {
+        CV3LogToFile(@"[NotificationSplit] 找不到可用 UIWindowScene: %@", bundleID);
+        return NO;
+    }
+
+    CGPoint center = CGPointMake(CGRectGetMidX(scene.coordinateSpace.bounds),
+                                 CGRectGetMidY(scene.coordinateSpace.bounds));
+    CV3FloatingAppWindow *floatingWindow = [[CV3FloatingAppWindow alloc] initWithBundleID:bundleID
+                                                                                        center:center
+                                                                                   windowScene:scene];
+    if (!floatingWindow) return NO;
+
+    floatingWindow.targetOrientation = CV3TrustedInterfaceOrientation(scene);
+    [floatingWindows addObject:floatingWindow];
+    [floatingWindow makeKeyAndVisible];
+    floatingWindow.windowLevel = CV3Style.floatingApp;
+    CV3UpdateFloatingBackdrop(scene);
+    [[NSNotificationCenter defaultCenter] postNotificationName:CV3FloatingWindowsDidChangeNotification object:nil];
+    CV3LogToFile(@"[NotificationSplit] 通知点击开启分屏: %@ (%@)", bundleID, reason ?: @"Unknown");
+    return YES;
+}
+
 static CV3AppPanelProtectionState CV3AppPanelProtectionStateForBundleID(NSString *bundleID) {
     if (bundleID.length == 0) return CV3AppPanelProtectionStateNone;
 
