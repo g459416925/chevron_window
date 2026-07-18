@@ -7,6 +7,8 @@ The package contains two tweak targets:
 - `ChevronV3`: SpringBoard launcher, floating-window host, Scene lifecycle and gesture handling.
 - `ChevronV3VideoBridge`: application-side fullscreen-video orientation reporter. It reports orientation requests through a Darwin notification; SpringBoard remains the owner of hosted Scene geometry.
 
+The SpringBoard tweak also suppresses the compact Dynamic Island's outer border while preserving its background, app icon and expanded Live Activity content.
+
 ## Build
 
 ```sh

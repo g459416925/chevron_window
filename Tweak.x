@@ -51,7 +51,7 @@
 - (void)_releaseOrientationLock;
 @end
 
-static BOOL CV3ShouldBlockHomeScreenSearch(void);
+static BOOL CV3LauncherOwnsHomeSearchTransition(void);
 
 @interface SBIconModel : NSObject
 - (id)leafIcons;
@@ -1553,6 +1553,7 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 @property (nonatomic, strong) CAShapeLayer *splitDropPreviewLayer;
 
 - (void)show;
+- (void)requestPanelPresentationFromPoint:(CGPoint)point velocity:(CGFloat)velocity;
 - (void)loadAppsAsync;
 - (void)applyBackgroundTint:(UIColor *)color;
 - (NSString *)_role; 
@@ -1565,27 +1566,238 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 static NSCache *cv3IconCache = nil; 
 static CV3Window *sharedWindow = nil;
 static BOOL CV3PanelWakeGestureActive = NO;
+static __weak UIViewController *CV3HomeScreenSpotlightController = nil;
+static BOOL CV3SystemHomeSearchTriggered = NO;
+static BOOL CV3HomeSearchDismissalInFlight = NO;
+// The launcher edge gesture and Home Screen's pull-down Spotlight gesture
+// compete for the same touch sequence.  This flag is raised as soon as the
+// launcher gesture begins and remains raised until the panel is fully hidden.
+static BOOL CV3HomeScreenPullDownSuppressed = NO;
+static dispatch_block_t CV3PendingPanelPresentation = nil;
+static NSUInteger CV3PanelPresentationGeneration = 0;
 
-static BOOL CV3ShouldBlockHomeScreenSearch(void) {
-    return CV3PanelWakeGestureActive || (sharedWindow && (sharedWindow.isPanelShowing || sharedWindow.isAnimating));
+static void CV3SetHomeScreenPullDownSuppressed(BOOL suppressed) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CV3SetHomeScreenPullDownSuppressed(suppressed);
+        });
+        return;
+    }
+
+    CV3HomeScreenPullDownSuppressed = suppressed;
+    if (!suppressed) return;
+
+    // If Spotlight already started in the same touch sequence, remove its
+    // visible controller immediately.  The presentation hooks below prevent
+    // it from being presented again while the panel owns the interaction.
+    UIViewController *spotlightController = CV3HomeScreenSpotlightController;
+    @try {
+        if (spotlightController.view.window && !spotlightController.view.hidden) {
+            spotlightController.view.hidden = YES;
+            spotlightController.view.userInteractionEnabled = NO;
+            [spotlightController dismissViewControllerAnimated:NO completion:nil];
+        }
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Gesture] 屏蔽主屏下拉手势时回收 Spotlight 异常: %@", e);
+    }
+}
+
+static BOOL CV3LauncherOwnsHomeSearchTransition(void) {
+    return CV3HomeScreenPullDownSuppressed ||
+           CV3PanelWakeGestureActive ||
+           CV3PendingPanelPresentation != nil ||
+           (sharedWindow && (sharedWindow.isPanelShowing || sharedWindow.isAnimating));
+}
+
+static void CV3PresentPendingPanelAfterHomeRestored(void) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CV3PresentPendingPanelAfterHomeRestored();
+        });
+        return;
+    }
+
+    dispatch_block_t presentation = CV3PendingPanelPresentation;
+    CV3PendingPanelPresentation = nil;
+    CV3SystemHomeSearchTriggered = NO;
+    CV3HomeSearchDismissalInFlight = NO;
+    if (presentation) presentation();
+}
+
+static void CV3ReturnHomeThenPresentPendingPanel(void) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CV3ReturnHomeThenPresentPendingPanel();
+        });
+        return;
+    }
+    if (!CV3PendingPanelPresentation || CV3HomeSearchDismissalInFlight) return;
+
+    CV3HomeSearchDismissalInFlight = YES;
+    dispatch_block_t completion = ^{
+        CV3PresentPendingPanelAfterHomeRestored();
+    };
+
+    id iconController = [CV3ClassNamed(@"SBIconController") sharedInstance];
+    BOOL requestedDismissal = NO;
+
+    @try {
+        SEL selector = NSSelectorFromString(@"dismissSpotlightAnimated:completion:");
+        if ([iconController respondsToSelector:selector]) {
+            ((void (*)(id, SEL, BOOL, id))objc_msgSend)(iconController, selector, NO, completion);
+            requestedDismissal = YES;
+        } else {
+            selector = NSSelectorFromString(@"dismissSpotlightAnimated:");
+            if ([iconController respondsToSelector:selector]) {
+                ((void (*)(id, SEL, BOOL))objc_msgSend)(iconController, selector, NO);
+                requestedDismissal = YES;
+            } else {
+                selector = NSSelectorFromString(@"dismissSpotlight");
+                if ([iconController respondsToSelector:selector]) {
+                    ((void (*)(id, SEL))objc_msgSend)(iconController, selector);
+                    requestedDismissal = YES;
+                }
+            }
+        }
+    } @catch (NSException *e) {
+        requestedDismissal = NO;
+    }
+
+    UIViewController *spotlightController = CV3HomeScreenSpotlightController;
+    if (!requestedDismissal && spotlightController.presentingViewController) {
+        [spotlightController dismissViewControllerAnimated:NO completion:completion];
+        requestedDismissal = YES;
+    }
+
+    // Older SpringBoard variants expose no dismissal completion. Give their
+    // non-animated transition one run-loop window before presenting our panel.
+    if (!requestedDismissal || ![iconController respondsToSelector:NSSelectorFromString(@"dismissSpotlightAnimated:completion:")]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), completion);
+    }
+}
+
+static void CV3QueuePanelPresentationAfterSystemGesture(dispatch_block_t presentation) {
+    if (!presentation) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CV3QueuePanelPresentationAfterSystemGesture(presentation);
+        });
+        return;
+    }
+
+    CV3PanelPresentationGeneration += 1;
+    NSUInteger generation = CV3PanelPresentationGeneration;
+    CV3PendingPanelPresentation = [presentation copy];
+
+    // Let SpringBoard finish deciding whether its search gesture was engaged.
+    // If it was, return fully to the home screen first; otherwise present directly.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (generation != CV3PanelPresentationGeneration || !CV3PendingPanelPresentation) return;
+        UIViewController *controller = CV3HomeScreenSpotlightController;
+        BOOL searchVisible = controller && controller.view.window && !controller.view.hidden;
+        if (CV3SystemHomeSearchTriggered || searchVisible) {
+            CV3ReturnHomeThenPresentPendingPanel();
+        } else {
+            CV3PresentPendingPanelAfterHomeRestored();
+        }
+    });
 }
 
 %hook SBIconController
 - (void)presentSpotlightAnimated:(BOOL)animated completion:(id)completion {
-    if (CV3ShouldBlockHomeScreenSearch()) return;
-    %orig(animated, completion);
+    if (CV3HomeScreenPullDownSuppressed) {
+        // Do not let the Home Screen pull-down transition start while the
+        // launcher edge gesture/panel owns the touch sequence.
+        CV3SystemHomeSearchTriggered = NO;
+        if (completion) {
+            id completionCopy = [completion copy];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                ((void (^)(void))completionCopy)();
+            });
+        }
+        return;
+    }
+
+    if (!CV3LauncherOwnsHomeSearchTransition()) {
+        %orig(animated, completion);
+        return;
+    }
+
+    CV3SystemHomeSearchTriggered = YES;
+    id originalCompletion = [completion copy];
+    dispatch_block_t wrappedCompletion = ^{
+        if (originalCompletion) ((void (^)(void))originalCompletion)();
+        CV3ReturnHomeThenPresentPendingPanel();
+    };
+    %orig(animated, wrappedCompletion);
 }
 
 - (void)presentSpotlightAnimated:(BOOL)animated {
-    if (CV3ShouldBlockHomeScreenSearch()) return;
+    if (CV3HomeScreenPullDownSuppressed) {
+        CV3SystemHomeSearchTriggered = NO;
+        return;
+    }
+
+    if (CV3LauncherOwnsHomeSearchTransition()) {
+        CV3SystemHomeSearchTriggered = YES;
+    }
     %orig(animated);
+    if (CV3LauncherOwnsHomeSearchTransition()) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CV3ReturnHomeThenPresentPendingPanel();
+        });
+    }
 }
 %end
 
+@interface SBHomeScreenSpotlightViewController : UIViewController
+@end
+
 %hook SBHomeScreenSpotlightViewController
 - (void)viewWillAppear:(BOOL)animated {
-    if (CV3ShouldBlockHomeScreenSearch()) return;
+    CV3HomeScreenSpotlightController = self;
+    if (CV3HomeScreenPullDownSuppressed) {
+        self.view.hidden = YES;
+        self.view.userInteractionEnabled = NO;
+        return;
+    }
+    self.view.hidden = NO;
+    self.view.userInteractionEnabled = YES;
+    if (CV3LauncherOwnsHomeSearchTransition()) {
+        CV3SystemHomeSearchTriggered = YES;
+    }
     %orig(animated);
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig(animated);
+    CV3HomeScreenSpotlightController = self;
+    if (CV3HomeScreenPullDownSuppressed) {
+        self.view.hidden = YES;
+        self.view.userInteractionEnabled = NO;
+        [self dismissViewControllerAnimated:NO completion:nil];
+        return;
+    }
+    if (CV3LauncherOwnsHomeSearchTransition()) {
+        CV3SystemHomeSearchTriggered = YES;
+        CV3ReturnHomeThenPresentPendingPanel();
+    }
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig(animated);
+    if (!CV3HomeScreenPullDownSuppressed) {
+        self.view.hidden = NO;
+        self.view.userInteractionEnabled = YES;
+    }
+    if (CV3HomeScreenSpotlightController == self) {
+        CV3HomeScreenSpotlightController = nil;
+    }
+    if (CV3PendingPanelPresentation) {
+        CV3PresentPendingPanelAfterHomeRestored();
+    }
 }
 %end
 
@@ -1778,6 +1990,80 @@ static void CV3SetKeyboardSuppressedByPanel(BOOL suppressed);
 static NSTimeInterval lastLogTime = 0;
 static BOOL CV3SceneRotationDispatching = NO;
 
+static BOOL CV3IsSystemApertureSceneRole(NSString *role) {
+    if (role.length == 0) return NO;
+    return [role isEqualToString:@"SBWindowSceneSessionRoleSystemAperture"] ||
+           [role isEqualToString:@"SBWindowSceneSessionRoleSystemApertureCurtain"] ||
+           [role rangeOfString:@"SystemAperture" options:NSCaseInsensitiveSearch].location != NSNotFound;
+}
+
+static BOOL CV3IsCompactSystemApertureRect(CGRect rect, CGRect windowBounds) {
+    if (CGRectIsNull(rect) || CGRectIsInfinite(rect) || CGRectIsEmpty(rect)) return NO;
+
+    CGFloat width = CGRectGetWidth(rect);
+    CGFloat height = CGRectGetHeight(rect);
+    CGFloat horizontalOffset = fabs(CGRectGetMidX(rect) - CGRectGetMidX(windowBounds));
+
+    // iPhone 14 Pro Max compact SystemAperture is roughly 159x37 pt, while its
+    // outline container is roughly 179x49 pt. Keep tolerances broad enough for
+    // Dynamic Type/scale variants, but narrow enough to exclude icons and banners.
+    return width >= 130.0 && width <= 230.0 &&
+           height >= 30.0 && height <= 70.0 &&
+           CGRectGetMinY(rect) >= -6.0 && CGRectGetMinY(rect) <= 26.0 &&
+           horizontalOffset <= 42.0;
+}
+
+static BOOL CV3LayerMatchesCompactApertureSize(CALayer *layer) {
+    if (!layer) return NO;
+    CGFloat width = CGRectGetWidth(layer.bounds);
+    CGFloat height = CGRectGetHeight(layer.bounds);
+    return width >= 130.0 && width <= 230.0 && height >= 30.0 && height <= 70.0;
+}
+
+static void CV3RemoveApertureOutlineFromLayerTree(CALayer *layer) {
+    if (!layer) return;
+
+    if (CV3LayerMatchesCompactApertureSize(layer)) {
+        layer.borderWidth = 0.0;
+        layer.borderColor = UIColor.clearColor.CGColor;
+        layer.shadowOpacity = 0.0;
+        layer.shadowRadius = 0.0;
+        layer.shadowPath = nil;
+
+        if ([layer isKindOfClass:[CAShapeLayer class]]) {
+            CAShapeLayer *shapeLayer = (CAShapeLayer *)layer;
+            shapeLayer.strokeColor = UIColor.clearColor.CGColor;
+            shapeLayer.lineWidth = 0.0;
+        }
+    }
+
+    for (CALayer *sublayer in [layer.sublayers copy]) {
+        CV3RemoveApertureOutlineFromLayerTree(sublayer);
+    }
+}
+
+static void CV3RemoveCompactApertureOutlineFromView(UIView *view, UIWindow *window) {
+    if (!view || !window || view.hidden || view.alpha <= 0.01) return;
+
+    CGRect rectInWindow = [view convertRect:view.bounds toView:window];
+    if (CV3IsCompactSystemApertureRect(rectInWindow, window.bounds)) {
+        CV3RemoveApertureOutlineFromLayerTree(view.layer);
+    }
+
+    for (UIView *subview in [view.subviews copy]) {
+        CV3RemoveCompactApertureOutlineFromView(subview, window);
+    }
+}
+
+static void CV3RemoveCompactSystemApertureOutline(UIWindow *window) {
+    if (!window || !CV3IsSystemApertureSceneRole(window.windowScene.session.role)) return;
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    CV3RemoveCompactApertureOutlineFromView(window, window);
+    [CATransaction commit];
+}
+
 static void CV3ApplySceneRotationContextToProject(CV3SceneRotationContext context, NSString *reason, BOOL force) {
     if (!CV3IsValidInterfaceOrientation(context.orientation)) return;
 
@@ -1853,6 +2139,11 @@ static void CV3ApplySceneRotationContextToProject(CV3SceneRotationContext contex
 - (void)layoutSubviews {
 
     %orig;
+
+    // SystemAperture rebuilds its compact presentation as Live Activities update.
+    // Reapply after layout so the black island/content remains intact while only
+    // the surrounding border, stroke and shadow are suppressed.
+    CV3RemoveCompactSystemApertureOutline(self);
 
     // 增加递归保护：如果是 CV3Window 自身的 layoutSubviews，或者已经在处理中，则跳过
     static BOOL isUpdating = NO;
