@@ -1,5 +1,5 @@
 THEOS ?= /opt/theos
-TARGET := iphone:clang:latest:14.0
+TARGET := iphone:clang:16.5:14.0
 INSTALL_TARGET_PROCESSES = SpringBoard
 THEOS_PACKAGE_SCHEME = roothide
 
@@ -18,3 +18,14 @@ ChevronV3VideoBridge_ARCHS = arm64 arm64e
 ChevronV3VideoBridge_FRAMEWORKS = UIKit AVFAudio
 
 include $(THEOS_MAKE_PATH)/tweak.mk
+
+BUNDLE_NAME = ChevronV3Prefs
+ChevronV3Prefs_FILES = ChevronV3Prefs/CV3RootListController.m
+ChevronV3Prefs_CFLAGS = -fobjc-arc
+ChevronV3Prefs_ARCHS = arm64 arm64e
+ChevronV3Prefs_FRAMEWORKS = UIKit
+ChevronV3Prefs_PRIVATE_FRAMEWORKS = Preferences
+ChevronV3Prefs_INSTALL_PATH = /Library/PreferenceBundles
+ChevronV3Prefs_RESOURCE_DIRS = ChevronV3Prefs/Resources
+
+include $(THEOS_MAKE_PATH)/bundle.mk
