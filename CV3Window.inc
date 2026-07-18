@@ -742,6 +742,75 @@ static NSString *CV3AppPanelProtectionReason(CV3AppPanelProtectionState state) {
     }
 }
 
+static void CV3RemoveViewAnimationsRecursively(UIView *view) {
+    if (!view) return;
+    [view.layer removeAllAnimations];
+    for (UIView *subview in view.subviews) {
+        CV3RemoveViewAnimationsRecursively(subview);
+    }
+}
+
+static void CV3CancelHomeScreenPanRecognizersInView(UIView *view, UIGestureRecognizer *ownedGesture) {
+    if (!view) return;
+
+    for (UIGestureRecognizer *recognizer in view.gestureRecognizers) {
+        if (recognizer == ownedGesture || !recognizer.enabled ||
+            ![recognizer isKindOfClass:[UIPanGestureRecognizer class]]) {
+            continue;
+        }
+
+        // Toggling enabled cancels this touch sequence without disabling the
+        // Home Screen gesture for the user's next interaction.
+        recognizer.enabled = NO;
+        recognizer.enabled = YES;
+    }
+
+    NSString *className = NSStringFromClass([view class]);
+    if ([className containsString:@"IconView"]) return;
+    for (UIView *subview in view.subviews) {
+        CV3CancelHomeScreenPanRecognizersInView(subview, ownedGesture);
+    }
+}
+
+static void CV3CancelCompetingHomeScreenPans(UIGestureRecognizer *ownedGesture) {
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            NSString *windowClass = NSStringFromClass([window class]);
+            if (![windowClass containsString:@"HomeScreenWindow"]) continue;
+            CV3CancelHomeScreenPanRecognizersInView(window, ownedGesture);
+        }
+    }
+}
+
+static void CV3FinalizePanelHiddenState(CV3Window *launcherWindow) {
+    if (!launcherWindow) return;
+
+    launcherWindow.interactionCount++;
+    CV3RemoveViewAnimationsRecursively(launcherWindow.panelContainer);
+    [launcherWindow.bezierContainer.layer removeAllAnimations];
+    [launcherWindow.bezierLayer removeAllAnimations];
+
+    [UIView performWithoutAnimation:^{
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        launcherWindow.backgroundColor = [UIColor clearColor];
+        launcherWindow.panelContainer.alpha = 0.0;
+        launcherWindow.panelContainer.hidden = YES;
+        launcherWindow.panelContainer.layer.shadowOpacity = 0.0;
+        launcherWindow.panelContainer.layer.shadowPath = nil;
+        launcherWindow.appPanel.alpha = 0.0;
+        launcherWindow.collectionView.alpha = 0.0;
+        launcherWindow.contrastBackdrop.hidden = YES;
+        launcherWindow.bezierContainer.alpha = 0.0;
+        launcherWindow.bezierLayer.opacity = 0.0;
+        launcherWindow.bezierLayer.shadowOpacity = 0.0;
+        launcherWindow.bezierLayer.path = nil;
+        [CATransaction commit];
+    }];
+    [CATransaction flush];
+}
+
 static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     if (!launcherWindow) return;
 
@@ -749,10 +818,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     CV3SetHomeScreenPullDownSuppressed(NO);
     launcherWindow.isPanelShowing = NO;
     launcherWindow.isAnimating = NO;
-    launcherWindow.backgroundColor = [UIColor clearColor];
-    launcherWindow.panelContainer.alpha = 0.0;
-    launcherWindow.panelContainer.hidden = YES;
-    launcherWindow.panelContainer.layer.shadowOpacity = 0.0;
+    CV3FinalizePanelHiddenState(launcherWindow);
     [launcherWindow.searchField resignFirstResponder];
 }
 
@@ -1227,13 +1293,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     if (gestureRecognizer == self.systemEdgePan || otherGestureRecognizer == self.systemEdgePan) {
-        if (self.isPanelShowing) {
-            return NO;
-        }
-        // SpringBoard wins outright if these recognizers are made exclusive on
-        // iOS 16. Keep the launcher reachable; the Spotlight hook below cancels
-        // the system visual transition while this gesture owns panel wake-up.
-        return YES;
+        return NO;
     }
 
     // 禁止拖拽手势与调整大小手势同时发生
@@ -2601,6 +2661,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         CV3SetHomeScreenPullDownSuppressed(YES);
         CV3PanelWakeGestureActive = YES;
         CV3SystemHomeSearchTriggered = NO;
+        CV3CancelCompetingHomeScreenPans(gesture);
         // 1. 手势预警效果 (Trigger Preview Flare)
         [CATransaction begin];
         [CATransaction setAnimationDuration:0.2];
@@ -2797,7 +2858,10 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         self.lastTriggerPoint = point;
         [self loadAppsAsync];
         [self updateTrafficLightsFocus:YES];
-        self.panelContainer.hidden = NO; self.panelContainer.center = point;
+        self.appPanel.alpha = 1.0;
+        self.collectionView.alpha = 1.0;
+        self.bezierLayer.opacity = 1.0;
+        self.panelContainer.hidden = NO;
         
         self.contrastBackdrop.hidden = NO;
 
@@ -2810,16 +2874,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             case UIInterfaceOrientationPortraitUpsideDown: initialRotation = CGAffineTransformMakeRotation(M_PI); break;
             default: initialRotation = CGAffineTransformIdentity; break;
         }
-
-        // 根据速度计算非对称形变 (Squash & Stretch)
-        CGAffineTransform squashTransform = CGAffineTransformIdentity;
-        if (fabs(velocity) > 0) {
-            CGFloat stretchAmount = MIN(fabs(velocity) / 2500.0, 0.35); // 最大 35% 拉伸
-            // X轴拉伸，Y轴挤压，方向由 velocity 符号决定（如果是向内拉出则 X 拉伸）
-            squashTransform = CGAffineTransformMakeScale(1.0 + stretchAmount, 1.0 - stretchAmount * 0.5);
-        }
-
-        CGAffineTransform startTransform = CGAffineTransformConcat(squashTransform, initialRotation);
 
         // 计算当前环境下合法的尺寸 (同步 layoutSubviews 逻辑)
         CGSize maxSize = [self calculateMaxPanelSize];        
@@ -2859,55 +2913,36 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         self.panelContainer.layer.shadowRadius = CV3Style.shadowRadiusMask;
         self.panelContainer.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.panelContainer.bounds cornerRadius:CV3Style.cornerRadius].CGPath;
 
-        self.panelPresentationStartTransform = CGAffineTransformScale(startTransform,
-                                                                       kCV3PanelPresentInitialScale,
-                                                                       kCV3PanelPresentInitialScale);
+        // Start compact and asymmetrical so the spring visibly overshoots in
+        // both axes, producing the launcher panel's jelly-like pop.
+        CGFloat velocityStretch = MIN(fabs(velocity) / 8000.0, 0.08);
+        CGFloat initialScaleX = 0.58 - velocityStretch;
+        CGFloat initialScaleY = 0.76 + velocityStretch * 0.25;
+        CGFloat springVelocity = MIN(2.4, MAX(1.15, fabs(velocity) / 1400.0));
+        self.panelPresentationStartTransform = CGAffineTransformScale(initialRotation,
+                                                                       initialScaleX,
+                                                                       initialScaleY);
+        CV3RemoveViewAnimationsRecursively(self.panelContainer);
         self.panelContainer.transform = self.panelPresentationStartTransform;
         self.panelContainer.alpha = 0;
-
-        // 面板本体再叠加一层轻微的横向拉伸/纵向压缩，让弹簧过冲能被
-        // 视觉上读出来，随后和外层缩放一起回到正常比例，形成果冻感。
-        CGFloat jellyStretch = MIN(kCV3PanelPresentJellyStretch + fabs(velocity) / 7000.0, 0.18);
-        self.appPanelPresentationStartTransform = CGAffineTransformMakeScale(1.0 + jellyStretch,
-                                                                               1.0 - jellyStretch * 0.7);
-        self.appPanel.transform = self.appPanelPresentationStartTransform;
-
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        // 建议 4：初始状态强制背景层放大，模拟凝聚感
-        for (UIView *subview in self.appPanel.subviews) {
-            if ([NSStringFromClass([subview class]) containsString:@"Backdrop"]) {
-                subview.transform = CGAffineTransformMakeScale(1.5, 1.5);
-            }
-        }
-        [CATransaction commit];
+        self.appPanelPresentationStartTransform = CGAffineTransformIdentity;
+        self.appPanel.transform = CGAffineTransformIdentity;
 
         // 建议3：使用预热缓存的中心点 (Layout Pre-warming)
         CGPoint targetCenter = (self.cachedTargetCenter.x > 0) ? self.cachedTargetCenter : [self calculateTargetCenter];
+        self.panelContainer.center = targetCenter;
 
         [UIView animateWithDuration:kCV3PanelPresentDuration
                               delay:0
              usingSpringWithDamping:kCV3PanelPresentDamping
-              initialSpringVelocity:kCV3PanelPresentVelocity
-                            options:UIViewAnimationOptionAllowUserInteraction
+              initialSpringVelocity:springVelocity
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
                          animations:^{
             self.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:CV3Style.maskAlpha];
-            self.panelContainer.center = targetCenter;
             self.panelContainer.transform = initialRotation;
             self.panelContainer.alpha = 1;
-            self.appPanel.transform = CGAffineTransformIdentity;
             self.panelContainer.layer.shadowOpacity = CV3Style.shadowOpacityMask;
-            
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            // 模糊层回缩，创造液态归位视觉
-            for (UIView *subview in self.appPanel.subviews) {
-                if ([NSStringFromClass([subview class]) containsString:@"Backdrop"]) {
-                    subview.transform = CGAffineTransformMakeScale(1.15, 1.15);
-                }
-            }
-            [CATransaction commit];
-            
+
             // 实时汲取当前活跃 App 的色调注入遮罩
             CV3UpdateAdaptiveTint([self currentActiveBundleID]);
         } completion:^(BOOL f){ 
@@ -2930,35 +2965,16 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             self.panelContainer.alpha = presentationLayer.opacity;
         }
 
-        CGPoint dismissTarget = CGPointEqualToPoint(self.lastTriggerPoint, CGPointZero) ? point : self.lastTriggerPoint;
-        
         [UIView animateWithDuration:kCV3PanelDismissDuration
                               delay:0
-             usingSpringWithDamping:kCV3PanelPresentDamping
-              initialSpringVelocity:kCV3PanelPresentVelocity
-                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseInOut
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseIn
                          animations:^{
             self.backgroundColor = [UIColor clearColor];
-            self.panelContainer.alpha = 0; 
+            self.panelContainer.alpha = 0;
             self.panelContainer.layer.shadowOpacity = 0.0;
-            // 关闭时回到出现动画的完整起点：同一个触发点、缩放和果冻形变。
-            self.panelContainer.center = dismissTarget;
-            self.panelContainer.transform = self.panelPresentationStartTransform;
-            self.appPanel.transform = self.appPanelPresentationStartTransform;
-            
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            // 与出现时相反，模糊层回到聚拢前的放大状态。
-            for (UIView *subview in self.appPanel.subviews) {
-                if ([NSStringFromClass([subview class]) containsString:@"Backdrop"]) {
-                    subview.transform = CGAffineTransformMakeScale(1.5, 1.5);
-                }
-            }
-            [CATransaction commit];
         } completion:^(BOOL f){ 
             self.isAnimating = NO;
-            self.panelContainer.hidden = YES; 
-            self.contrastBackdrop.hidden = YES;
+            CV3FinalizePanelHiddenState(self);
             CV3SetKeyboardSuppressedByPanel(NO);
             // Re-enable Home Screen pull-down only after the panel's dismissal
             // animation has completed and the panel is no longer visible.

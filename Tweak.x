@@ -1692,10 +1692,9 @@ static void CV3QueuePanelPresentationAfterSystemGesture(dispatch_block_t present
     NSUInteger generation = CV3PanelPresentationGeneration;
     CV3PendingPanelPresentation = [presentation copy];
 
-    // Let SpringBoard finish deciding whether its search gesture was engaged.
-    // If it was, return fully to the home screen first; otherwise present directly.
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
+    // Present on the next run-loop turn. A longer delay lets SpringBoard enter
+    // the interactive Spotlight transition before our panel becomes visible.
+    dispatch_async(dispatch_get_main_queue(), ^{
         if (generation != CV3PanelPresentationGeneration || !CV3PendingPanelPresentation) return;
         UIViewController *controller = CV3HomeScreenSpotlightController;
         BOOL searchVisible = controller && controller.view.window && !controller.view.hidden;
@@ -1816,12 +1815,9 @@ static const CGFloat kCV3PanelDragReleaseDamping = 0.88;
 static const CGFloat kCV3PanelDragReleaseMinVelocity = 0.25;
 static const CGFloat kCV3PanelDragReleaseMaxVelocity = 2.2;
 static const CGFloat kCV3PanelDragReleaseVelocityDivisor = 1100.0;
-static const NSTimeInterval kCV3PanelPresentDuration = 0.68;
-static const CGFloat kCV3PanelPresentDamping = 0.5;
-static const CGFloat kCV3PanelPresentVelocity = 1.4;
-static const CGFloat kCV3PanelPresentInitialScale = 0.34;
-static const CGFloat kCV3PanelPresentJellyStretch = 0.12;
-static const NSTimeInterval kCV3PanelDismissDuration = 0.48;
+static const NSTimeInterval kCV3PanelPresentDuration = 0.62;
+static const CGFloat kCV3PanelPresentDamping = 0.50;
+static const NSTimeInterval kCV3PanelDismissDuration = 0.18;
 static const CGFloat kCV3AppDragLongPressAllowableMovement = 6.0;
 static const CGFloat kCV3AppDragScrollVelocityGate = 80.0;
 static const CGFloat kCV3KeyboardCriticalResultsReserve = 60.0;
