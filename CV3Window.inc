@@ -690,6 +690,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     if (!launcherWindow) return;
 
     CV3SetKeyboardSuppressedByPanel(NO);
+    CV3SetHomeScreenPullDownSuppressed(NO);
     launcherWindow.isPanelShowing = NO;
     launcherWindow.isAnimating = NO;
     launcherWindow.backgroundColor = [UIColor clearColor];
@@ -1173,7 +1174,10 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         if (self.isPanelShowing) {
             return NO;
         }
-        return YES; // 允许与其他手势并发，避免被系统侧滑手势完全阻断
+        // SpringBoard wins outright if these recognizers are made exclusive on
+        // iOS 16. Keep the launcher reachable; the Spotlight hook below cancels
+        // the system visual transition while this gesture owns panel wake-up.
+        return YES;
     }
 
     // 禁止拖拽手势与调整大小手势同时发生
@@ -2535,7 +2539,11 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     }
 
     if (gesture.state == UIGestureRecognizerStateBegan) {
+        // Claim the touch sequence before SpringBoard can turn the same edge
+        // movement into Home Screen Spotlight/pull-down.
+        CV3SetHomeScreenPullDownSuppressed(YES);
         CV3PanelWakeGestureActive = YES;
+        CV3SystemHomeSearchTriggered = NO;
         // 1. 手势预警效果 (Trigger Preview Flare)
         [CATransaction begin];
         [CATransaction setAnimationDuration:0.2];
@@ -2547,7 +2555,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         self.cachedTargetCenter = [self calculateTargetCenter];
 
         if (!self.isPanelShowing) {
-            CV3SetKeyboardSuppressedByPanel(YES);
             [self.feedback impactOccurred];
             [self.selectionFeedback prepare];
             self.lastHapticX = 0;
@@ -2585,7 +2592,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             }
 
             if (stretch > 45) { 
-                [self animateSpotlight:YES fromPoint:location velocity:vel]; 
+                [self requestPanelPresentationFromPoint:location velocity:vel];
                 gesture.enabled = NO; gesture.enabled = YES; 
             }
         }
@@ -2600,7 +2607,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         [CATransaction commit];
 
         if (self.bezierContainer.alpha > 0 && !self.isPanelShowing && vel > 300 && gesture.state != UIGestureRecognizerStateCancelled) {
-            [self animateSpotlight:YES fromPoint:location velocity:vel];
+            [self requestPanelPresentationFromPoint:location velocity:vel];
         } else if (!self.isPanelShowing) {
             // 修复：确保中断时重置所有状态
             [UIView animateWithDuration:0.4 animations:^{
@@ -2610,6 +2617,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
                 self.isAnimating = NO;
                 CV3SetKeyboardSuppressedByPanel(NO);
             }];
+            CV3SetHomeScreenPullDownSuppressed(NO);
             
             // Jelly Physics for Exit
             CASpringAnimation *spring = [CASpringAnimation animationWithKeyPath:@"path"];
@@ -2631,6 +2639,17 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             if (!self.isPanelShowing) self.backgroundColor = [UIColor clearColor];
         } completion:nil];
     }
+}
+
+- (void)requestPanelPresentationFromPoint:(CGPoint)point velocity:(CGFloat)velocity {
+    if (self.isPanelShowing || self.isAnimating || CV3PendingPanelPresentation) return;
+
+    __weak CV3Window *weakSelf = self;
+    CV3QueuePanelPresentationAfterSystemGesture(^{
+        CV3Window *strongSelf = weakSelf;
+        if (!strongSelf || strongSelf.isPanelShowing || strongSelf.isAnimating) return;
+        [strongSelf animateSpotlight:YES fromPoint:point velocity:velocity];
+    });
 }
 
 
@@ -2707,6 +2726,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 - (void)animateSpotlight:(BOOL)visible fromPoint:(CGPoint)point velocity:(CGFloat)velocity {
     if (self.isAnimating) return;
     if (visible) {
+        CV3SetHomeScreenPullDownSuppressed(YES);
         CV3ExitExposeModeIfNeeded(nil, NO);
     }
     self.isPanelShowing = visible; self.isAnimating = YES;
@@ -2867,10 +2887,13 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             }
             [CATransaction commit];
         } completion:^(BOOL f){ 
-            self.isAnimating = NO; 
+            self.isAnimating = NO;
             self.panelContainer.hidden = YES; 
             self.contrastBackdrop.hidden = YES;
             CV3SetKeyboardSuppressedByPanel(NO);
+            // Re-enable Home Screen pull-down only after the panel's dismissal
+            // animation has completed and the panel is no longer visible.
+            CV3SetHomeScreenPullDownSuppressed(NO);
         }];
     }
 }

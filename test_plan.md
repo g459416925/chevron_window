@@ -25,6 +25,7 @@ Target: iPhone 14 Pro Max, iOS 16.5.1, RootHide.
 - Install or uninstall an App while repeatedly opening the launcher panel.
 - Confirm the list refreshes, remains sorted and SpringBoard does not crash.
 - Search with the keyboard in portrait and landscape, then dismiss via background tap and scrolling.
+- Wake the launcher with its edge gesture, dismiss it by tapping outside, and confirm no Spotlight blur remains or requires a Home gesture to clear.
 
 ## Video orientation
 
@@ -32,6 +33,13 @@ Target: iPhone 14 Pro Max, iOS 16.5.1, RootHide.
 - Confirm only that App's hosted content changes orientation.
 - Dismiss fullscreen video and verify the content returns to portrait.
 - Repeat while rotating the physical device and while another floating App remains visible.
+
+## System aperture appearance
+
+- Start a Live Activity or live stream and confirm the compact Dynamic Island has no outer border or halo.
+- Let the Live Activity update repeatedly and confirm the border does not return.
+- Expand and collapse the Dynamic Island; verify its background, app icon and expanded content remain intact.
+- Stop the Live Activity and confirm the inactive island and status-bar content are unaffected.
 
 ## Resource and failure checks
 
