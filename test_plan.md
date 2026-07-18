@@ -1,1 +1,40 @@
-I will fix the keyboard layer intercepting logic and the keyboard layout avoidance logic.
+# ChevronV3 device regression plan
+
+Target: iPhone 14 Pro Max, iOS 16.5.1, RootHide.
+
+## Build and package
+
+- Run `make clean`, `make`, and `make package`.
+- Verify the deb contains both tweak dylibs and both filter plists.
+- Confirm SpringBoard restarts without a crash after installation.
+
+## Floating-window lifecycle
+
+- Open, focus, drag, resize, stash, restore and close one floating App.
+- Repeat with three simultaneous floating Apps and enter/exit Expose mode.
+- Kill a hosted App and confirm its Scene reconnects without a stale snapshot.
+- Lock/unlock, open Control Center and enter/exit App Switcher with windows active.
+
+## Identity isolation
+
+- Install or use two Apps whose bundle identifiers have a prefix relationship, such as `com.example.app` and `com.example.app.pro`.
+- Host both and verify Scene destruction, interruption and foreground updates affect only the exact App.
+
+## App list and keyboard
+
+- Install or uninstall an App while repeatedly opening the launcher panel.
+- Confirm the list refreshes, remains sorted and SpringBoard does not crash.
+- Search with the keyboard in portrait and landscape, then dismiss via background tap and scrolling.
+
+## Video orientation
+
+- In a hosted App, enter fullscreen video in landscape-left and landscape-right.
+- Confirm only that App's hosted content changes orientation.
+- Dismiss fullscreen video and verify the content returns to portrait.
+- Repeat while rotating the physical device and while another floating App remains visible.
+
+## Resource and failure checks
+
+- Repeat open/resize/close for at least 30 cycles and inspect memory growth.
+- Exercise Low Power Mode and a memory warning.
+- Inspect SpringBoard crash logs, RunningBoard messages and `ChevronV3_Logs.txt` for errors.

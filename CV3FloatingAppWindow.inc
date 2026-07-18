@@ -297,6 +297,54 @@ static void CV3LayoutExposeWindowsAnimated(BOOL animated) {
     CV3UpdateExposeSelection(globalExposeSelectedIndex);
 }
 
+@implementation CV3HostedSceneSession
+
+- (instancetype)initWithWindow:(CV3FloatingAppWindow *)window {
+    self = [super init];
+    if (self) self.window = window;
+    return self;
+}
+
+- (void)setActive:(BOOL)active {
+    if (_active == active) return;
+    _active = active;
+
+    [self.continuityTimer invalidate];
+    self.continuityTimer = nil;
+    CV3PostHostedState(self.window.bundleID, active);
+
+    if (active) {
+        [self validateNow:@"HostedSessionActivated"];
+        self.continuityTimer = [NSTimer scheduledTimerWithTimeInterval:0.15
+                                                               target:self
+                                                             selector:@selector(continuityTimerFired:)
+                                                             userInfo:nil
+                                                              repeats:YES];
+        [[NSRunLoop mainRunLoop] addTimer:self.continuityTimer forMode:NSRunLoopCommonModes];
+    }
+}
+
+- (void)continuityTimerFired:(NSTimer *)timer {
+    [self validateNow:@"HostedSessionHeartbeat"];
+}
+
+- (void)validateNow:(NSString *)reason {
+    CV3FloatingAppWindow *window = self.window;
+    if (!self.active || !window || window.isClosing || window.isStashed) return;
+    [window stabilizeForegroundForWorkspaceTransition:reason];
+}
+
+- (void)invalidate {
+    [self setActive:NO];
+    self.window = nil;
+}
+
+- (void)dealloc {
+    [self.continuityTimer invalidate];
+}
+
+@end
+
 static void CV3UpdateExposeForSceneRotation(CV3SceneRotationContext context, BOOL animated) {
     if (!isGlobalExposeActive || !globalExposeBackdrop || !globalExposeContentView) return;
 
@@ -1041,8 +1089,13 @@ void CV3ToggleExposeMode(void) {
 
     BOOL modified = NO;
     CGRect targetFrame = [self currentHostedSceneBounds];
-    // 宿主 App 始终按手机竖屏物理分辨率渲染，外层分屏窗口再统一负责视觉旋转。
-    UIInterfaceOrientation targetOrientation = UIInterfaceOrientationPortrait;
+    UIInterfaceOrientation targetOrientation = CV3IsValidInterfaceOrientation(self.hostedContentOrientation)
+        ? self.hostedContentOrientation
+        : UIInterfaceOrientationPortrait;
+    if (UIInterfaceOrientationIsLandscape(targetOrientation)) {
+        targetFrame.size = CGSizeMake(MAX(targetFrame.size.width, targetFrame.size.height),
+                                      MIN(targetFrame.size.width, targetFrame.size.height));
+    }
 
     @try {
         if (force ||
@@ -1063,7 +1116,7 @@ void CV3ToggleExposeMode(void) {
                                      orientationValue,
                                      force);
 
-    UIDeviceOrientation deviceOrientation = UIDeviceOrientationPortrait;
+    UIDeviceOrientation deviceOrientation = CV3DeviceOrientationFromInterface(targetOrientation);
     if (deviceOrientation != UIDeviceOrientationUnknown) {
         modified |= CV3SetIntegerSetting(settings,
                                          @selector(deviceOrientation),
@@ -1076,6 +1129,16 @@ void CV3ToggleExposeMode(void) {
     modified |= CV3ApplyLockedOrientationTraitsToSettings(settings, targetOrientation, force);
 
     return modified;
+}
+
+- (void)applyHostedContentOrientation:(UIInterfaceOrientation)orientation {
+    if (!CV3IsValidInterfaceOrientation(orientation) || self.isClosing) return;
+    if (self.hostedContentOrientation == orientation) return;
+
+    self.hostedContentOrientation = orientation;
+    [self syncHostedSceneLayoutForce:YES];
+    [self refreshHostViewPresentation];
+    CV3LogToFile(@"[VideoBridge] 已更新托管内容方向=%ld: %@", (long)orientation, self.bundleID);
 }
 
 - (BOOL)syncHostedSceneLayoutForce:(BOOL)force {
@@ -1138,6 +1201,17 @@ void CV3ToggleExposeMode(void) {
 
         if ([self.targetScene respondsToSelector:@selector(_setContentState:)]) {
             [self.targetScene _setContentState:2];
+        }
+
+        if (self.sceneHostingRequester.length > 0) {
+            id hostManager = CV3InvokeObject(self.targetScene, @selector(hostManager));
+            SEL orderFrontSelector = @selector(enableHostingForRequester:orderFront:);
+            if (CV3TargetRespondsToSelector(hostManager, orderFrontSelector)) {
+                ((void (*)(id, SEL, id, BOOL))objc_msgSend)(hostManager,
+                                                            orderFrontSelector,
+                                                            self.sceneHostingRequester,
+                                                            YES);
+            }
         }
 
         self.hostView.hidden = NO;
@@ -2344,6 +2418,8 @@ void CV3ToggleExposeMode(void) {
         self.targetOrientation = currentOrientation;
         
         self.bundleID = bundleID;
+        self.hostedSession = [[CV3HostedSceneSession alloc] initWithWindow:self];
+        self.hostedContentOrientation = UIInterfaceOrientationPortrait;
         self.allowProcessTerminationOnClose = NO;
         self.center = center;
         [self enforcePortraitWindowGeometry];
@@ -2501,6 +2577,7 @@ void CV3ToggleExposeMode(void) {
         
         // [SHM Lazy Unmapping] 持有共享内存引用计数
         CV3RetainSharedGeometry(self.bundleID);
+        [self.hostedSession setActive:YES];
     }
     return self;
 }
@@ -2600,6 +2677,83 @@ void CV3ToggleExposeMode(void) {
     } @catch (NSException *e) {
         CV3LogToFile(@"[Error] 热刷新渲染失败: %@", e);
     }
+}
+
+- (UIView *)hostViewForScene:(FBScene *)scene {
+    if (!scene) return nil;
+
+    @try {
+        id hostManager = CV3InvokeObject(scene, @selector(hostManager));
+        if (!hostManager) return nil;
+
+        NSString *requester = [NSString stringWithFormat:@"com.xu.chevronv3.host.%@", self.bundleID];
+        SEL hostViewSelector = @selector(hostViewForRequester:enableAndOrderFront:);
+        if (CV3TargetRespondsToSelector(hostManager, hostViewSelector)) {
+            UIView *hostView = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(hostManager,
+                                                                        hostViewSelector,
+                                                                        requester,
+                                                                        YES);
+            if (hostView) {
+                self.sceneHostingRequester = requester;
+                CV3LogToFile(@"[SceneHost] 已通过 FrontBoard 获取渲染视图: %@", self.bundleID);
+                return hostView;
+            }
+        }
+
+        SEL enableSelector = @selector(enableHostingForRequester:orderFront:);
+        if (CV3TargetRespondsToSelector(hostManager, enableSelector)) {
+            ((void (*)(id, SEL, id, BOOL))objc_msgSend)(hostManager, enableSelector, requester, YES);
+            self.sceneHostingRequester = requester;
+            CV3LogToFile(@"[SceneHost] 已启用 FrontBoard 托管，使用容器回退: %@", self.bundleID);
+        }
+    } @catch (NSException *exception) {
+        CV3LogToFile(@"[Error] 启用 Scene 托管失败 %@: %@", self.bundleID, exception);
+    }
+    return nil;
+}
+
+- (void)disableHostingForCurrentScene {
+    NSString *requester = self.sceneHostingRequester;
+    if (!self.targetScene || !requester) return;
+
+    @try {
+        id hostManager = CV3InvokeObject(self.targetScene, @selector(hostManager));
+        SEL selector = @selector(disableHostingForRequester:);
+        if (CV3TargetRespondsToSelector(hostManager, selector)) {
+            ((void (*)(id, SEL, id))objc_msgSend)(hostManager, selector, requester);
+        }
+    } @catch (NSException *exception) {
+        CV3LogToFile(@"[Error] 关闭 Scene 托管失败 %@: %@", self.bundleID, exception);
+    }
+    self.sceneHostingRequester = nil;
+}
+
+- (BOOL)hostViewHasRenderableContent {
+    if (!self.hostView || !self.hostView.superview || self.hostView.hidden || self.hostView.alpha < 0.01) return NO;
+
+    id presentationContext = CV3InvokeObject(self.hostView, @selector(presentationContext));
+    if (CV3TargetRespondsToSelector(self.hostView, @selector(presentationContext)) && !presentationContext) return NO;
+    return self.hostView.layer.sublayers.count > 0 || self.hostView.subviews.count > 0;
+}
+
+- (void)finishHostingWhenRenderableWithRetries:(NSInteger)retries {
+    if (self.isClosing || !self.hostView) return;
+    if ([self hostViewHasRenderableContent]) {
+        [self syncWindowBoundsToClient];
+        [self dismissLaunchSplashAnimated];
+        CV3LogToFile(@"[SceneHost] 渲染层已就绪: %@", self.bundleID);
+        return;
+    }
+
+    if (retries <= 0) {
+        CV3LogToFile(@"[Error] Scene 容器存在但渲染层未就绪，保留加载界面: %@", self.bundleID);
+        return;
+    }
+
+    [self refreshHostViewPresentation];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self finishHostingWhenRenderableWithRetries:retries - 1];
+    });
 }
 
 - (void)ensureLaunchSplashVisible {
@@ -2955,6 +3109,7 @@ void CV3ToggleExposeMode(void) {
 
     self.preStashFrame = self.frame;
     self.isStashed = YES;
+    [self.hostedSession setActive:NO];
     self.stashedSide = isNearLeft ? 1 : 2;
     [self promoteFloatingWindowInZOrder];
     CV3CascadeUpdateSovereigntyAssertions(); // 级联刷新所有窗口前台优先级断言
@@ -3333,7 +3488,7 @@ void CV3ToggleExposeMode(void) {
             id scenesSet = [manager valueForKey:@"scenes"];
             if ([scenesSet isKindOfClass:[NSSet class]]) {
                 for (FBScene *scene in scenesSet) {
-                    if ([scene.identifier containsString:bundleID]) {
+                    if (CV3IdentifierContainsExactBundleID(scene.identifier, bundleID)) {
                         if (!CV3InvokeBool(scene, @selector(isValid), YES)) continue;
                         return scene;
                     }
@@ -3359,7 +3514,7 @@ void CV3ToggleExposeMode(void) {
         }
         
         for (NSString *key in scenes.allKeys) {
-            if ([key containsString:bundleID]) {
+            if (CV3IdentifierContainsExactBundleID(key, bundleID)) {
                 FBScene *scene = scenes[key];
                 if (!CV3InvokeBool(scene, @selector(isValid), YES)) continue;
                 return scene;
@@ -3392,25 +3547,22 @@ void CV3ToggleExposeMode(void) {
                 
                 // Step 2: 优先重用已有的渲染视图，避免在 Scene 尚未完全就绪前重建引发死视图黑屏
                 @try {
-                    _UISceneLayerHostContainerView *hostedView = (_UISceneLayerHostContainerView *)self.hostView;
+                    UIView *hostedView = self.hostView;
                     BOOL isReused = (hostedView != nil);
                     if (!hostedView) {
-                        hostedView = [[CV3ClassNamed(@"_UISceneLayerHostContainerView") alloc] initWithScene:targetScene debugDescription:@"ChevronV3Host"];
+                        hostedView = [self hostViewForScene:targetScene];
                     }
-                    
-                    UIScenePresentationContext *context = [[CV3ClassNamed(@"UIScenePresentationContext") alloc] _initWithDefaultValues];
-                    if ([context respondsToSelector:@selector(setPresentedLayerTypes:)]) {
-                        // [Safety Restore] 恢复至 7 (1|2|4)，确保键盘可弹出。
-                        [context setPresentedLayerTypes:7]; 
+
+                    if (!hostedView) {
+                        hostedView = [[CV3ClassNamed(@"_UISceneLayerHostContainerView") alloc]
+                                      initWithScene:targetScene
+                                      debugDescription:@"ChevronV3Host"];
+                        UIScenePresentationContext *context = [[CV3ClassNamed(@"UIScenePresentationContext") alloc] _initWithDefaultValues];
+                        if ([context respondsToSelector:@selector(setPresentedLayerTypes:)]) [context setPresentedLayerTypes:7];
+                        if ([context respondsToSelector:@selector(setAppearanceStyle:)]) [context setAppearanceStyle:2];
+                        if ([context respondsToSelector:@selector(setClipsToBounds:)]) [context setClipsToBounds:YES];
+                        CV3InvokeObject1(hostedView, @selector(_setPresentationContext:), context);
                     }
-                    if ([context respondsToSelector:@selector(setAppearanceStyle:)]) {
-                        [context setAppearanceStyle:2];
-                    }
-                    if ([context respondsToSelector:@selector(setClipsToBounds:)]) {
-                        [context setClipsToBounds:YES];
-                    }
-                    
-                    CV3InvokeObject1(hostedView, @selector(_setPresentationContext:), context);
                     
                     if (hostedView) {
                         hostedView.layer.cornerRadius = 0;
@@ -3430,8 +3582,7 @@ void CV3ToggleExposeMode(void) {
                         
                         CV3LogToFile(isReused ? @"[Debug] 成功重用已有的 _UISceneLayerHostContainerView" : @"[Debug] 成功通过 _UISceneLayerHostContainerView 创建渲染视图");
                         
-                        [self syncWindowBoundsToClient];
-                        [self dismissLaunchSplashAnimated];
+                        [self finishHostingWhenRenderableWithRetries:20];
                     } else {
                         CV3LogToFile(@"[Error] _UISceneLayerHostContainerView 创建/重用失败");
                     }
@@ -3488,11 +3639,11 @@ void CV3ToggleExposeMode(void) {
             // Start polling with initial delay of 0.3s, up to 10 retries (more resilient for cold starts)
             [self attemptToHostSceneWithRetries:10 delay:0.3];
             
-            // [Safety] 增加全局超时保护：如果 12 秒后还没进入内容，强制移除 Splash，防止界面永久卡死
+            // Keep the loading surface visible until the hosted Scene supplies a render layer.
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (self.splashView) {
-                    CV3LogToFile(@"[Safety] 触发启动超时强制恢复: %@", self.bundleID);
-                    [self dismissLaunchSplashAnimated];
+                    CV3LogToFile(@"[Recovery] 启动超时，重新请求 Scene 渲染层: %@", self.bundleID);
+                    [self attemptToHostSceneWithRetries:3 delay:0.0];
                 }
             });
         } @catch (NSException *e) {
@@ -3706,6 +3857,7 @@ void CV3ToggleExposeMode(void) {
         self.stashGrabber.alpha = 0.0;
 
         self.isStashed = NO; // 先解除 Stash 标志，以便下面 updateSettings 时能被识别为前台
+        [self.hostedSession setActive:YES];
         CV3CascadeUpdateSovereigntyAssertions(); // 级联刷新所有窗口前台优先级断言
 
         // 核心修复：如果已有的 hostView 存在，立即加回层级中并设为可见，避免黑屏/渲染延迟
@@ -3886,10 +4038,10 @@ void CV3ToggleExposeMode(void) {
     if (self.bundleID) {
         CGRect contentFrame = [self visiblePortraitContentFrame];
         
-        CV3SharedGeometry *geometry = CV3SharedGeometryForBundleID(self.bundleID);
-        if (geometry) {
-            CV3WriteSharedGeometry(geometry, (float)contentFrame.size.width, (float)contentFrame.size.height, self.hidden ? 0 : 1);
-        }
+        CV3WriteSharedGeometryForBundleID(self.bundleID,
+                                          (float)contentFrame.size.width,
+                                          (float)contentFrame.size.height,
+                                          self.hidden ? 0 : 1);
         
         // 2. 仅在需要通知的静态时刻，才落盘 Plist 提供持久化记录和兼容性
         if (notify) {
@@ -4314,6 +4466,7 @@ void CV3ToggleExposeMode(void) {
     if (self.isClosing) return;
     CV3ExitExposeModeIfNeeded(self, NO);
     self.isClosing = YES;
+    [self.hostedSession invalidate];
     
     if (self.assertionWatchdogTimer) {
         [self.assertionWatchdogTimer invalidate];
@@ -4331,18 +4484,7 @@ void CV3ToggleExposeMode(void) {
     }
 
     if (self.hostView) {
-        // [Geek Advice] Explicitly disable hosting for the requester to release FBScene resources
-        @try {
-            if (self.targetScene && [self.targetScene respondsToSelector:@selector(hostManager)]) {
-                id hm = CV3InvokeObject(self.targetScene, @selector(hostManager));
-                if ([hm respondsToSelector:@selector(enableHostingForRequester:priority:)]) {
-                    // 禁用托管，释放资源
-                    CV3InvokeObject2(hm, @selector(enableHostingForRequester:priority:), nil, (id)0);
-                }
-            }
-        } @catch (NSException *e) {
-            CV3LogToFile(@"[Error] Failed to disable hosting during closeWindow: %@", e);
-        }
+        [self disableHostingForCurrentScene];
 
         // [New] Reset Scene Settings to Background before destroying
         if (self.targetScene) {

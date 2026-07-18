@@ -3,6 +3,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <objc/runtime.h>
+#import <notify.h>
 #import "CV3PrivateAPI.h"
 #import "CV3CoreSupport.h"
 #include <sys/stat.h>
@@ -41,6 +42,15 @@
 - (id)iconViewForIcon:(id)arg1 location:(id)arg2;
 @end
 
+@interface SBIcon : NSObject
+- (void)launchFromLocation:(NSInteger)location context:(id)context;
+@end
+
+@interface SBMainSwitcherGestureCoordinator : NSObject
+- (void)_lockOrientation;
+- (void)_releaseOrientationLock;
+@end
+
 static BOOL CV3ShouldBlockHomeScreenSearch(void);
 
 @interface SBIconModel : NSObject
@@ -69,10 +79,23 @@ static BOOL CV3ShouldBlockHomeScreenSearch(void);
 
 #pragma mark - SceneKit Declarations for App Hosting
 @interface UIApplication (Private)
-- (void)launchApplicationWithIdentifier:(NSString *)identifier suspended:(BOOL)suspended;
+- (BOOL)launchApplicationWithIdentifier:(NSString *)identifier suspended:(BOOL)suspended;
 @end
 
 @class FBScene;
+@class CV3FloatingAppWindow;
+
+static void CV3PostHostedState(NSString *bundleID, BOOL hosted);
+
+@interface CV3HostedSceneSession : NSObject
+@property (nonatomic, weak) CV3FloatingAppWindow *window;
+@property (nonatomic, strong) NSTimer *continuityTimer;
+@property (nonatomic, assign, getter=isActive) BOOL active;
+- (instancetype)initWithWindow:(CV3FloatingAppWindow *)window;
+- (void)setActive:(BOOL)active;
+- (void)validateNow:(NSString *)reason;
+- (void)invalidate;
+@end
 
 @interface SBApplication : NSObject
 @property (nonatomic, readonly) NSString *bundleIdentifier;
@@ -105,8 +128,9 @@ static BOOL CV3ShouldBlockHomeScreenSearch(void);
 @end
 
 @interface FBSceneHostManager : NSObject
-- (void)enableHostingForRequester:(id)arg1 priority:(long long)arg2;
-- (UIView *)hostView;
+- (UIView *)hostViewForRequester:(NSString *)requester enableAndOrderFront:(BOOL)orderFront;
+- (void)enableHostingForRequester:(NSString *)requester orderFront:(BOOL)front;
+- (void)disableHostingForRequester:(NSString *)requester;
 @end
 
 @interface FBScene : NSObject
@@ -654,6 +678,8 @@ static void CV3ApplyGlassAccentStyle(UIView *surface,
 #pragma mark - Floating App Window (MilkyWay2-style)
 static NSString * const CV3FloatingWindowsDidChangeNotification = @"CV3FloatingWindowsDidChangeNotification";
 static NSMutableArray *floatingWindows = nil;
+static const char *CV3VideoOrientationNotification = "com.xu.chevronv3.video-orientation";
+static int CV3VideoOrientationNotificationToken = -1;
 static UIInterfaceOrientation CV3LastTrustedInterfaceOrientation = UIInterfaceOrientationPortrait;
 static BOOL CV3SuppressPresentationContextFanout = NO;
 static BOOL CV3WorkspaceTransitionActive = NO;
@@ -661,6 +687,42 @@ static NSUInteger CV3WorkspaceTransitionProtectionToken = 0;
 
 static BOOL CV3IsValidInterfaceOrientation(UIInterfaceOrientation orientation) {
     return orientation != UIInterfaceOrientationUnknown && orientation != 0;
+}
+
+static BOOL CV3IdentifierContainsExactBundleID(NSString *identifier, NSString *bundleID) {
+    if (identifier.length == 0 || bundleID.length == 0) return NO;
+
+    // FBScene identifiers commonly append an instance suffix such as "-default".
+    // Keep dots significant so com.example.app never matches com.example.app.pro.
+    NSCharacterSet *bundleCharacterSet = [NSCharacterSet characterSetWithCharactersInString:
+                                          @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789."];
+    NSRange searchRange = NSMakeRange(0, identifier.length);
+    while (searchRange.length > 0) {
+        NSRange match = [identifier rangeOfString:bundleID options:0 range:searchRange];
+        if (match.location == NSNotFound) return NO;
+
+        BOOL validPrefix = match.location == 0 ||
+            ![bundleCharacterSet characterIsMember:[identifier characterAtIndex:match.location - 1]];
+        NSUInteger matchEnd = NSMaxRange(match);
+        BOOL validSuffix = matchEnd == identifier.length ||
+            ![bundleCharacterSet characterIsMember:[identifier characterAtIndex:matchEnd]];
+        if (validPrefix && validSuffix) return YES;
+
+        NSUInteger nextLocation = match.location + 1;
+        searchRange = NSMakeRange(nextLocation, identifier.length - nextLocation);
+    }
+    return NO;
+}
+
+static uint64_t CV3StableBundleHash(NSString *bundleID) {
+    const unsigned char *bytes = (const unsigned char *)bundleID.UTF8String;
+    uint64_t hash = 1469598103934665603ULL;
+    if (!bytes) return hash;
+    while (*bytes) {
+        hash ^= (uint64_t)*bytes++;
+        hash *= 1099511628211ULL;
+    }
+    return hash & 0x00FFFFFFFFFFFFFFULL;
 }
 
 __attribute__((unused)) static UIInterfaceOrientation CV3InterfaceOrientationFromDevice(void) {
@@ -984,6 +1046,8 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 @property (nonatomic, strong) UIView *clippingContainer; 
 @property (nonatomic, strong) UIView *hostContainerProxy;
 @property (nonatomic, strong) UIView *hostView;
+@property (nonatomic, copy) NSString *sceneHostingRequester;
+@property (nonatomic, strong) CV3HostedSceneSession *hostedSession;
 @property (nonatomic, strong) UIView *windowChromeView;
 @property (nonatomic, strong) UIView *chromeDragHandle;
 @property (nonatomic, strong) UIButton *chromeCloseButton;
@@ -1034,6 +1098,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 @property (nonatomic, strong) UIView *splashView;
 @property (nonatomic, strong) UIImageView *largeSplashIcon;
 @property (nonatomic, assign) UIInterfaceOrientation targetOrientation;
+@property (nonatomic, assign) UIInterfaceOrientation hostedContentOrientation;
 @property (nonatomic, assign) UIInterfaceOrientation lastLayoutOrientation;
 @property (nonatomic, assign) CGAffineTransform baseRotationTransform;
 @property (nonatomic, assign) CGRect preFullscreenFrame;
@@ -1086,6 +1151,10 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (void)applyCurrentTransformWithScale:(CGFloat)scale;
 - (void)handleTransitionGhosting;
 - (void)refreshHostViewPresentation;
+- (UIView *)hostViewForScene:(FBScene *)scene;
+- (void)disableHostingForCurrentScene;
+- (BOOL)hostViewHasRenderableContent;
+- (void)finishHostingWhenRenderableWithRetries:(NSInteger)retries;
 - (void)applyStashedGrabberOrientation;
 - (void)normalizeStashedGrabberLayout;
 - (void)updateStashIconAppearance;
@@ -1125,9 +1194,26 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (CGRect)currentHostedSceneBounds;
 - (BOOL)applyHostedSceneLayoutToSettings:(id)settings force:(BOOL)force;
 - (BOOL)syncHostedSceneLayoutForce:(BOOL)force;
+- (void)applyHostedContentOrientation:(UIInterfaceOrientation)orientation;
 - (BOOL)applyForegroundSovereigntyToSettings:(id)settings clearDeactivation:(BOOL)clearDeactivation forceLayout:(BOOL)forceLayout;
 - (void)stabilizeForegroundForWorkspaceTransition:(NSString *)reason;
 @end
+
+static void CV3PostHostedStateValue(NSString *bundleID, uint64_t state) {
+    if (bundleID.length == 0) return;
+
+    NSString *notificationName = [NSString stringWithFormat:@"com.xu.chevronv3.hosted.%014llx",
+                                  CV3StableBundleHash(bundleID)];
+    int token = -1;
+    if (notify_register_check(notificationName.UTF8String, &token) != NOTIFY_STATUS_OK) return;
+    notify_set_state(token, state);
+    notify_post(notificationName.UTF8String);
+    notify_cancel(token);
+}
+
+static void CV3PostHostedState(NSString *bundleID, BOOL hosted) {
+    CV3PostHostedStateValue(bundleID, hosted ? 1 : 0);
+}
 
 // --- Custom Resize Handle with Expanded Hit Area ---
 @interface CV3ResizeHandleView : UIView
@@ -1302,15 +1388,56 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
 
 #import "CV3FloatingAppWindow.inc"
 
+static void CV3RegisterVideoOrientationBridge(void) {
+    if (CV3VideoOrientationNotificationToken >= 0) return;
+
+    int status = notify_register_dispatch(CV3VideoOrientationNotification,
+                                          &CV3VideoOrientationNotificationToken,
+                                          dispatch_get_main_queue(),
+                                          ^(int token) {
+        uint64_t state = 0;
+        if (notify_get_state(token, &state) != NOTIFY_STATUS_OK) return;
+
+        UIInterfaceOrientation orientation = (UIInterfaceOrientation)((state >> 56) & 0xFFULL);
+        uint64_t bundleHash = state & 0x00FFFFFFFFFFFFFFULL;
+        if (!CV3IsValidInterfaceOrientation(orientation)) return;
+
+        for (CV3FloatingAppWindow *window in [floatingWindows copy]) {
+            if (![window isKindOfClass:[CV3FloatingAppWindow class]] || window.isClosing) continue;
+            if (CV3StableBundleHash(window.bundleID) != bundleHash) continue;
+
+            [window applyHostedContentOrientation:orientation];
+            return;
+        }
+    });
+
+    if (status != NOTIFY_STATUS_OK) {
+        CV3VideoOrientationNotificationToken = -1;
+        CV3LogToFile(@"[Error] VideoBridge Darwin 通知注册失败: %d", status);
+    }
+}
+
 static void CV3StabilizeFloatingWindowsForWorkspaceTransition(NSString *reason) {
     if (!floatingWindows || floatingWindows.count == 0) return;
 
     NSArray *windowsSnapshot = [floatingWindows copy];
     for (CV3FloatingAppWindow *win in windowsSnapshot) {
         if (![win isKindOfClass:[CV3FloatingAppWindow class]] || win.isClosing || win.isStashed) continue;
-        [win stabilizeForegroundForWorkspaceTransition:reason];
+        [win.hostedSession validateNow:reason];
     }
 }
+
+static void CV3SetClientWorkspaceTransitionShield(BOOL enabled) {
+    if (!floatingWindows || floatingWindows.count == 0) return;
+
+    for (CV3FloatingAppWindow *win in [floatingWindows copy]) {
+        if (![win isKindOfClass:[CV3FloatingAppWindow class]] || win.isClosing || win.isStashed) continue;
+        // bit 0 = 正在托管，bit 1 = Home/App Switcher 转场隔离期。
+        CV3PostHostedStateValue(win.bundleID, enabled ? 3 : 1);
+    }
+}
+
+static void CV3EndWorkspaceTransitionProtection(NSString *reason);
 
 static void CV3BeginWorkspaceTransitionProtection(NSString *reason) {
     if (!floatingWindows || floatingWindows.count == 0) return;
@@ -1320,15 +1447,36 @@ static void CV3BeginWorkspaceTransitionProtection(NSString *reason) {
     NSUInteger token = CV3WorkspaceTransitionProtectionToken;
 
     CV3LogToFile(@"[Continuity] 开启 Workspace 转场保护: %@", reason ?: @"Unknown");
+    CV3SetClientWorkspaceTransitionShield(YES);
     CV3StabilizeFloatingWindowsForWorkspaceTransition(reason ?: @"Begin");
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (token != CV3WorkspaceTransitionProtectionToken) return;
         CV3WorkspaceTransitionActive = NO;
+        CV3SetClientWorkspaceTransitionShield(NO);
         CV3StabilizeFloatingWindowsForWorkspaceTransition(@"ProtectionTimeout");
         CV3LogToFile(@"[Continuity] Workspace 转场保护超时收尾");
     });
 }
+
+%hook SBMainSwitcherGestureCoordinator
+- (void)_lockOrientation {
+    CV3BeginWorkspaceTransitionProtection(@"HomeGestureBegan");
+    %orig;
+}
+
+- (void)_releaseOrientationLock {
+    %orig;
+    CV3EndWorkspaceTransitionProtection(@"HomeGestureEnded");
+}
+%end
+
+%hook SBIcon
+- (void)launchFromLocation:(NSInteger)location context:(id)context {
+    CV3BeginWorkspaceTransitionProtection(@"IconLaunchBegan");
+    %orig(location, context);
+}
+%end
 
 static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
     if (!floatingWindows || floatingWindows.count == 0) return;
@@ -1341,6 +1489,7 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (token != CV3WorkspaceTransitionProtectionToken) return;
         CV3WorkspaceTransitionActive = NO;
+        CV3SetClientWorkspaceTransitionShield(NO);
         CV3StabilizeFloatingWindowsForWorkspaceTransition(@"ProtectionEnd");
         CV3LogToFile(@"[Continuity] 结束 Workspace 转场保护: %@", reason ?: @"Unknown");
     });
@@ -1819,6 +1968,26 @@ static void CV3ApplySceneRotationContextToProject(CV3SceneRotationContext contex
     }
     return orig;
 }
+
+- (NSSet *)deactivatingApps {
+    NSSet *originalApps = %orig;
+    if (!floatingWindows || floatingWindows.count == 0 || originalApps.count == 0) return originalApps;
+
+    NSMutableSet *filteredApps = [originalApps mutableCopy];
+    for (id app in originalApps) {
+        NSString *bundleID = CV3BundleIdentifierFromWorkspaceObject(app);
+        for (CV3FloatingAppWindow *window in [floatingWindows copy]) {
+            if (window.isClosing || window.isStashed) continue;
+            if ([bundleID isEqualToString:window.bundleID]) {
+                [filteredApps removeObject:app];
+                [window.hostedSession validateNow:@"FilteredDeactivatingApps"];
+                CV3LogToFile(@"[HostedSession] 已从 deactivatingApps 移除: %@", bundleID);
+                break;
+            }
+        }
+    }
+    return [filteredApps copy];
+}
 %end
 @interface SBAppLayout : NSObject
 - (BOOL)containsItemWithBundleIdentifier:(NSString *)bundleIdentifier;
@@ -2073,7 +2242,7 @@ static BOOL CV3SpoofPadIdiomDuringSwitcherLoad = NO;
     if (floatingWindows && floatingWindows.count > 0) {
         FBScene *scene = (FBScene *)arg1;
         for (CV3FloatingAppWindow *win in floatingWindows) {
-            if ([scene.identifier containsString:win.bundleID] && !win.isClosing) {
+            if (CV3IdentifierContainsExactBundleID(scene.identifier, win.bundleID) && !win.isClosing) {
                 CV3LogToFile(@"[Lifecycle] 系统尝试销毁托管场景 (%@)，清理渲染并准备恢复", win.bundleID);
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (win.hostView) {
@@ -2314,6 +2483,13 @@ static BOOL CV3SpoofPadIdiomDuringSwitcherLoad = NO;
 %end
 
 %hook SpringBoard
+- (BOOL)launchApplicationWithIdentifier:(NSString *)identifier suspended:(BOOL)suspended {
+    if (!suspended) {
+        CV3BeginWorkspaceTransitionProtection(@"ApplicationLaunchBegan");
+    }
+    return %orig(identifier, suspended);
+}
+
 - (void)applicationDidFinishLaunching:(id)application {
     %orig;
 
@@ -2607,7 +2783,7 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
 
     if (floatingWindows) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
-            if ([self.identifier containsString:win.bundleID] && !win.isClosing) {
+            if (CV3IdentifierContainsExactBundleID(self.identifier, win.bundleID) && !win.isClosing) {
                 // 如果窗口被 Stash (侧边隐藏)，且系统正在尝试将其置于后台，我们不再强制拉回前台
                 // 这能有效避免系统判定应用“违规占据前台”而触发的杀进程行为 (0xDEAD10CC)
                 if (win.isStashed) {
@@ -2616,10 +2792,8 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
                 }
 
                 id mutableSettings = [arg1 mutableCopy];
-                BOOL isTransitioning = (arg2 != nil);
-                BOOL clearDeactivation = (!isTransitioning || CV3WorkspaceTransitionActive);
                 BOOL modified = [win applyForegroundSovereigntyToSettings:mutableSettings
-                                                         clearDeactivation:clearDeactivation
+                                                         clearDeactivation:YES
                                                                forceLayout:NO];
 
                 if (modified) {
@@ -2648,17 +2822,15 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
 
     if (floatingWindows) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
-            if ([self.identifier containsString:win.bundleID] && !win.isClosing) {
+            if (CV3IdentifierContainsExactBundleID(self.identifier, win.bundleID) && !win.isClosing) {
                 if (win.isStashed) {
                     %orig(arg1, arg2, arg3);
                     return;
                 }
 
                 id mutableSettings = [arg1 mutableCopy];
-                BOOL isTransitioning = (arg2 != nil);
-                BOOL clearDeactivation = (!isTransitioning || CV3WorkspaceTransitionActive);
                 BOOL modified = [win applyForegroundSovereigntyToSettings:mutableSettings
-                                                         clearDeactivation:clearDeactivation
+                                                         clearDeactivation:YES
                                                                forceLayout:NO];
 
                 if (modified) {
@@ -2685,7 +2857,7 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
 
     if (floatingWindows) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
-            if ([self.identifier containsString:win.bundleID] && !win.isClosing) {
+            if (CV3IdentifierContainsExactBundleID(self.identifier, win.bundleID) && !win.isClosing) {
                 // 如果窗口被 Stash (侧边隐藏)，允许场景进入非 Ready 状态，配合系统节能
                 if (win.isStashed) {
                     %orig(arg1);
@@ -2705,7 +2877,7 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
 - (BOOL)isInterrupted {
     if (floatingWindows) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
-            if ([self.identifier containsString:win.bundleID] && !win.isClosing) {
+            if (CV3IdentifierContainsExactBundleID(self.identifier, win.bundleID) && !win.isClosing) {
                 if (win.isStashed) return %orig;
                 return NO; // 核心：强制报告未中断，防止视频播放因手势判定而暂停
             }
@@ -2750,3 +2922,10 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
     }
 }
 %end
+
+%ctor {
+    @autoreleasepool {
+        CV3RegisterVideoOrientationBridge();
+        %init;
+    }
+}

@@ -15,11 +15,11 @@ static BOOL CV3WorkspaceObjectMatchesBundleID(id object, NSString *bundleID) {
 
     NSString *activeBundleID = CV3BundleIdentifierFromWorkspaceObject(object);
     if ([activeBundleID isEqualToString:bundleID]) return YES;
-    if ([activeBundleID containsString:bundleID]) return YES;
+    if (CV3IdentifierContainsExactBundleID(activeBundleID, bundleID)) return YES;
 
     @try {
         NSString *description = [object description];
-        if ([description containsString:bundleID]) return YES;
+        if (CV3IdentifierContainsExactBundleID(description, bundleID)) return YES;
     } @catch (NSException *e) {}
 
     return NO;
@@ -197,7 +197,7 @@ static BOOL CV3SceneIdentifierBelongsToFloatingWindow(NSString *identifier) {
 
     for (CV3FloatingAppWindow *win in [floatingWindows copy]) {
         if (![win isKindOfClass:[CV3FloatingAppWindow class]] || win.isClosing) continue;
-        if ([identifier containsString:win.bundleID]) return YES;
+        if (CV3IdentifierContainsExactBundleID(identifier, win.bundleID)) return YES;
     }
 
     return NO;
@@ -224,15 +224,15 @@ static void CV3RecordSceneContentState(FBScene *scene, NSInteger contentState, N
 static BOOL CV3ObservedForegroundMatchesBundleID(NSString *bundleID) {
     if (bundleID.length == 0) return NO;
 
-    if ([CV3LastObservedActiveSceneIdentifier containsString:bundleID]) return YES;
+    if (CV3IdentifierContainsExactBundleID(CV3LastObservedActiveSceneIdentifier, bundleID)) return YES;
 
     if ([CV3LastObservedForegroundBundleID isEqualToString:bundleID]) return YES;
     if ([CV3ObservedForegroundBundleIDs containsObject:bundleID]) return YES;
 
-    if ([CV3LastObservedForegroundSceneIdentifier containsString:bundleID]) return YES;
+    if (CV3IdentifierContainsExactBundleID(CV3LastObservedForegroundSceneIdentifier, bundleID)) return YES;
 
     for (NSString *identifier in [CV3ObservedForegroundSceneIdentifiers copy]) {
-        if ([identifier containsString:bundleID]) return YES;
+        if (CV3IdentifierContainsExactBundleID(identifier, bundleID)) return YES;
     }
 
     return NO;
@@ -240,13 +240,13 @@ static BOOL CV3ObservedForegroundMatchesBundleID(NSString *bundleID) {
 
 static BOOL CV3ApplicationHasLiveScene(NSString *bundleID) {
     if (bundleID.length == 0) return NO;
-    if (![CV3LastObservedActiveSceneIdentifier containsString:bundleID]) return NO;
+    if (!CV3IdentifierContainsExactBundleID(CV3LastObservedActiveSceneIdentifier, bundleID)) return NO;
 
     @try {
         SBApplication *app = [[CV3ClassNamed(@"SBApplicationController") sharedInstance] applicationWithBundleIdentifier:bundleID];
         if (app && [app respondsToSelector:@selector(mainScene)]) {
             FBScene *scene = [app mainScene];
-            if (scene && [scene.identifier containsString:bundleID]) return YES;
+            if (scene && CV3IdentifierContainsExactBundleID(scene.identifier, bundleID)) return YES;
         }
     } @catch (NSException *e) {}
 
@@ -263,7 +263,7 @@ static BOOL CV3ApplicationHasLiveScene(NSString *bundleID) {
                 sceneID = scene.identifier;
             } @catch (NSException *e) {}
 
-            if ([keyString containsString:bundleID] || [sceneID containsString:bundleID]) {
+            if (CV3IdentifierContainsExactBundleID(keyString, bundleID) || CV3IdentifierContainsExactBundleID(sceneID, bundleID)) {
                 return YES;
             }
         }
@@ -365,7 +365,7 @@ static void CV3LogPanelStateDebugForBundleID(NSString *bundleID, CV3AppPanelProt
                 sceneID = scene.identifier;
             } @catch (NSException *e) {}
 
-            if ([keyString containsString:bundleID] || [sceneID containsString:bundleID]) {
+            if (CV3IdentifierContainsExactBundleID(keyString, bundleID) || CV3IdentifierContainsExactBundleID(sceneID, bundleID)) {
                 fbSceneMatched = YES;
                 matchedFBSceneID = sceneID ?: keyString ?: @"nil";
                 matchedFBSceneSettingsForeground = CV3InvokeBool(scene.settings, @selector(foreground), NO);
@@ -424,7 +424,7 @@ static BOOL CV3ApplicationLooksForeground(NSString *bundleID) {
             if ([app respondsToSelector:@selector(mainScene)]) {
                 scene = [app mainScene];
             }
-            if (scene && [scene.identifier containsString:bundleID] && CV3SceneSettingsLookForeground(scene.settings)) {
+            if (scene && CV3IdentifierContainsExactBundleID(scene.identifier, bundleID) && CV3SceneSettingsLookForeground(scene.settings)) {
                 return YES;
             }
         }
@@ -443,7 +443,7 @@ static BOOL CV3ApplicationLooksForeground(NSString *bundleID) {
                 sceneID = scene.identifier;
             } @catch (NSException *e) {}
 
-            if (([keyString containsString:bundleID] || [sceneID containsString:bundleID]) &&
+            if ((CV3IdentifierContainsExactBundleID(keyString, bundleID) || CV3IdentifierContainsExactBundleID(sceneID, bundleID)) &&
                 CV3SceneSettingsLookForeground(scene.settings)) {
                 return YES;
             }
@@ -456,9 +456,9 @@ static BOOL CV3ApplicationLooksForeground(NSString *bundleID) {
             NSString *sceneDescription = [scene description];
             NSString *sessionDescription = [scene.session description];
             NSString *persistentIdentifier = CV3InvokeObject(scene.session, @selector(persistentIdentifier));
-            if ([sceneDescription containsString:bundleID] ||
-                [sessionDescription containsString:bundleID] ||
-                [persistentIdentifier containsString:bundleID]) {
+            if (CV3IdentifierContainsExactBundleID(sceneDescription, bundleID) ||
+                CV3IdentifierContainsExactBundleID(sessionDescription, bundleID) ||
+                CV3IdentifierContainsExactBundleID(persistentIdentifier, bundleID)) {
                 return YES;
             }
         }
@@ -2940,11 +2940,85 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     return YES;
 }
 
+- (NSArray<CV3AppInfo *> *)buildAppSnapshotOnMainThread {
+    NSAssert([NSThread isMainThread], @"SpringBoard icon state must be read on the main thread");
+
+    [cv3IconCache removeAllObjects];
+    NSMutableArray<CV3AppInfo *> *snapshot = [NSMutableArray array];
+    id iconController = [CV3ClassNamed(@"SBIconController") sharedInstance];
+    id iconManager = CV3InvokeObject(iconController, @selector(iconManager));
+    id iconModel = CV3InvokeObject(iconManager, @selector(model));
+    if (!iconModel) iconModel = CV3InvokeObject(iconController, @selector(model));
+
+    for (id icon in CV3InvokeObject(iconModel, @selector(leafIcons))) {
+        if (!CV3InvokeBool(icon, @selector(isApplicationIcon), NO)) continue;
+
+        NSString *bundleID = CV3InvokeObject(icon, @selector(applicationBundleID));
+        if (bundleID.length == 0) bundleID = CV3InvokeObject(icon, @selector(leafIdentifier));
+        NSString *name = CV3InvokeObject1(icon, @selector(displayNameForLocation:), nil);
+        if (name.length == 0) name = CV3InvokeObject(icon, @selector(displayName));
+        if (bundleID.length == 0 || name.length == 0) continue;
+
+        UIImage *image = [UIImage _applicationIconImageForBundleIdentifier:bundleID
+                                                                     format:10
+                                                                      scale:[UIScreen mainScreen].scale];
+        if (!image) continue;
+
+        CV3AppInfo *info = [[CV3AppInfo alloc] init];
+        info.name = name;
+        info.bundleId = bundleID;
+        info.icon = image;
+        info.sbIcon = icon;
+        id proxy = CV3InvokeObject1(CV3ClassNamed(@"LSApplicationProxy"),
+                                    @selector(applicationProxyForIdentifier:),
+                                    bundleID);
+        if (!proxy) {
+            proxy = CV3InvokeObject1(CV3ClassNamed(@"LSApplicationProxy"),
+                                     @selector(applicationProxyForBundleIdentifier:),
+                                     bundleID);
+        }
+        info.category = CV3InvokeObject(proxy, @selector(genre)) ?: @"其他";
+        [cv3IconCache setObject:image forKey:bundleID];
+        [snapshot addObject:info];
+    }
+
+    if (snapshot.count == 0) {
+        id workspace = [CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace];
+        for (id proxy in CV3InvokeObject(workspace, @selector(allInstalledApplications))) {
+            if (![self shouldIncludeApp:proxy]) continue;
+
+            NSString *bundleID = CV3InvokeObject(proxy, @selector(bundleIdentifier));
+            NSString *name = CV3InvokeObject(proxy, @selector(localizedName));
+            UIImage *image = [UIImage _applicationIconImageForBundleIdentifier:bundleID
+                                                                         format:10
+                                                                          scale:[UIScreen mainScreen].scale];
+            if (bundleID.length == 0 || name.length == 0 || !image) continue;
+
+            CV3AppInfo *info = [[CV3AppInfo alloc] init];
+            info.name = name;
+            info.bundleId = bundleID;
+            info.icon = image;
+            info.category = CV3InvokeObject(proxy, @selector(genre)) ?: @"其他";
+            [cv3IconCache setObject:image forKey:bundleID];
+            [snapshot addObject:info];
+        }
+    }
+    return [snapshot copy];
+}
+
 - (void)loadAppsAsync {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self loadAppsAsync];
+        });
+        return;
+    }
+
     NSUInteger requestedGeneration = ++self.appLoadGeneration;
     BOOL needsFullReload = self.needsFullReload || self.apps.count == 0;
     NSArray<CV3AppInfo *> *appsSnapshot = [self.apps copy] ?: @[];
     NSSet *pinnedSnapshot = [self.pinnedBundleIDs copy] ?: [NSSet set];
+    NSArray<CV3AppInfo *> *fullReloadSnapshot = needsFullReload ? [self buildAppSnapshotOnMainThread] : nil;
 
     dispatch_async(CV3AppLoadQueue(), ^{
         @autoreleasepool {
@@ -2958,70 +3032,13 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
                 CV3LogToFile(@"[Debug] 命中增量更新，仅刷新置顶与排序状态 (generation=%lu)", (unsigned long)requestedGeneration);
             } else {
                 CV3LogToFile(@"[Debug] 执行全量应用资源同步 (needsFullReload=%d, generation=%lu)", needsFullReload, (unsigned long)requestedGeneration);
-                [cv3IconCache removeAllObjects];
-
-                NSMutableArray *temp = [NSMutableArray array];
-                id iconController = [CV3ClassNamed(@"SBIconController") sharedInstance];
-                id iconModel = nil;
-                id iconManager = CV3InvokeObject(iconController, @selector(iconManager));
-                if (iconManager) iconModel = CV3InvokeObject(iconManager, @selector(model));
-                if (!iconModel) iconModel = CV3InvokeObject(iconController, @selector(model));
-                
-                if (iconModel) {
-                    id leafIcons = CV3InvokeObject(iconModel, @selector(leafIcons));
-                    for (id icon in leafIcons) {
-                        if (CV3InvokeBool(icon, @selector(isApplicationIcon), NO)) {
-                            NSString *bundleId = nil;
-                            bundleId = CV3InvokeObject(icon, @selector(applicationBundleID));
-                            if (bundleId.length == 0) bundleId = CV3InvokeObject(icon, @selector(leafIdentifier));
-                            
-                            NSString *name = nil;
-                            name = CV3InvokeObject1(icon, @selector(displayNameForLocation:), nil);
-                            if (name.length == 0) name = CV3InvokeObject(icon, @selector(displayName));
-                            
-                            if (!bundleId || !name) continue;
-                            
-                            CV3AppInfo *info = [[CV3AppInfo alloc] init];
-                            info.name = name;
-                            info.bundleId = bundleId;
-                            info.sbIcon = icon;
-                            [info generatePinyin];
-                            
-                            @try {
-                                Class LSAP = CV3ClassNamed(@"LSApplicationProxy");
-                                id proxy = nil;
-                                proxy = CV3InvokeObject1(LSAP, @selector(applicationProxyForIdentifier:), bundleId);
-                                if (!proxy) proxy = CV3InvokeObject1(LSAP, @selector(applicationProxyForBundleIdentifier:), bundleId);
-                                if (proxy) info.category = CV3InvokeObject(proxy, @selector(genre));
-                            } @catch (NSException *e) {}
-                            if (!info.category) info.category = @"其他";
-                            
-                            info.icon = [UIImage _applicationIconImageForBundleIdentifier:bundleId format:10 scale:[UIScreen mainScreen].scale];
-                            if (info.icon) {
-                                [cv3IconCache setObject:info.icon forKey:bundleId];
-                                [temp addObject:info];
-                            }
-                        }
-                    }
+                workingApps = [NSMutableArray arrayWithCapacity:fullReloadSnapshot.count];
+                for (CV3AppInfo *source in fullReloadSnapshot) {
+                    CV3AppInfo *copiedInfo = CV3CopyAppInfo(source);
+                    if (!copiedInfo) continue;
+                    [copiedInfo generatePinyin];
+                    [workingApps addObject:copiedInfo];
                 }
-                
-                if (temp.count == 0) {
-                    id ws = [CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace];
-                    for (id p in CV3InvokeObject(ws, @selector(allInstalledApplications))) {
-                        if (![self shouldIncludeApp:p]) continue;
-                        NSString *bundleId = CV3InvokeObject(p, @selector(bundleIdentifier));
-                        NSString *name = CV3InvokeObject(p, @selector(localizedName));
-                        CV3AppInfo *info = [[CV3AppInfo alloc] init];
-                        info.name = name;
-                        info.bundleId = bundleId;
-                        info.icon = [UIImage _applicationIconImageForBundleIdentifier:bundleId format:10 scale:[UIScreen mainScreen].scale];
-                        if (info.icon) {
-                            [cv3IconCache setObject:info.icon forKey:bundleId];
-                            [temp addObject:info];
-                        }
-                    }
-                }
-                workingApps = temp;
             }
 
             NSDictionary *usageData = [[NSUserDefaults standardUserDefaults] dictionaryForKey:@"CV3AppUsageData"];

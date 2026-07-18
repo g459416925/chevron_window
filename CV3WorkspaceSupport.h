@@ -59,7 +59,7 @@ static BOOL CV3WorkspaceEntityMatchesFloatingWindow(id entity, NSString **matche
 
         BOOL matches = [entityBundleID isEqualToString:win.bundleID];
         if (!matches && entityDescription.length > 0) {
-            matches = [entityDescription containsString:win.bundleID];
+            matches = CV3IdentifierContainsExactBundleID(entityDescription, win.bundleID);
         }
 
         if (matches) {
