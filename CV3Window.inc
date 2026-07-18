@@ -1204,7 +1204,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         // 初始化边缘预警层
         self.triggerPreviewLayer = [CAGradientLayer layer];
         self.triggerPreviewLayer.type = kCAGradientLayerRadial;
-        self.triggerPreviewLayer.colors = @[(id)[[UIColor cyanColor] colorWithAlphaComponent:0.3].CGColor, (id)[UIColor clearColor].CGColor];
+        self.triggerPreviewLayer.colors = @[(id)[UIColor clearColor].CGColor, (id)[UIColor clearColor].CGColor];
         self.triggerPreviewLayer.startPoint = CGPointMake(0.5, 0.5);
         self.triggerPreviewLayer.endPoint = CGPointMake(1, 1);
         self.triggerPreviewLayer.opacity = 0;
@@ -1262,7 +1262,8 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     self.bezierBlur.autoresizingMask = UIViewAutoresizingNone;
     [self.bezierContainer addSubview:self.bezierBlur];
     self.bezierLayer = [CAShapeLayer layer];
-    self.bezierLayer.fillColor = [UIColor labelColor].CGColor;
+    // 贝塞尔层只负责承载手势形变，不显示额外的色块。
+    self.bezierLayer.fillColor = [UIColor clearColor].CGColor;
     self.bezierBlur.layer.mask = self.bezierLayer; 
     
     self.panelContainer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, CV3Style.panelW, CV3Style.panelH)];
@@ -2802,8 +2803,18 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         self.panelContainer.layer.shadowRadius = CV3Style.shadowRadiusMask;
         self.panelContainer.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.panelContainer.bounds cornerRadius:CV3Style.cornerRadius].CGPath;
 
-        self.panelContainer.transform = CGAffineTransformScale(startTransform, 0.4, 0.4);
+        self.panelPresentationStartTransform = CGAffineTransformScale(startTransform,
+                                                                       kCV3PanelPresentInitialScale,
+                                                                       kCV3PanelPresentInitialScale);
+        self.panelContainer.transform = self.panelPresentationStartTransform;
         self.panelContainer.alpha = 0;
+
+        // 面板本体再叠加一层轻微的横向拉伸/纵向压缩，让弹簧过冲能被
+        // 视觉上读出来，随后和外层缩放一起回到正常比例，形成果冻感。
+        CGFloat jellyStretch = MIN(kCV3PanelPresentJellyStretch + fabs(velocity) / 7000.0, 0.18);
+        self.appPanelPresentationStartTransform = CGAffineTransformMakeScale(1.0 + jellyStretch,
+                                                                               1.0 - jellyStretch * 0.7);
+        self.appPanel.transform = self.appPanelPresentationStartTransform;
 
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
@@ -2818,11 +2829,17 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         // 建议3：使用预热缓存的中心点 (Layout Pre-warming)
         CGPoint targetCenter = (self.cachedTargetCenter.x > 0) ? self.cachedTargetCenter : [self calculateTargetCenter];
 
-        [UIView animateWithDuration:0.75 delay:0 usingSpringWithDamping:0.65 initialSpringVelocity:1.2 options:0 animations:^{
+        [UIView animateWithDuration:kCV3PanelPresentDuration
+                              delay:0
+             usingSpringWithDamping:kCV3PanelPresentDamping
+              initialSpringVelocity:kCV3PanelPresentVelocity
+                            options:UIViewAnimationOptionAllowUserInteraction
+                         animations:^{
             self.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:CV3Style.maskAlpha];
             self.panelContainer.center = targetCenter;
             self.panelContainer.transform = initialRotation;
             self.panelContainer.alpha = 1;
+            self.appPanel.transform = CGAffineTransformIdentity;
             self.panelContainer.layer.shadowOpacity = CV3Style.shadowOpacityMask;
             
             [CATransaction begin];
@@ -2857,32 +2874,28 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             self.panelContainer.alpha = presentationLayer.opacity;
         }
 
-        // 获取当前的旋转状态
-        CGAffineTransform currentRotation = self.panelContainer.transform;
-        CGFloat springVelocity = CV3ClampedSpringVelocity(velocity,
-                                                          kCV3PanelDismissVelocityDivisor,
-                                                          kCV3PanelDismissMinVelocity,
-                                                          kCV3PanelDismissMaxVelocity);
         CGPoint dismissTarget = CGPointEqualToPoint(self.lastTriggerPoint, CGPointZero) ? point : self.lastTriggerPoint;
         
         [UIView animateWithDuration:kCV3PanelDismissDuration
                               delay:0
-             usingSpringWithDamping:kCV3PanelDismissDamping
-              initialSpringVelocity:springVelocity
+             usingSpringWithDamping:kCV3PanelPresentDamping
+              initialSpringVelocity:kCV3PanelPresentVelocity
                             options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseInOut
                          animations:^{
             self.backgroundColor = [UIColor clearColor];
             self.panelContainer.alpha = 0; 
             self.panelContainer.layer.shadowOpacity = 0.0;
-            self.panelContainer.center = dismissTarget; // 回退到存储的触发点
-            self.panelContainer.transform = CGAffineTransformScale(currentRotation, kCV3PanelDismissScale, kCV3PanelDismissScale);
+            // 关闭时回到出现动画的完整起点：同一个触发点、缩放和果冻形变。
+            self.panelContainer.center = dismissTarget;
+            self.panelContainer.transform = self.panelPresentationStartTransform;
+            self.appPanel.transform = self.appPanelPresentationStartTransform;
             
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
-            // 消失时再次放大模糊层，模拟消散
+            // 与出现时相反，模糊层回到聚拢前的放大状态。
             for (UIView *subview in self.appPanel.subviews) {
                 if ([NSStringFromClass([subview class]) containsString:@"Backdrop"]) {
-                    subview.transform = CGAffineTransformMakeScale(kCV3PanelDismissBackdropScale, kCV3PanelDismissBackdropScale);
+                    subview.transform = CGAffineTransformMakeScale(1.5, 1.5);
                 }
             }
             [CATransaction commit];
