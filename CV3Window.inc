@@ -635,6 +635,22 @@ static CV3FloatingAppWindow *CV3FloatingWindowForBundleID(NSString *bundleID) {
     return nil;
 }
 
+static void CV3RefreshFloatingHomeBarAfterPresentation(CV3FloatingAppWindow *window) {
+    if (!window || window.isClosing || window.isStashed) return;
+
+    void (^refresh)(void) = ^{
+        if (!window || window.isClosing || window.isStashed) return;
+        [window setNeedsLayout];
+        [window layoutIfNeeded];
+        [window layoutFloatingHomeBarForBounds:window.appContentWrapper.bounds];
+    };
+
+    refresh();
+    dispatch_async(dispatch_get_main_queue(), refresh);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), refresh);
+}
+
 // Entry point shared by the launcher and notification taps. Notification
 // callbacks are owned by SpringBoard, so keep all hosted-window work on the
 // main thread and do not require the launcher panel to be visible.
@@ -652,6 +668,7 @@ static BOOL CV3OpenBundleInFloatingWindow(NSString *bundleID, NSString *reason) 
     if (existingWindow) {
         [existingWindow restoreFromStash];
         [existingWindow setWindowFocused:YES];
+        CV3RefreshFloatingHomeBarAfterPresentation(existingWindow);
         CV3LogToFile(@"[NotificationSplit] 聚焦已有分屏: %@ (%@)", bundleID, reason ?: @"Unknown");
         return YES;
     }
@@ -685,6 +702,7 @@ static BOOL CV3OpenBundleInFloatingWindow(NSString *bundleID, NSString *reason) 
     [floatingWindows addObject:floatingWindow];
     [floatingWindow makeKeyAndVisible];
     floatingWindow.windowLevel = CV3Style.floatingApp;
+    CV3RefreshFloatingHomeBarAfterPresentation(floatingWindow);
     CV3UpdateFloatingBackdrop(scene);
     [[NSNotificationCenter defaultCenter] postNotificationName:CV3FloatingWindowsDidChangeNotification object:nil];
     CV3LogToFile(@"[NotificationSplit] 通知点击开启分屏: %@ (%@)", bundleID, reason ?: @"Unknown");
@@ -1834,6 +1852,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
                         [floatingWindows addObject:floatingWindow];
                         [floatingWindow makeKeyAndVisible];
                         floatingWindow.windowLevel = CV3Style.floatingApp;
+                        CV3RefreshFloatingHomeBarAfterPresentation(floatingWindow);
                         CV3UpdateFloatingBackdrop(self.windowScene);
                         [[NSNotificationCenter defaultCenter] postNotificationName:CV3FloatingWindowsDidChangeNotification object:nil];
                     }

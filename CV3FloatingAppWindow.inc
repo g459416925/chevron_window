@@ -1578,6 +1578,27 @@ void CV3ToggleExposeMode(void) {
     UIEdgeInsets safeArea = [self currentSafeAreaInsets];
     CGRect screenBounds = CV3DisplayBoundsForWindow(self);
 
+    // Once the floating window becomes key, its safeAreaInsets describe the
+    // small hosted window rather than the display. Use the largest peer window
+    // in the same scene as the display-level safe-area reference.
+    UIWindow *displayWindow = nil;
+    CGFloat largestWindowArea = 0.0;
+    for (UIWindow *candidate in self.windowScene.windows) {
+        if (candidate == self || candidate.hidden) continue;
+        CGFloat area = CGRectGetWidth(candidate.bounds) * CGRectGetHeight(candidate.bounds);
+        if (area > largestWindowArea) {
+            largestWindowArea = area;
+            displayWindow = candidate;
+        }
+    }
+    if (displayWindow) {
+        UIEdgeInsets displayInsets = displayWindow.safeAreaInsets;
+        if (displayInsets.top > 0.0 || displayInsets.bottom > 0.0 ||
+            displayInsets.left > 0.0 || displayInsets.right > 0.0) {
+            safeArea = displayInsets;
+        }
+    }
+
     NSInteger bestScreenPlacement = 0;
     CGFloat clearances[4] = {
         MAX(0.0, screenBounds.size.height - safeArea.bottom - CGRectGetMaxY(frame)),
@@ -3737,6 +3758,8 @@ void CV3ToggleExposeMode(void) {
                 self.center = CGPointMake(CGRectGetMaxX(otherFrame) + self.frame.size.width / 2.0 + 5.0, self.center.y);
             }
         }
+
+        [self layoutFloatingHomeBarForBounds:self.appContentWrapper.bounds];
     }
     
     if (gesture.state == UIGestureRecognizerStateEnded ||
@@ -3791,6 +3814,7 @@ void CV3ToggleExposeMode(void) {
         } completion:^(BOOL finished) {
             self.moveSceneSyncSuppressedUntil = CACurrentMediaTime() + 0.8;
             self.isMovingWindow = NO;
+            [self layoutFloatingHomeBarForBounds:self.appContentWrapper.bounds];
         }];
         
         [self animateFocusShadow:self.isFocused];
