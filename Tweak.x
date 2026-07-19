@@ -587,7 +587,11 @@ static void CV3LogToFile(NSString *format, ...) {
     dispatch_async(CV3LogQueue(), ^{
         @try {
             NSFileManager *fm = [NSFileManager defaultManager];
-            NSString *logPath = @"/var/mobile/Documents/ChevronV3_Logs.txt";
+            // SpringBoard is sandboxed on modern iOS and /var/mobile/Documents is
+            // not a reliable writable container.  Library/Logs is visible to the
+            // device diagnostics bridge and keeps runtime evidence outside an app
+            // container, so failures can be inspected after a workspace transition.
+            NSString *logPath = @"/var/mobile/Library/Logs/ChevronV3_Logs.txt";
             NSString *parentDir = [logPath stringByDeletingLastPathComponent];
             
             // 确保父目录存在
@@ -699,11 +703,19 @@ static void CV3ApplyGlassAccentStyle(UIView *surface,
 static NSString * const CV3FloatingWindowsDidChangeNotification = @"CV3FloatingWindowsDidChangeNotification";
 static NSMutableArray *floatingWindows = nil;
 static const char *CV3VideoOrientationNotification = "com.xu.chevronv3.video-orientation";
+static const char *CV3PlaybackTraceNotification = "com.xu.chevronv3.playback-trace";
 static int CV3VideoOrientationNotificationToken = -1;
+static int CV3PlaybackTraceNotificationToken = -1;
 static UIInterfaceOrientation CV3LastTrustedInterfaceOrientation = UIInterfaceOrientationPortrait;
 static BOOL CV3SuppressPresentationContextFanout = NO;
 static BOOL CV3WorkspaceTransitionActive = NO;
 static NSUInteger CV3WorkspaceTransitionProtectionToken = 0;
+static BOOL CV3SwitcherWindowVisible = NO;
+static BOOL CV3MainSwitcherVisible = NO;
+
+static BOOL CV3SwitcherPresentationActive(void) {
+    return CV3SwitcherWindowVisible || CV3MainSwitcherVisible;
+}
 
 static BOOL CV3IsValidInterfaceOrientation(UIInterfaceOrientation orientation) {
     return orientation != UIInterfaceOrientationUnknown && orientation != 0;
@@ -743,6 +755,61 @@ static uint64_t CV3StableBundleHash(NSString *bundleID) {
         hash *= 1099511628211ULL;
     }
     return hash & 0x00FFFFFFFFFFFFFFULL;
+}
+
+static const uint64_t CV3RequiredClientBridgeProtocolVersion = 0x2026071904ULL;
+static NSMutableSet<NSString *> *CV3ClientBridgeRelaunchPendingBundleIDs = nil;
+
+static NSString *CV3BridgeReadyNotificationNameForBundleID(NSString *bundleID) {
+    if (bundleID.length == 0) return nil;
+    return [NSString stringWithFormat:@"com.xu.chevronv3.bridge-ready.%014llx",
+                                      CV3StableBundleHash(bundleID)];
+}
+
+static uint64_t CV3ClientBridgeProtocolVersionForBundleID(NSString *bundleID) {
+    NSString *name = CV3BridgeReadyNotificationNameForBundleID(bundleID);
+    if (name.length == 0) return 0;
+
+    int token = -1;
+    if (notify_register_check(name.UTF8String, &token) != NOTIFY_STATUS_OK) return 0;
+    uint64_t version = 0;
+    notify_get_state(token, &version);
+    notify_cancel(token);
+    return version;
+}
+
+static BOOL CV3EnsureFreshClientBridgeBeforeHosting(NSString *bundleID,
+                                                     dispatch_block_t continuation) {
+    if (bundleID.length == 0) return NO;
+    if (!CV3ClientBridgeRelaunchPendingBundleIDs) {
+        CV3ClientBridgeRelaunchPendingBundleIDs = [NSMutableSet set];
+    }
+
+    if ([CV3ClientBridgeRelaunchPendingBundleIDs containsObject:bundleID]) {
+        [CV3ClientBridgeRelaunchPendingBundleIDs removeObject:bundleID];
+        return NO;
+    }
+
+    uint64_t loadedVersion = CV3ClientBridgeProtocolVersionForBundleID(bundleID);
+    if (loadedVersion == CV3RequiredClientBridgeProtocolVersion) return NO;
+
+    [CV3ClientBridgeRelaunchPendingBundleIDs addObject:bundleID];
+    @try {
+        id controller = [CV3ClassNamed(@"SBApplicationController") sharedInstance];
+        SBApplication *application = CV3InvokeObject1(controller,
+                                                      @selector(applicationWithBundleIdentifier:),
+                                                      bundleID);
+        [application _terminateWithReason:1 description:@"Reload ChevronV3VideoBridge"];
+    } @catch (NSException *exception) {
+        CV3LogToFile(@"[VideoBridge] 终止旧客户端失败 %@: %@", bundleID, exception);
+    }
+
+    CV3LogToFile(@"[VideoBridge] 检测到旧客户端协议=%llu，冷启动目标 App: %@",
+                 loadedVersion,
+                 bundleID);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.55 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), continuation);
+    return YES;
 }
 
 __attribute__((unused)) static UIInterfaceOrientation CV3InterfaceOrientationFromDevice(void) {
@@ -1438,6 +1505,62 @@ static void CV3RegisterVideoOrientationBridge(void) {
     }
 }
 
+static NSString *CV3PlaybackTraceEventName(uint8_t event) {
+    switch (event) {
+        case 1: return @"BridgeLoaded";
+        case 2: return @"HostedEnabled";
+        case 3: return @"HostedDisabled";
+        case 4: return @"WorkspaceShieldEnabled";
+        case 5: return @"WorkspaceShieldDisabled";
+        case 10: return @"UIApplicationDelegate.applicationWillResignActive";
+        case 11: return @"UIApplicationDelegate.applicationDidEnterBackground";
+        case 12: return @"UISceneDelegate.sceneWillResignActive";
+        case 13: return @"UISceneDelegate.sceneDidEnterBackground";
+        case 14: return @"_UISceneLifecycleMultiplexer.deactivation";
+        case 15: return @"LifecycleNSNotification";
+        case 20: return @"AVAudioSession.setActive(false)";
+        case 21: return @"AVAudioSession.setActive(false,options)";
+        case 22: return @"AVAudioSessionInterruption";
+        case 30: return @"AVPlayer.pause";
+        case 31: return @"AVPlayer.setRate(0)";
+        case 32: return @"AVPlayer.setRate(0,time,hostTime)";
+        case 33: return @"AVAudioPlayer.pause";
+        case 34: return @"AVAudioPlayer.stop";
+        default: return [NSString stringWithFormat:@"Unknown(%u)", event];
+    }
+}
+
+static void CV3RegisterPlaybackTraceBridge(void) {
+    if (CV3PlaybackTraceNotificationToken >= 0) return;
+    int status = notify_register_dispatch(CV3PlaybackTraceNotification,
+                                          &CV3PlaybackTraceNotificationToken,
+                                          dispatch_get_main_queue(),
+                                          ^(int token) {
+        uint64_t state = 0;
+        if (notify_get_state(token, &state) != NOTIFY_STATUS_OK) return;
+        uint8_t event = (uint8_t)((state >> 56) & 0xFFULL);
+        uint64_t bundleHash = state & 0x00FFFFFFFFFFFFFFULL;
+        NSString *bundleID = nil;
+        for (CV3FloatingAppWindow *window in [floatingWindows copy]) {
+            if (CV3StableBundleHash(window.bundleID) == bundleHash) {
+                bundleID = window.bundleID;
+                break;
+            }
+        }
+        CV3LogToFile(@"[Warning][PlaybackTrace] source=Client event=%@ bundle=%@ hash=%014llx workspaceActive=%d switcherVisible=%d floatingCount=%lu",
+                     CV3PlaybackTraceEventName(event),
+                     bundleID ?: @"UnmappedClient",
+                     bundleHash,
+                     CV3WorkspaceTransitionActive,
+                     CV3SwitcherPresentationActive(),
+                     (unsigned long)floatingWindows.count);
+    });
+    if (status != NOTIFY_STATUS_OK) {
+        CV3PlaybackTraceNotificationToken = -1;
+        CV3LogToFile(@"[Error][PlaybackTrace] Darwin trace registration failed: %d", status);
+    }
+}
+
 static void CV3StabilizeFloatingWindowsForWorkspaceTransition(NSString *reason) {
     if (!floatingWindows || floatingWindows.count == 0) return;
 
@@ -1468,15 +1591,25 @@ static void CV3BeginWorkspaceTransitionProtection(NSString *reason) {
     NSUInteger token = CV3WorkspaceTransitionProtectionToken;
 
     CV3LogToFile(@"[Continuity] 开启 Workspace 转场保护: %@", reason ?: @"Unknown");
+    CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=WorkspaceProtectionBegin reason=%@ switcherVisible=%d",
+                 reason ?: @"Unknown", CV3SwitcherPresentationActive());
     CV3SetClientWorkspaceTransitionShield(YES);
     CV3StabilizeFloatingWindowsForWorkspaceTransition(reason ?: @"Begin");
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (token != CV3WorkspaceTransitionProtectionToken) return;
+        if (CV3SwitcherPresentationActive()) {
+            CV3WorkspaceTransitionActive = YES;
+            CV3SetClientWorkspaceTransitionShield(YES);
+            CV3StabilizeFloatingWindowsForWorkspaceTransition(@"SwitcherStillVisible");
+            CV3LogToFile(@"[Continuity] Switcher 仍可见，取消 1.2 秒保护超时");
+            return;
+        }
         CV3WorkspaceTransitionActive = NO;
         CV3SetClientWorkspaceTransitionShield(NO);
         CV3StabilizeFloatingWindowsForWorkspaceTransition(@"ProtectionTimeout");
         CV3LogToFile(@"[Continuity] Workspace 转场保护超时收尾");
+        CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=WorkspaceProtectionTimeout");
     });
 }
 
@@ -1502,6 +1635,13 @@ static void CV3BeginWorkspaceTransitionProtection(NSString *reason) {
 static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
     if (!floatingWindows || floatingWindows.count == 0) return;
 
+    if (CV3SwitcherPresentationActive()) {
+        CV3WorkspaceTransitionActive = YES;
+        CV3SetClientWorkspaceTransitionShield(YES);
+        CV3StabilizeFloatingWindowsForWorkspaceTransition(reason ?: @"SwitcherVisible");
+        return;
+    }
+
     CV3WorkspaceTransitionProtectionToken++;
     NSUInteger token = CV3WorkspaceTransitionProtectionToken;
 
@@ -1513,6 +1653,8 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
         CV3SetClientWorkspaceTransitionShield(NO);
         CV3StabilizeFloatingWindowsForWorkspaceTransition(@"ProtectionEnd");
         CV3LogToFile(@"[Continuity] 结束 Workspace 转场保护: %@", reason ?: @"Unknown");
+        CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=WorkspaceProtectionEnd reason=%@",
+                     reason ?: @"Unknown");
     });
 }
 
@@ -2561,7 +2703,15 @@ static void CV3HandleSimulatedNotificationRequest(void) {
             CV3LogToFile(@"[NotificationSplit][NativeTest] 收到原生通知请求: %@", bundleID);
             id bulletin = CV3CreateNativeTestBulletin(bundleID);
             if (!bulletin || !CV3PublishBulletinThroughNotificationSource(bulletin)) {
-                CV3LogToFile(@"[NotificationSplit][NativeTest] 发布失败：系统原生通知源不可用");
+                // Keep the preferences test usable even when NotificationCenter has
+                // not materialized a native source yet.  This is a bundle-agnostic
+                // diagnostic entry point and exercises the exact same hosted window
+                // path used by the launcher panel.
+                BOOL opened = CV3OpenBundleInFloatingWindow(bundleID,
+                                                             @"PreferencesDiagnosticFallback");
+                CV3LogToFile(@"[Warning][NotificationSplit][NativeTest] 原生通知源不可用，直接托管 %@ success=%d",
+                             bundleID,
+                             opened);
             }
         } @catch (NSException *exception) {
             CV3LogToFile(@"[NotificationSplit][NativeTest] 处理测试通知异常: %@", exception);
@@ -3821,9 +3971,25 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
 %end
 
 %hook SBMainSwitcherViewController
+- (void)viewWillAppear:(BOOL)animated {
+    CV3MainSwitcherVisible = YES;
+    CV3BeginWorkspaceTransitionProtection(@"SwitcherViewWillAppear");
+    %orig(animated);
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig(animated);
+    CV3SwitcherWindowVisible = NO;
+    CV3MainSwitcherVisible = NO;
+    CV3EndWorkspaceTransitionProtection(@"SwitcherViewDidDisappear");
+}
+
 - (void)setSwitcherWindowVisible:(BOOL)arg1 {
-    if (arg1) {
+    CV3SwitcherWindowVisible = arg1;
+    if (CV3SwitcherPresentationActive()) {
         CV3BeginWorkspaceTransitionProtection(@"SwitcherWindowVisible");
+    } else {
+        CV3EndWorkspaceTransitionProtection(@"SwitcherWindowHidden");
     }
     %orig;
     // 核心：当 Switcher 窗口状态改变时，强制刷新所有分屏窗口的显示状态
@@ -3844,8 +4010,11 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
 }
 
 - (void)_setMainSwitcherVisible:(BOOL)arg1 {
-    if (arg1) {
+    CV3MainSwitcherVisible = arg1;
+    if (CV3SwitcherPresentationActive()) {
         CV3BeginWorkspaceTransitionProtection(@"MainSwitcherVisible");
+    } else {
+        CV3EndWorkspaceTransitionProtection(@"MainSwitcherHidden");
     }
     %orig;
     if (floatingWindows) {
@@ -3883,6 +4052,8 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
                                                                forceLayout:NO];
 
                 if (modified) {
+                    CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=FBSceneSettingsRewritten bundle=%@ transition=%@",
+                                 win.bundleID, arg2 ? @"YES" : @"NO");
                     CV3LogToFile(@"[FBScene] 捕捉到 Settings 更新请求: %@", win.bundleID);
                     %orig(mutableSettings, arg2);
                 } else {
@@ -3920,6 +4091,8 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
                                                                forceLayout:NO];
 
                 if (modified) {
+                    CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=FBSceneSettingsRewrittenWithCompletion bundle=%@ transition=%@",
+                                 win.bundleID, arg2 ? @"YES" : @"NO");
                     CV3LogToFile(@"[FBScene] 捕捉到 Settings 更新请求 (带 completion): %@", win.bundleID);
                     %orig(mutableSettings, arg2, arg3);
                 } else {
@@ -3950,6 +4123,8 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
                     return;
                 }
                 if (arg1 != 2) {
+                    CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=FBSceneContentStateDowngrade bundle=%@ requested=%ld forced=2",
+                                 win.bundleID, (long)arg1);
                     CV3LogToFile(@"[FBScene] 拦截到 contentState 降级 -> %ld，强制恢复为 2: %@", (long)arg1, win.bundleID);
                     arg1 = 2;
                 }
@@ -4011,7 +4186,10 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
 
 %ctor {
     @autoreleasepool {
+        NSLog(@"[ChevronV3] SpringBoard host bridge loaded (protocol=%llx)",
+              CV3RequiredClientBridgeProtocolVersion);
         CV3RegisterVideoOrientationBridge();
+        CV3RegisterPlaybackTraceBridge();
         CV3RegisterSimulatedNotificationBridge();
         %init;
     }
