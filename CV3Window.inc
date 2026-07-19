@@ -664,6 +664,12 @@ static BOOL CV3OpenBundleInFloatingWindow(NSString *bundleID, NSString *reason) 
         return YES;
     }
 
+    if (CV3EnsureFreshClientBridgeBeforeHosting(bundleID, ^{
+        CV3OpenBundleInFloatingWindow(bundleID, reason);
+    })) {
+        return YES;
+    }
+
     CV3FloatingAppWindow *existingWindow = CV3FloatingWindowForBundleID(bundleID);
     if (existingWindow) {
         [existingWindow restoreFromStash];

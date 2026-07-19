@@ -15,7 +15,7 @@ ChevronV3_FRAMEWORKS = UIKit CoreGraphics CoreMotion QuartzCore
 ChevronV3VideoBridge_FILES = CV3VideoBridge.x
 ChevronV3VideoBridge_CFLAGS = -fobjc-arc
 ChevronV3VideoBridge_ARCHS = arm64 arm64e
-ChevronV3VideoBridge_FRAMEWORKS = UIKit AVFAudio
+ChevronV3VideoBridge_FRAMEWORKS = UIKit AVFAudio AVFoundation
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 

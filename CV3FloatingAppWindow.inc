@@ -1260,6 +1260,8 @@ void CV3ToggleExposeMode(void) {
         if (modified) {
             [self.targetScene updateSettings:settings withTransitionContext:nil];
             CV3LogToFile(@"[Continuity] 已稳定分屏前台状态(%@): %@", reason ?: @"Unknown", self.bundleID);
+            CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=SceneForegroundRepaired bundle=%@ reason=%@",
+                         self.bundleID, reason ?: @"Unknown");
         }
 
         if ([self.targetScene respondsToSelector:@selector(_setContentState:)]) {
@@ -2991,6 +2993,8 @@ void CV3ToggleExposeMode(void) {
         NSError *error = nil;
         if ([self.rbsAssertion acquireWithError:&error]) {
             CV3LogToFile(@"[Immortality] 已动态更新 %@ 优先级断言 -> %@", self.bundleID, attributeName);
+            CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=RBSAssertionAcquired bundle=%@ attribute=%@",
+                         self.bundleID, attributeName);
         } else {
             CV3LogToFile(@"[Error] RBSAssertion (%@) 更新失败: %@", attributeName, error);
         }
@@ -3715,6 +3719,8 @@ void CV3ToggleExposeMode(void) {
                 NSError *error = nil;
                 if ([self.rbsAssertion acquireWithError:&error]) {
                     CV3LogToFile(@"[Immortality] 成功为 %@ 注入前台优先级断连 (RBSAssertion)", self.bundleID);
+                    CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=RBSAssertionAcquired bundle=%@ attribute=UserInteractive",
+                                 self.bundleID);
                 } else {
                     CV3LogToFile(@"[Error] RBSAssertion 注入失败: %@", error);
                 }
