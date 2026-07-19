@@ -3230,6 +3230,12 @@ void CV3ToggleExposeMode(void) {
 
     CGRect targetIconFrameInWindow = CGRectInset(targetFrameInWindow, kCV3StashIconInset, kCV3StashIconInset);
     [self animateGenieSurfaceImage:genieImage sourceFrame:snapshotStartFrame iconFrame:targetIconFrameInWindow presenting:NO completion:^{
+        // The icon fade used to outlive the genie animation by about 120 ms.
+        // At this point the UIWindow changes from its full frame to 54x54, so an
+        // outstanding center animation would continue in the old coordinate
+        // space and visibly push the icon downward before the stack pass fixed it.
+        [self.stashGrabber.layer removeAllAnimations];
+        [self.appIconMiniView.layer removeAllAnimations];
         self.frame = targetFrame;
         [self visualShadowLayer].shadowOpacity = 0.0;
         [self visualShadowLayer].shadowRadius = 0.0;
@@ -3245,19 +3251,15 @@ void CV3ToggleExposeMode(void) {
         }
     }];
 
-    [UIView animateKeyframesWithDuration:0.28 delay:0.18 options:UIViewKeyframeAnimationOptionCalculationModeCubic | UIViewAnimationOptionBeginFromCurrentState animations:^{
-        [UIView addKeyframeWithRelativeStartTime:0.45 relativeDuration:0.20 animations:^{
-            self.stashGrabber.alpha = 0.72;
-            self.appIconMiniView.transform = CGAffineTransformMakeScale(0.88, 0.88);
-        }];
-        [UIView addKeyframeWithRelativeStartTime:0.62 relativeDuration:0.38 animations:^{
-            self.stashGrabber.alpha = 1.0;
-            self.stashGrabber.bounds = CGRectMake(0, 0, kCV3StashIconSize, kCV3StashIconSize);
-            self.stashGrabber.center = CGPointMake(CGRectGetMidX(targetFrameInWindow), CGRectGetMidY(targetFrameInWindow));
-            [self applyStashedGrabberOrientation];
-            [self updateStashIconAppearance];
-            self.appIconMiniView.transform = CGAffineTransformIdentity;
-        }];
+    // Keep this animation inside the genie's 0.34 s lifetime and animate only
+    // visual properties. Geometry was established above and must not continue
+    // animating after the window switches coordinate spaces in the completion.
+    [UIView animateWithDuration:0.16
+                          delay:0.18
+                        options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{
+        self.stashGrabber.alpha = 1.0;
+        self.appIconMiniView.transform = CGAffineTransformIdentity;
     } completion:nil];
 }
 
@@ -3929,6 +3931,15 @@ void CV3ToggleExposeMode(void) {
 
     stackIndex = [sameSideStashedWindows indexOfObject:self];
     if (stackIndex == NSNotFound) stackIndex = 0;
+
+    // A single icon has no stacking conflict. Its frame was already clamped
+    // using the same safe area when the hide transition began; recalculating it
+    // after an App Switcher -> Home transition can observe a different transient
+    // safe-area value and produces a second, visible position correction.
+    if (sameSideStashedWindows.count <= 1) {
+        [self normalizeStashedGrabberLayout];
+        return;
+    }
 
     CGFloat desiredTop = CGFLOAT_MAX;
     for (CV3FloatingAppWindow *win in sameSideStashedWindows) {
