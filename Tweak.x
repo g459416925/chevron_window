@@ -46,6 +46,9 @@
 - (void)launchFromLocation:(NSInteger)location context:(id)context;
 @end
 
+@interface SBIconView : UIView
+@end
+
 @interface SBMainSwitcherGestureCoordinator : NSObject
 - (void)_lockOrientation;
 - (void)_releaseOrientationLock;
@@ -398,7 +401,7 @@ struct {
 
 static const CGFloat kCV3PanelJellyStrength = 1.0;
 static const NSTimeInterval kCV3PanelPresentDuration = 0.62;
-static const NSTimeInterval kCV3PanelDismissDuration = 0.30;
+static const NSTimeInterval kCV3PanelDismissDuration = 0.42;
 static const CGFloat kCV3PanelTriggerDistance = 45.0;
 
 #pragma mark - Custom Cell
@@ -712,6 +715,8 @@ static BOOL CV3WorkspaceTransitionActive = NO;
 static NSUInteger CV3WorkspaceTransitionProtectionToken = 0;
 static BOOL CV3SwitcherWindowVisible = NO;
 static BOOL CV3MainSwitcherVisible = NO;
+static const char *CV3HostGenerationNotification = "com.xu.chevronv3.host-generation";
+static uint32_t CV3HostGeneration = 0;
 
 static BOOL CV3SwitcherPresentationActive(void) {
     return CV3SwitcherWindowVisible || CV3MainSwitcherVisible;
@@ -757,8 +762,9 @@ static uint64_t CV3StableBundleHash(NSString *bundleID) {
     return hash & 0x00FFFFFFFFFFFFFFULL;
 }
 
-static const uint64_t CV3RequiredClientBridgeProtocolVersion = 0x2026071904ULL;
+static const uint64_t CV3RequiredClientBridgeProtocolVersion = 0x2026072001ULL;
 static NSMutableSet<NSString *> *CV3ClientBridgeRelaunchPendingBundleIDs = nil;
+static NSMutableSet<NSString *> *CV3ClientBridgeRelaunchAuthorizedBundleIDs = nil;
 
 static NSString *CV3BridgeReadyNotificationNameForBundleID(NSString *bundleID) {
     if (bundleID.length == 0) return nil;
@@ -784,10 +790,17 @@ static BOOL CV3EnsureFreshClientBridgeBeforeHosting(NSString *bundleID,
     if (!CV3ClientBridgeRelaunchPendingBundleIDs) {
         CV3ClientBridgeRelaunchPendingBundleIDs = [NSMutableSet set];
     }
+    if (!CV3ClientBridgeRelaunchAuthorizedBundleIDs) {
+        CV3ClientBridgeRelaunchAuthorizedBundleIDs = [NSMutableSet set];
+    }
+
+    if ([CV3ClientBridgeRelaunchAuthorizedBundleIDs containsObject:bundleID]) {
+        [CV3ClientBridgeRelaunchAuthorizedBundleIDs removeObject:bundleID];
+        return NO;
+    }
 
     if ([CV3ClientBridgeRelaunchPendingBundleIDs containsObject:bundleID]) {
-        [CV3ClientBridgeRelaunchPendingBundleIDs removeObject:bundleID];
-        return NO;
+        return YES;
     }
 
     uint64_t loadedVersion = CV3ClientBridgeProtocolVersionForBundleID(bundleID);
@@ -808,7 +821,11 @@ static BOOL CV3EnsureFreshClientBridgeBeforeHosting(NSString *bundleID,
                  loadedVersion,
                  bundleID);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.55 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), continuation);
+                   dispatch_get_main_queue(), ^{
+        [CV3ClientBridgeRelaunchPendingBundleIDs removeObject:bundleID];
+        [CV3ClientBridgeRelaunchAuthorizedBundleIDs addObject:bundleID];
+        if (continuation) continuation();
+    });
     return YES;
 }
 
@@ -1294,13 +1311,25 @@ static void CV3PostHostedStateValue(NSString *bundleID, uint64_t state) {
                                   CV3StableBundleHash(bundleID)];
     int token = -1;
     if (notify_register_check(notificationName.UTF8String, &token) != NOTIFY_STATUS_OK) return;
-    notify_set_state(token, state);
+    uint64_t encodedState = ((uint64_t)CV3HostGeneration << 32) | (state & 0xFFFFFFFFULL);
+    notify_set_state(token, encodedState);
     notify_post(notificationName.UTF8String);
     notify_cancel(token);
 }
 
 static void CV3PostHostedState(NSString *bundleID, BOOL hosted) {
     CV3PostHostedStateValue(bundleID, hosted ? 1 : 0);
+}
+
+static void CV3PublishHostGeneration(void) {
+    CV3HostGeneration = arc4random();
+    if (CV3HostGeneration == 0) CV3HostGeneration = 1;
+
+    int token = -1;
+    if (notify_register_check(CV3HostGenerationNotification, &token) != NOTIFY_STATUS_OK) return;
+    notify_set_state(token, CV3HostGeneration);
+    notify_post(CV3HostGenerationNotification);
+    notify_cancel(token);
 }
 
 // --- Custom Resize Handle with Expanded Hit Area ---
@@ -1625,10 +1654,100 @@ static void CV3BeginWorkspaceTransitionProtection(NSString *reason) {
 }
 %end
 
+static CV3FloatingAppWindow *CV3HostedFloatingWindowForBundleID(NSString *bundleID) {
+    if (bundleID.length == 0 || !floatingWindows) return nil;
+    for (id object in [floatingWindows copy]) {
+        if (![object isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+        CV3FloatingAppWindow *window = (CV3FloatingAppWindow *)object;
+        if (!window.isClosing && [window.bundleID isEqualToString:bundleID]) return window;
+    }
+    return nil;
+}
+
+static BOOL CV3FocusHostedFloatingWindowForBundleID(NSString *bundleID, NSString *source) {
+    if (![NSThread isMainThread]) {
+        __block BOOL handled = NO;
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            handled = CV3FocusHostedFloatingWindowForBundleID(bundleID, source);
+        });
+        return handled;
+    }
+
+    CV3FloatingAppWindow *window = CV3HostedFloatingWindowForBundleID(bundleID);
+    if (!window) return NO;
+
+    CV3ExitExposeModeIfNeeded(window, YES);
+    if (window.isStashed) [window restoreFromStash];
+    [window promoteFloatingWindowInZOrder];
+    [window setWindowFocused:YES];
+    CV3LogToFile(@"[LaunchGuard] 已阻止全屏启动并聚焦分屏: %@ source=%@",
+                 bundleID, source ?: @"Unknown");
+    return YES;
+}
+
+static NSString *CV3BundleIdentifierFromIconObject(id icon) {
+    if (!icon) return nil;
+    NSArray<NSString *> *selectorNames = @[
+        @"applicationBundleID", @"bundleIdentifier", @"leafIdentifier", @"displayIdentifier"
+    ];
+    for (NSString *selectorName in selectorNames) {
+        id value = CV3InvokeObject(icon, NSSelectorFromString(selectorName));
+        if ([value isKindOfClass:[NSString class]] && [value length] > 0) return value;
+    }
+    return nil;
+}
+
+static id CV3IconFromIconViewObject(id iconView) {
+    for (NSString *selectorName in @[@"icon", @"representedIcon"]) {
+        id icon = CV3InvokeObject(iconView, NSSelectorFromString(selectorName));
+        if (icon) return icon;
+    }
+    return nil;
+}
+
+static BOOL CV3InterceptHostedIconObject(id icon, NSString *source) {
+    return CV3FocusHostedFloatingWindowForBundleID(CV3BundleIdentifierFromIconObject(icon), source);
+}
+
 %hook SBIcon
 - (void)launchFromLocation:(NSInteger)location context:(id)context {
+    if (CV3InterceptHostedIconObject(self, @"SBIcon.launchFromLocation:context:")) return;
     CV3BeginWorkspaceTransitionProtection(@"IconLaunchBegan");
     %orig(location, context);
+}
+
+- (void)launchFromLocation:(NSInteger)location {
+    if (CV3InterceptHostedIconObject(self, @"SBIcon.launchFromLocation:")) return;
+    CV3BeginWorkspaceTransitionProtection(@"IconLaunchBegan");
+    %orig(location);
+}
+
+- (void)launch {
+    if (CV3InterceptHostedIconObject(self, @"SBIcon.launch")) return;
+    CV3BeginWorkspaceTransitionProtection(@"IconLaunchBegan");
+    %orig;
+}
+%end
+
+%hook SBIconView
+- (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event {
+    if (CV3InterceptHostedIconObject(CV3IconFromIconViewObject(self), @"SBIconView.touch")) return;
+    %orig(touches, event);
+}
+
+- (void)touchesMoved:(NSSet *)touches withEvent:(UIEvent *)event {
+    if (CV3HostedFloatingWindowForBundleID(CV3BundleIdentifierFromIconObject(CV3IconFromIconViewObject(self)))) return;
+    %orig(touches, event);
+}
+
+- (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event {
+    if (CV3HostedFloatingWindowForBundleID(CV3BundleIdentifierFromIconObject(CV3IconFromIconViewObject(self)))) return;
+    %orig(touches, event);
+}
+
+- (void)touchesCancelled:(NSSet *)touches withEvent:(UIEvent *)event {
+    if (CV3HostedFloatingWindowForBundleID(CV3BundleIdentifierFromIconObject(CV3IconFromIconViewObject(self)))) return;
+    %orig(touches, event);
 }
 %end
 
@@ -2921,6 +3040,7 @@ static BOOL CV3IsDefaultBulletinAction(id action, id bulletin) {
 %hook LSApplicationWorkspace
 - (BOOL)openApplicationWithBundleID:(NSString *)bundleID {
     if (CV3RedirectPendingNotificationLaunch(bundleID)) return YES;
+    if (CV3FocusHostedFloatingWindowForBundleID(bundleID, @"LSApplicationWorkspace.openApplication")) return YES;
     return %orig(bundleID);
 }
 %end
@@ -3145,16 +3265,10 @@ static void CV3ApplySceneRotationContextToProject(CV3SceneRotationContext contex
 
 %hook SBMainWorkspaceTransitionRequest
 - (BOOL)isAppearingBackgrounded {
-    if (floatingWindows && floatingWindows.count > 0) {
-        return NO; // 核心：防止系统认为转换请求会导致应用进入后台
-    }
     return %orig;
 }
 
 - (BOOL)isAppearingInBackground {
-    if (floatingWindows && floatingWindows.count > 0) {
-        return NO; 
-    }
     return %orig;
 }
 
@@ -3222,19 +3336,6 @@ static void CV3ApplySceneRotationContextToProject(CV3SceneRotationContext contex
 - (BOOL)containsItemWithBundleIdentifier:(NSString *)bundleIdentifier;
 @end
 
-%hook SBAppLayout
-- (BOOL)containsItemWithBundleIdentifier:(NSString *)bid {
-    if (floatingWindows && floatingWindows.count > 0) {
-        for (CV3FloatingAppWindow *win in floatingWindows) {
-            if ([bid isEqualToString:win.bundleID] && !win.isClosing) {
-                return YES; // 核心：欺骗系统，让其认为分屏应用始终是当前 Layout 的一部分，从而避免任何形式的自动停用
-            }
-        }
-    }
-    return %orig;
-}
-%end
-
 static BOOL CV3SpoofPadIdiomDuringSwitcherLoad = NO;
 
 %hook SBAppSwitcherSettings
@@ -3283,185 +3384,79 @@ static BOOL CV3SpoofPadIdiomDuringSwitcherLoad = NO;
 @interface SBHomeGestureSwitcherModifier : SBSwitcherModifier
 @end
 
-%hook SBHomeGestureSwitcherModifier
-- (double)scaleForIndex:(unsigned long long)index {
-    if (floatingWindows && floatingWindows.count > 0) {
-        if ([self respondsToSelector:@selector(appLayouts)]) {
-            NSArray *layouts = [self appLayouts];
-            if (index < layouts.count) {
-                SBAppLayout *layout = layouts[index];
-                if ([layout respondsToSelector:@selector(containsItemWithBundleIdentifier:)]) {
-                    for (CV3FloatingAppWindow *win in floatingWindows) {
-                        if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
-                            return 1.0;
-                        }
-                    }
-                }
+static BOOL CV3SwitcherObjectMatchesHostedFloatingWindow(id object) {
+    if (!object || !floatingWindows || floatingWindows.count == 0) return NO;
+
+    @try {
+        for (CV3FloatingAppWindow *window in [floatingWindows copy]) {
+            if (![window isKindOfClass:[CV3FloatingAppWindow class]] || window.isClosing) continue;
+            if (CV3TargetRespondsToSelector(object, @selector(containsItemWithBundleIdentifier:)) &&
+                ((BOOL (*)(id, SEL, id))objc_msgSend)(object,
+                                                     @selector(containsItemWithBundleIdentifier:),
+                                                     window.bundleID)) {
+                return YES;
             }
         }
+    } @catch (NSException *exception) {
+        CV3LogToFile(@"[Switcher] 卡片身份解析失败: %@", exception);
     }
+    return NO;
+}
+
+static BOOL CV3SwitcherIndexMatchesHostedFloatingWindow(id modifier, NSUInteger index) {
+    NSArray *layouts = CV3InvokeObject(modifier, @selector(appLayouts));
+    if (![layouts isKindOfClass:[NSArray class]] || index >= layouts.count) return NO;
+    return CV3SwitcherObjectMatchesHostedFloatingWindow(layouts[index]);
+}
+
+%hook SBHomeGestureSwitcherModifier
+- (double)scaleForIndex:(unsigned long long)index {
+    if (CV3SwitcherIndexMatchesHostedFloatingWindow(self, index)) return 0.01;
     return %orig;
 }
 
 - (double)opacityForIndex:(unsigned long long)index {
-    if (floatingWindows && floatingWindows.count > 0) {
-        if ([self respondsToSelector:@selector(appLayouts)]) {
-            NSArray *layouts = [self appLayouts];
-            if (index < layouts.count) {
-                SBAppLayout *layout = layouts[index];
-                if ([layout respondsToSelector:@selector(containsItemWithBundleIdentifier:)]) {
-                    for (CV3FloatingAppWindow *win in floatingWindows) {
-                        if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
-                            return 1.0;
-                        }
-                    }
-                }
-            }
-        }
-    }
+    if (CV3SwitcherIndexMatchesHostedFloatingWindow(self, index)) return 0.0;
     return %orig;
 }
 
 - (double)dimmingAlphaForIndex:(unsigned long long)index {
-    if (floatingWindows && floatingWindows.count > 0) {
-        if ([self respondsToSelector:@selector(appLayouts)]) {
-            NSArray *layouts = [self appLayouts];
-            if (index < layouts.count) {
-                SBAppLayout *layout = layouts[index];
-                if ([layout respondsToSelector:@selector(containsItemWithBundleIdentifier:)]) {
-                    for (CV3FloatingAppWindow *win in floatingWindows) {
-                        if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
-                            return 0.0; // 禁止变暗
-                        }
-                    }
-                }
-            }
-        }
-    }
+    if (CV3SwitcherIndexMatchesHostedFloatingWindow(self, index)) return 0.0;
     return %orig;
 }
 
 - (double)cornerRadiusForIndex:(unsigned long long)index {
-    if (floatingWindows && floatingWindows.count > 0) {
-        if ([self respondsToSelector:@selector(appLayouts)]) {
-            NSArray *layouts = [self appLayouts];
-            if (index < layouts.count) {
-                SBAppLayout *layout = layouts[index];
-                if ([layout respondsToSelector:@selector(containsItemWithBundleIdentifier:)]) {
-                    for (CV3FloatingAppWindow *win in floatingWindows) {
-                        if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
-                            // 保持窗口原生圆角，防止系统在 Home 手势时强加巨大的圆角
-                            return CV3Style.cornerRadius;
-                        }
-                    }
-                }
-            }
-        }
-    }
+    if (CV3SwitcherIndexMatchesHostedFloatingWindow(self, index)) return 0.0;
     return %orig;
 }
 
 - (double)shadowOpacityForIndex:(unsigned long long)index {
-    if (floatingWindows && floatingWindows.count > 0) {
-        if ([self respondsToSelector:@selector(appLayouts)]) {
-            NSArray *layouts = [self appLayouts];
-            if (index < layouts.count) {
-                SBAppLayout *layout = layouts[index];
-                if ([layout respondsToSelector:@selector(containsItemWithBundleIdentifier:)]) {
-                    for (CV3FloatingAppWindow *win in floatingWindows) {
-                        if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
-                            return 0.4; // 维持我们自己的阴影透明度
-                        }
-                    }
-                }
-            }
-        }
-    }
+    if (CV3SwitcherIndexMatchesHostedFloatingWindow(self, index)) return 0.0;
     return %orig;
 }
 
 - (BOOL)isItemResizingAllowedForIndex:(unsigned long long)index {
-    if (floatingWindows && floatingWindows.count > 0) {
-        if ([self respondsToSelector:@selector(appLayouts)]) {
-            NSArray *layouts = [self appLayouts];
-            if (index < layouts.count) {
-                SBAppLayout *layout = layouts[index];
-                for (CV3FloatingAppWindow *win in floatingWindows) {
-                    if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
-                        return NO; // 禁止系统在手势期间调整分屏 App 的尺寸
-                    }
-                }
-            }
-        }
-    }
+    if (CV3SwitcherIndexMatchesHostedFloatingWindow(self, index)) return NO;
     return %orig;
 }
 
 - (double)blurViewIconScaleForIndex:(unsigned long long)index {
-    if (floatingWindows && floatingWindows.count > 0) {
-        if ([self respondsToSelector:@selector(appLayouts)]) {
-            NSArray *layouts = [self appLayouts];
-            if (index < layouts.count) {
-                SBAppLayout *layout = layouts[index];
-                for (CV3FloatingAppWindow *win in floatingWindows) {
-                    if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
-                        return 0.0; // 彻底禁止系统图标模糊层
-                    }
-                }
-            }
-        }
-    }
+    if (CV3SwitcherIndexMatchesHostedFloatingWindow(self, index)) return 0.0;
     return %orig;
 }
 
 - (BOOL)isWallpaperRequiredForIndex:(unsigned long long)index {
-    if (floatingWindows && floatingWindows.count > 0) {
-        if ([self respondsToSelector:@selector(appLayouts)]) {
-            NSArray *layouts = [self appLayouts];
-            if (index < layouts.count) {
-                SBAppLayout *layout = layouts[index];
-                for (CV3FloatingAppWindow *win in floatingWindows) {
-                    if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
-                        return NO; // 分屏应用不需要系统壁纸背景
-                    }
-                }
-            }
-        }
-    }
+    if (CV3SwitcherIndexMatchesHostedFloatingWindow(self, index)) return NO;
     return %orig;
 }
 
 - (double)titleOpacityForIndex:(unsigned long long)index {
-    if (floatingWindows && floatingWindows.count > 0) {
-        if ([self respondsToSelector:@selector(appLayouts)]) {
-            NSArray *layouts = [self appLayouts];
-            if (index < layouts.count) {
-                SBAppLayout *layout = layouts[index];
-                for (CV3FloatingAppWindow *win in floatingWindows) {
-                    if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
-                        return 0.0; // 隐藏系统在转场时强加的标题
-                    }
-                }
-            }
-        }
-    }
+    if (CV3SwitcherIndexMatchesHostedFloatingWindow(self, index)) return 0.0;
     return %orig;
 }
 
 - (BOOL)shouldUseWallpaperGradientTreatmentForIndex:(unsigned long long)index {
-    if (floatingWindows && floatingWindows.count > 0) {
-        if ([self respondsToSelector:@selector(appLayouts)]) {
-            NSArray *layouts = [self appLayouts];
-            if (index < layouts.count) {
-                SBAppLayout *layout = layouts[index];
-                for (CV3FloatingAppWindow *win in floatingWindows) {
-                    if (!win.isClosing && [layout containsItemWithBundleIdentifier:win.bundleID]) {
-                        return NO; // 禁止系统渐变压制
-                    }
-                }
-            }
-        }
-    }
+    if (CV3SwitcherIndexMatchesHostedFloatingWindow(self, index)) return NO;
     return %orig;
 }
 %end
@@ -3491,6 +3486,30 @@ static BOOL CV3SpoofPadIdiomDuringSwitcherLoad = NO;
     %orig;
 }
 %end
+
+static BOOL CV3FocusHostedLaunchTargetFromObject(id request, NSString *source) {
+    if (!request || !floatingWindows || floatingWindows.count == 0) return NO;
+
+    NSArray<NSString *> *targetSelectors = @[
+        @"activatingEntities", @"activatingApps", @"toEntity",
+        @"targetEntity", @"destinationEntity", @"activatingDisplayItem",
+        @"targetDisplayItem"
+    ];
+    for (NSString *selectorName in targetSelectors) {
+        id target = CV3InvokeObject(request, NSSelectorFromString(selectorName));
+        if (!target) continue;
+        NSArray *candidates = nil;
+        if ([target isKindOfClass:[NSArray class]]) candidates = target;
+        else if ([target isKindOfClass:[NSSet class]]) candidates = [target allObjects];
+        else candidates = @[target];
+
+        for (id candidate in candidates) {
+            NSString *bundleID = CV3BundleIdentifierFromWorkspaceObject(candidate);
+            if (CV3FocusHostedFloatingWindowForBundleID(bundleID, source)) return YES;
+        }
+    }
+    return NO;
+}
 
 %hook SBMainWorkspace
 - (NSSet *)activeDisplayItems {
@@ -3558,6 +3577,7 @@ static BOOL CV3SpoofPadIdiomDuringSwitcherLoad = NO;
         CV3LogToFile(@"[Workspace] 执行转换请求, Source: %ld", (long)[(SBMainWorkspaceTransitionRequest *)arg1 source]);
     }
     if (CV3RedirectPendingNotificationTransition(arg1, @"SBMainWorkspace.executeTransitionRequest")) return;
+    if (CV3FocusHostedLaunchTargetFromObject(arg1, @"SBMainWorkspace.executeTransitionRequest")) return;
     CV3BeginWorkspaceTransitionProtection(@"ExecuteTransitionRequest");
     %orig(arg1);
 }
@@ -3601,7 +3621,6 @@ static BOOL CV3SpoofPadIdiomDuringSwitcherLoad = NO;
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if ([win isKindOfClass:[CV3FloatingAppWindow class]]) {
                 [win setHidden:NO];
-                [win makeKeyAndVisible];
                 win.windowLevel = CV3Style.floatingApp;
             }
         }
@@ -3685,6 +3704,21 @@ static BOOL CV3SpoofPadIdiomDuringSwitcherLoad = NO;
 %end
 
 %hook SBIconController
+- (void)launchIcon:(id)icon fromLocation:(id)location {
+    if (CV3InterceptHostedIconObject(icon, @"SBIconController.launchIcon:fromLocation:")) return;
+    %orig(icon, location);
+}
+
+- (void)_launchIcon:(id)icon fromLocation:(id)location {
+    if (CV3InterceptHostedIconObject(icon, @"SBIconController._launchIcon:fromLocation:")) return;
+    %orig(icon, location);
+}
+
+- (void)launchIcon:(id)icon {
+    if (CV3InterceptHostedIconObject(icon, @"SBIconController.launchIcon:")) return;
+    %orig(icon);
+}
+
 - (BOOL)isAppLibraryAllowed {
     return NO;
 }
@@ -3719,6 +3753,8 @@ static BOOL CV3SpoofPadIdiomDuringSwitcherLoad = NO;
     // take over the screen. The short-lived, bundle-matched token prevents
     // ordinary app launches from being affected.
     if (!suspended && CV3RedirectPendingNotificationLaunch(identifier)) return YES;
+    if (!suspended && CV3FocusHostedFloatingWindowForBundleID(identifier,
+                                                               @"SpringBoard.launchApplication")) return YES;
 
     if (!suspended) {
         CV3BeginWorkspaceTransitionProtection(@"ApplicationLaunchBegan");
@@ -3997,7 +4033,6 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
         for (CV3FloatingAppWindow *win in floatingWindows) {
             if ([win isKindOfClass:[CV3FloatingAppWindow class]] && !win.isClosing) {
                 [win setHidden:NO];
-                [win makeKeyAndVisible];
                 win.windowLevel = CV3Style.floatingApp;
                 if (CV3WorkspaceTransitionActive || arg1) {
                     [win stabilizeForegroundForWorkspaceTransition:@"SwitcherWindowVisible"];
@@ -4188,6 +4223,7 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
     @autoreleasepool {
         NSLog(@"[ChevronV3] SpringBoard host bridge loaded (protocol=%llx)",
               CV3RequiredClientBridgeProtocolVersion);
+        CV3PublishHostGeneration();
         CV3RegisterVideoOrientationBridge();
         CV3RegisterPlaybackTraceBridge();
         CV3RegisterSimulatedNotificationBridge();
