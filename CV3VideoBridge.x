@@ -7,14 +7,16 @@
 
 static const char *CV3VideoOrientationNotification = "com.xu.chevronv3.video-orientation";
 static const char *CV3PlaybackTraceNotification = "com.xu.chevronv3.playback-trace";
+static const char *CV3HostGenerationNotification = "com.xu.chevronv3.host-generation";
 static int CV3VideoOrientationNotificationToken = -1;
 static int CV3PlaybackTraceNotificationToken = -1;
 static UIInterfaceOrientation CV3RequestedInterfaceOrientation = UIInterfaceOrientationUnknown;
 static int CV3HostedStateNotificationToken = -1;
+static int CV3HostGenerationNotificationToken = -1;
 static BOOL CV3ApplicationIsChevronHosted = NO;
 static BOOL CV3WorkspaceTransitionShieldActive = NO;
 static NSTimeInterval CV3PlaybackTransitionGraceDeadline = 0;
-static const uint64_t CV3ClientBridgeProtocolVersion = 0x2026071904ULL;
+static const uint64_t CV3ClientBridgeProtocolVersion = 0x2026072001ULL;
 
 typedef NS_ENUM(uint8_t, CV3PlaybackTraceEvent) {
     CV3PlaybackTraceBridgeLoaded = 1,
@@ -93,10 +95,21 @@ static void CV3PublishBridgeReadyState(void) {
 static void CV3RefreshHostedState(int token) {
     uint64_t state = 0;
     if (token >= 0 && notify_get_state(token, &state) == NOTIFY_STATUS_OK) {
+        uint64_t hostGeneration = 0;
+        int generationToken = -1;
+        if (notify_register_check(CV3HostGenerationNotification, &generationToken) == NOTIFY_STATUS_OK) {
+            notify_get_state(generationToken, &hostGeneration);
+            notify_cancel(generationToken);
+        }
+        uint32_t stateGeneration = (uint32_t)(state >> 32);
+        uint32_t currentGeneration = (uint32_t)hostGeneration;
+        uint64_t flags = (stateGeneration != 0 && stateGeneration == currentGeneration)
+            ? (state & 0xFFFFFFFFULL)
+            : 0;
         BOOL previousShield = CV3WorkspaceTransitionShieldActive;
         BOOL previousHosted = CV3ApplicationIsChevronHosted;
-        CV3ApplicationIsChevronHosted = (state & 1) != 0;
-        CV3WorkspaceTransitionShieldActive = (state & 2) != 0;
+        CV3ApplicationIsChevronHosted = (flags & 1) != 0;
+        CV3WorkspaceTransitionShieldActive = (flags & 2) != 0;
         if (previousHosted != CV3ApplicationIsChevronHosted) {
             CV3PostPlaybackTrace(CV3ApplicationIsChevronHosted
                                  ? CV3PlaybackTraceHostedEnabled
@@ -365,7 +378,7 @@ static BOOL CV3ControllerLikelyOwnsFullscreenVideo(UIViewController *controller)
 
 %hook AVAudioSession
 - (BOOL)setActive:(BOOL)active error:(NSError **)outError {
-    if (!active && CV3ApplicationIsChevronHosted) {
+    if (!active && CV3ShouldProtectHostedPlayback()) {
         CV3PostPlaybackTrace(CV3PlaybackTraceAudioSessionDeactivate);
         return YES;
     }
@@ -373,7 +386,7 @@ static BOOL CV3ControllerLikelyOwnsFullscreenVideo(UIViewController *controller)
 }
 
 - (BOOL)setActive:(BOOL)active withOptions:(AVAudioSessionSetActiveOptions)options error:(NSError **)outError {
-    if (!active && CV3ApplicationIsChevronHosted) {
+    if (!active && CV3ShouldProtectHostedPlayback()) {
         CV3PostPlaybackTrace(CV3PlaybackTraceAudioSessionDeactivateWithOptions);
         return YES;
     }
@@ -522,6 +535,12 @@ withApplicationOfDeactivationReasons:(NSUInteger)reasons
             }) == NOTIFY_STATUS_OK) {
             CV3RefreshHostedState(CV3HostedStateNotificationToken);
         }
+        notify_register_dispatch(CV3HostGenerationNotification,
+                                 &CV3HostGenerationNotificationToken,
+                                 dispatch_get_main_queue(),
+                                 ^(__unused int token) {
+            CV3RefreshHostedState(CV3HostedStateNotificationToken);
+        });
         %init;
         dispatch_async(dispatch_get_main_queue(), ^{
             CV3InstallLifecycleDelegateHooks();

@@ -2,8 +2,11 @@
 - (id)applicationSceneEntity;
 @end
 
-static NSString *CV3BundleIdentifierFromWorkspaceObject(id object) {
-    if (!object) return nil;
+static NSString *CV3BundleIdentifierFromWorkspaceObjectVisited(id object,
+                                                               NSHashTable *visited,
+                                                               NSUInteger depth) {
+    if (!object || depth > 12 || [visited containsObject:object]) return nil;
+    [visited addObject:object];
 
     NSArray *selectors = @[
         @"bundleIdentifier",
@@ -35,12 +38,19 @@ static NSString *CV3BundleIdentifierFromWorkspaceObject(id object) {
     for (NSString *selectorName in nestedSelectors) {
         id nestedObject = CV3InvokeObject(object, NSSelectorFromString(selectorName));
         if (nestedObject && nestedObject != object) {
-            NSString *bundleID = CV3BundleIdentifierFromWorkspaceObject(nestedObject);
+            NSString *bundleID = CV3BundleIdentifierFromWorkspaceObjectVisited(nestedObject,
+                                                                               visited,
+                                                                               depth + 1);
             if (bundleID.length > 0) return bundleID;
         }
     }
 
     return nil;
+}
+
+static NSString *CV3BundleIdentifierFromWorkspaceObject(id object) {
+    NSHashTable *visited = [NSHashTable hashTableWithOptions:NSHashTableObjectPointerPersonality];
+    return CV3BundleIdentifierFromWorkspaceObjectVisited(object, visited, 0);
 }
 
 static BOOL CV3WorkspaceEntityMatchesFloatingWindow(id entity, NSString **matchedBundleID) {
