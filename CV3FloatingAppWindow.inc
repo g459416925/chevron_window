@@ -355,12 +355,11 @@ static void CV3LayoutExposeWindowsAnimated(BOOL animated) {
 
     if (active) {
         [self validateNow:@"HostedSessionActivated"];
-        self.continuityTimer = [NSTimer scheduledTimerWithTimeInterval:0.15
+        self.continuityTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
                                                                target:self
                                                              selector:@selector(continuityTimerFired:)
                                                              userInfo:nil
                                                               repeats:YES];
-        [[NSRunLoop mainRunLoop] addTimer:self.continuityTimer forMode:NSRunLoopCommonModes];
     }
 }
 

@@ -954,7 +954,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         [defaults synchronize];
     });
 
-    CV3HidePanelImmediately(self);
+    [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
     CV3OpenApplicationFast(bid, [NSString stringWithFormat:@"LauncherOpen:%@", bid]);
 }
 
@@ -3003,16 +3003,35 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         // transformed frame, which previously produced visible edge trails.
         self.panelContainer.layer.shouldRasterize = YES;
         self.panelContainer.layer.rasterizationScale = [UIScreen mainScreen].scale;
-        CGAffineTransform dismissTransform = CGAffineTransformScale(self.panelContainer.transform, 0.985, 0.985);
+        CGAffineTransform baseTransform = self.panelContainer.transform;
+        CGAffineTransform settleTransform = CGAffineTransformScale(baseTransform, 1.008, 1.008);
+        CGAffineTransform dismissTransform = CGAffineTransformScale(baseTransform, 0.94, 0.94);
+        CGPoint dismissCenter = self.panelContainer.center;
+        CGPoint edgePoint = self.lastTriggerPoint;
+        CGFloat dx = edgePoint.x - dismissCenter.x;
+        CGFloat dy = edgePoint.y - dismissCenter.y;
+        CGFloat distance = sqrt(dx * dx + dy * dy);
+        if (distance > 1.0) {
+            dismissCenter.x += (dx / distance) * 14.0;
+            dismissCenter.y += (dy / distance) * 14.0;
+        }
 
-        [UIView animateWithDuration:kCV3PanelDismissDuration
-                              delay:0
-                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseInOut
-                         animations:^{
-            self.backgroundColor = [UIColor clearColor];
-            self.panelContainer.alpha = 0;
-            self.panelContainer.transform = dismissTransform;
-            self.panelContainer.layer.shadowOpacity = 0.0;
+        [UIView animateKeyframesWithDuration:kCV3PanelDismissDuration
+                                       delay:0
+                                     options:UIViewKeyframeAnimationOptionBeginFromCurrentState | UIViewKeyframeAnimationOptionAllowUserInteraction | UIViewKeyframeAnimationOptionCalculationModeCubic
+                                  animations:^{
+            [UIView addKeyframeWithRelativeStartTime:0.0 relativeDuration:0.22 animations:^{
+                self.panelContainer.transform = settleTransform;
+                self.panelContainer.layer.shadowOpacity = CV3Style.shadowOpacityMask * 0.55;
+            }];
+            [UIView addKeyframeWithRelativeStartTime:0.18 relativeDuration:0.82 animations:^{
+                self.backgroundColor = [UIColor clearColor];
+                self.panelContainer.center = dismissCenter;
+                self.panelContainer.alpha = 0.0;
+                self.panelContainer.transform = dismissTransform;
+                self.panelContainer.layer.shadowOpacity = 0.0;
+                self.bezierContainer.alpha = 0.0;
+            }];
         } completion:^(BOOL f){
             self.panelContainer.layer.shouldRasterize = NO;
             self.panelContainer.layer.rasterizationScale = 1.0;
@@ -3068,34 +3087,92 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     }
 }
 
-- (BOOL)shouldIncludeApp:(id)appProxy {
-    // 1. 必须是用户应用
-    if (!CV3InvokeBool(appProxy, @selector(isUserApplication), YES)) {
-        return NO;
+static NSSet<NSString *> *CV3LaunchableSpringBoardIconBundleIDs(void) {
+    if (![NSThread isMainThread]) return [NSSet set];
+
+    id iconController = [CV3ClassNamed(@"SBIconController") sharedInstance];
+    id iconManager = CV3InvokeObject(iconController, @selector(iconManager));
+    id iconModel = CV3InvokeObject(iconManager, @selector(model));
+    if (!iconModel) iconModel = CV3InvokeObject(iconController, @selector(model));
+
+    NSMutableSet<NSString *> *bundleIDs = [NSMutableSet set];
+    id leafIcons = CV3InvokeObject(iconModel, @selector(leafIcons));
+    if ([leafIcons conformsToProtocol:@protocol(NSFastEnumeration)]) {
+        for (id icon in leafIcons) {
+            NSString *bundleID = CV3BundleIdentifierFromIconObject(icon);
+            if (bundleID.length > 0) [bundleIDs addObject:bundleID];
+        }
     }
-    
-    // 2. 必须有有效 Bundle ID
+    return [bundleIDs copy];
+}
+
+- (BOOL)shouldIncludeApp:(id)appProxy launchableBundleIDs:(NSSet<NSString *> *)launchableBundleIDs {
+    // 必须有有效 Bundle ID。
     NSString *bundleId = CV3InvokeObject(appProxy, @selector(bundleIdentifier));
     if (bundleId.length == 0) return NO;
 
-    // 3. 排除特定系统组件（通过 Bundle ID 前缀）
+    if (!CV3InvokeBool(appProxy, @selector(isInstalled), YES) ||
+        CV3InvokeBool(appProxy, @selector(isPlaceholder), NO) ||
+        CV3InvokeBool(appProxy, NSSelectorFromString(@"isLaunchProhibited"), NO)) {
+        return NO;
+    }
+
+    if (launchableBundleIDs.count > 0 && ![launchableBundleIDs containsObject:bundleId]) {
+        return NO;
+    }
+    // Icon model unavailable is rare during early SpringBoard startup. In that
+    // fallback only accept user Apps; once the model is ready its launchable
+    // icon set also admits normal Apple system Apps such as Settings or Safari.
+    if (launchableBundleIDs.count == 0 &&
+        !CV3InvokeBool(appProxy, @selector(isUserApplication), YES)) {
+        return NO;
+    }
+
+    NSArray *appTags = CV3InvokeObject(appProxy, @selector(appTags));
+    for (id tag in appTags) {
+        if (![tag isKindOfClass:[NSString class]]) continue;
+        NSString *normalizedTag = [tag lowercaseString];
+        if ([normalizedTag isEqualToString:@"hidden"] ||
+            [normalizedTag isEqualToString:@"internal"] ||
+            [normalizedTag containsString:@"plugin"]) {
+            return NO;
+        }
+    }
+
+    // 排除特定系统组件（通过 Bundle ID 前缀）。
     static NSArray *excludedPrefixes = nil;
     if (!excludedPrefixes) {
-        excludedPrefixes = @[@"com.apple.webapp", @"com.apple.tips", @"com.apple.stocks"];
+        excludedPrefixes = @[
+            @"com.apple.webapp", @"com.apple.tips", @"com.apple.stocks",
+            @"com.apple.coverage-details", @"com.apple.tvprovider", @"com.apple.lookup"
+        ];
     }
+    NSString *normalizedBundleID = [bundleId lowercaseString];
     for (NSString *prefix in excludedPrefixes) {
-        if ([bundleId hasPrefix:prefix]) return NO;
+        if ([normalizedBundleID hasPrefix:[prefix lowercaseString]]) return NO;
     }
+
+    NSString *localizedName = CV3InvokeObject(appProxy, @selector(localizedName));
+    if (localizedName.length == 0) localizedName = CV3InvokeObject(appProxy, @selector(itemName));
+    static NSSet<NSString *> *excludedNames = nil;
+    static dispatch_once_t excludedNamesOnceToken;
+    dispatch_once(&excludedNamesOnceToken, ^{
+        excludedNames = [NSSet setWithArray:@[
+            @"查询 App", @"保修范围详情信息", @"电视提供商",
+            @"Lookup", @"Coverage Details", @"TV Provider"
+        ]];
+    });
+    if ([excludedNames containsObject:localizedName]) return NO;
 
     return YES;
 }
 
-- (NSArray<CV3AppInfo *> *)buildAppSnapshotOnAppLoadQueue {
+- (NSArray<CV3AppInfo *> *)buildAppSnapshotOnAppLoadQueueWithLaunchableBundleIDs:(NSSet<NSString *> *)launchableBundleIDs {
     NSMutableArray<CV3AppInfo *> *snapshot = [NSMutableArray array];
 
     id workspace = [CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace];
     for (id proxy in CV3InvokeObject(workspace, @selector(allInstalledApplications))) {
-        if (![self shouldIncludeApp:proxy]) continue;
+        if (![self shouldIncludeApp:proxy launchableBundleIDs:launchableBundleIDs]) continue;
 
         NSString *bundleID = CV3InvokeObject(proxy, @selector(bundleIdentifier));
         NSString *name = CV3InvokeObject(proxy, @selector(localizedName));
@@ -3186,6 +3263,7 @@ static NSUInteger CV3IconCacheCost(UIImage *image) {
     BOOL needsFullReload = self.needsFullReload || self.apps.count == 0;
     NSArray<CV3AppInfo *> *appsSnapshot = [self.apps copy] ?: @[];
     NSSet *pinnedSnapshot = [self.pinnedBundleIDs copy] ?: [NSSet set];
+    NSSet<NSString *> *launchableBundleIDs = CV3LaunchableSpringBoardIconBundleIDs();
 
     dispatch_async(CV3AppLoadQueue(), ^{
         @autoreleasepool {
@@ -3199,7 +3277,8 @@ static NSUInteger CV3IconCacheCost(UIImage *image) {
                 CV3LogToFile(@"[Debug] 命中增量更新，仅刷新置顶与排序状态 (generation=%lu)", (unsigned long)requestedGeneration);
             } else {
                 CV3LogToFile(@"[Debug] 执行全量应用资源同步 (needsFullReload=%d, generation=%lu)", needsFullReload, (unsigned long)requestedGeneration);
-                NSArray<CV3AppInfo *> *fullReloadSnapshot = [self buildAppSnapshotOnAppLoadQueue];
+                NSArray<CV3AppInfo *> *fullReloadSnapshot =
+                    [self buildAppSnapshotOnAppLoadQueueWithLaunchableBundleIDs:launchableBundleIDs];
                 workingApps = [NSMutableArray arrayWithCapacity:fullReloadSnapshot.count];
                 for (CV3AppInfo *source in fullReloadSnapshot) {
                     CV3AppInfo *copiedInfo = CV3CopyAppInfo(source);
