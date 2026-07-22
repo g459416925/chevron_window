@@ -2,6 +2,7 @@
 #import <AVFAudio/AVFAudio.h>
 #import <AVFoundation/AVFoundation.h>
 #import <objc/message.h>
+#import <objc/runtime.h>
 #import <notify.h>
 #import <substrate.h>
 
@@ -17,6 +18,62 @@ static BOOL CV3ApplicationIsChevronHosted = NO;
 static BOOL CV3WorkspaceTransitionShieldActive = NO;
 static NSTimeInterval CV3PlaybackTransitionGraceDeadline = 0;
 static const uint64_t CV3ClientBridgeProtocolVersion = 0x2026072001ULL;
+
+typedef struct CV3SBIconImageInfo {
+    CGSize size;
+    CGFloat scale;
+    CGFloat continuousCornerRadius;
+} CV3SBIconImageInfo;
+
+@interface UIImage (CV3GlobalIconPrivate)
++ (UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleIdentifier
+                                               format:(NSInteger)format
+                                                scale:(CGFloat)scale;
++ (UIImage *)_iconForResourceProxy:(id)applicationProxy format:(NSInteger)format;
+- (UIImage *)_applicationIconImageForFormat:(NSInteger)format
+                                precomposed:(BOOL)precomposed
+                                      scale:(CGFloat)scale;
+@end
+
+static const CGFloat CV3GlobalApplicationIconScale = 0.95;
+static const void *CV3ScaledApplicationIconKey = &CV3ScaledApplicationIconKey;
+static __thread NSUInteger CV3ApplicationIconScalingDepth = 0;
+
+static UIImage *CV3ScaleApplicationIconImage(UIImage *image) {
+    if (![image isKindOfClass:[UIImage class]] || CV3ApplicationIconScalingDepth > 0) return image;
+    if (image.size.width <= 0.0 || image.size.height <= 0.0) return image;
+    if ([objc_getAssociatedObject(image, CV3ScaledApplicationIconKey) boolValue]) return image;
+
+    CGSize canvasSize = image.size;
+    CGSize scaledSize = CGSizeMake(canvasSize.width * CV3GlobalApplicationIconScale,
+                                   canvasSize.height * CV3GlobalApplicationIconScale);
+    CGRect drawRect = CGRectMake((canvasSize.width - scaledSize.width) * 0.5,
+                                 (canvasSize.height - scaledSize.height) * 0.5,
+                                 scaledSize.width,
+                                 scaledSize.height);
+
+    __block UIImage *scaledImage = nil;
+    __block BOOL contextStarted = NO;
+    CV3ApplicationIconScalingDepth++;
+    @try {
+        UIGraphicsBeginImageContextWithOptions(canvasSize, NO, image.scale > 0.0 ? image.scale : 0.0);
+        contextStarted = YES;
+        [image drawInRect:drawRect];
+        scaledImage = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+        contextStarted = NO;
+    } @catch (__unused NSException *exception) {
+        if (contextStarted) UIGraphicsEndImageContext();
+        scaledImage = nil;
+    } @finally {
+        CV3ApplicationIconScalingDepth--;
+    }
+    if (!scaledImage) return image;
+
+    scaledImage = [scaledImage imageWithRenderingMode:image.renderingMode];
+    objc_setAssociatedObject(scaledImage, CV3ScaledApplicationIconKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return scaledImage;
+}
 
 typedef NS_ENUM(uint8_t, CV3PlaybackTraceEvent) {
     CV3PlaybackTraceBridgeLoaded = 1,
@@ -306,14 +363,24 @@ static void CV3PostVideoOrientation(UIInterfaceOrientation orientation) {
 }
 
 static void CV3PostOrientationForController(UIViewController *controller) {
-    if (!controller || !controller.viewIfLoaded.window) return;
+    if (!CV3ApplicationIsChevronHosted || !controller) return;
+
+    @try {
+        if (!controller.viewIfLoaded.window) return;
+    } @catch (__unused NSException *exception) {
+        return;
+    }
 
     UIInterfaceOrientation preferredOrientation = UIInterfaceOrientationUnknown;
+    UIInterfaceOrientationMask supportedOrientations = UIInterfaceOrientationMaskPortrait;
     @try {
         preferredOrientation = controller.preferredInterfaceOrientationForPresentation;
-    } @catch (NSException *exception) {}
+        supportedOrientations = controller.supportedInterfaceOrientations;
+    } @catch (__unused NSException *exception) {
+        return;
+    }
 
-    UIInterfaceOrientation orientation = CV3InterfaceOrientationForMask(controller.supportedInterfaceOrientations,
+    UIInterfaceOrientation orientation = CV3InterfaceOrientationForMask(supportedOrientations,
                                                                          preferredOrientation);
     if (UIInterfaceOrientationIsLandscape(orientation) && CV3ControllerLikelyOwnsFullscreenVideo(controller)) {
         CV3PostVideoOrientation(orientation);
@@ -337,7 +404,7 @@ static BOOL CV3ControllerLikelyOwnsFullscreenVideo(UIViewController *controller)
 %hook UIWindowScene
 - (void)requestGeometryUpdateWithPreferences:(id)preferences errorHandler:(id)errorHandler {
     SEL selector = NSSelectorFromString(@"interfaceOrientations");
-    if (preferences && [preferences respondsToSelector:selector]) {
+    if (CV3ApplicationIsChevronHosted && preferences && [preferences respondsToSelector:selector]) {
         UIInterfaceOrientationMask mask = ((UIInterfaceOrientationMask (*)(id, SEL))objc_msgSend)(preferences, selector);
         CV3PostVideoOrientation(CV3InterfaceOrientationForMask(mask, UIInterfaceOrientationUnknown));
     }
@@ -348,8 +415,11 @@ static BOOL CV3ControllerLikelyOwnsFullscreenVideo(UIViewController *controller)
 %hook UIViewController
 - (void)setNeedsUpdateOfSupportedInterfaceOrientations {
     %orig;
+    if (!CV3ApplicationIsChevronHosted) return;
+    __weak UIViewController *weakController = self;
     dispatch_async(dispatch_get_main_queue(), ^{
-        CV3PostOrientationForController(self);
+        UIViewController *controller = weakController;
+        if (controller) CV3PostOrientationForController(controller);
     });
 }
 
@@ -369,7 +439,9 @@ static BOOL CV3ControllerLikelyOwnsFullscreenVideo(UIViewController *controller)
 
 %hook UIDevice
 - (void)setValue:(id)value forKey:(NSString *)key {
-    if ([key isEqualToString:@"orientation"] && [value respondsToSelector:@selector(integerValue)]) {
+    if (CV3ApplicationIsChevronHosted &&
+        [key isEqualToString:@"orientation"] &&
+        [value respondsToSelector:@selector(integerValue)]) {
         CV3PostVideoOrientation(CV3InterfaceOrientationForDeviceOrientation((UIDeviceOrientation)[value integerValue]));
     }
     %orig(value, key);
@@ -514,10 +586,57 @@ withApplicationOfDeactivationReasons:(NSUInteger)reasons
 }
 %end
 
+%group CV3GlobalIconImageHooks
+%hook UIImage
++ (UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleIdentifier
+                                               format:(NSInteger)format
+                                                scale:(CGFloat)scale {
+    return CV3ScaleApplicationIconImage(%orig(bundleIdentifier, format, scale));
+}
+
++ (UIImage *)_iconForResourceProxy:(id)applicationProxy format:(NSInteger)format {
+    return CV3ScaleApplicationIconImage(%orig(applicationProxy, format));
+}
+
+- (UIImage *)_applicationIconImageForFormat:(NSInteger)format
+                                precomposed:(BOOL)precomposed
+                                      scale:(CGFloat)scale {
+    return CV3ScaleApplicationIconImage(%orig(format, precomposed, scale));
+}
+%end
+
+%end
+
+%group CV3SpringBoardIconImageHooks
+%hook SBIcon
+- (UIImage *)generateIconImage:(NSInteger)type {
+    return CV3ScaleApplicationIconImage(%orig(type));
+}
+
+- (UIImage *)generateIconImageWithInfo:(CV3SBIconImageInfo)imageInfo {
+    return CV3ScaleApplicationIconImage(%orig(imageInfo));
+}
+
+- (UIImage *)getIconImage:(NSInteger)variant {
+    return CV3ScaleApplicationIconImage(%orig(variant));
+}
+
+- (UIImage *)getUnmaskedIconImage:(NSInteger)variant {
+    return CV3ScaleApplicationIconImage(%orig(variant));
+}
+%end
+%end
+
 %ctor {
     @autoreleasepool {
-        if ([[NSBundle mainBundle].bundleIdentifier lowercaseString].length == 0 ||
-            [[[NSBundle mainBundle].bundleIdentifier lowercaseString] isEqualToString:@"com.apple.springboard"]) {
+        %init(CV3GlobalIconImageHooks);
+
+        NSString *processBundleID = [NSBundle mainBundle].bundleIdentifier.lowercaseString;
+        if ([processBundleID isEqualToString:@"com.apple.springboard"]) {
+            if (NSClassFromString(@"SBIcon")) %init(CV3SpringBoardIconImageHooks);
+            return;
+        }
+        if (processBundleID.length == 0) {
             return;
         }
         NSLog(@"[ChevronV3VideoBridge] Client bridge loaded bundle=%@ protocol=%llx",

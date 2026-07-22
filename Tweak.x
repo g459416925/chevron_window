@@ -208,6 +208,7 @@ static void CV3PostHostedState(NSString *bundleID, BOOL hosted);
 @property (nonatomic, copy) NSString *pinyinInitial;
 @property (nonatomic, copy) NSString *category; 
 @property (nonatomic, assign) BOOL isPinned;
+@property (nonatomic, assign) NSInteger unreadCount;
 @property (nonatomic, assign) NSTimeInterval lastUsedDate; // 熵减逻辑：最后使用时间
 - (void)generatePinyin;
 @end
@@ -416,10 +417,14 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
 @property (nonatomic, strong) UIImageView *iconView;
 @property (nonatomic, strong) UILabel *nameLabel;
 @property (nonatomic, strong) UIView *pinnedIndicator; 
+@property (nonatomic, strong) UIView *unreadAttentionRing;
+@property (nonatomic, strong) UIView *badgeContainer;
+@property (nonatomic, strong) UILabel *badgeLabel;
 @property (nonatomic, assign) BOOL isFirstResult; // 新增：是否为搜索首项
 @property (nonatomic, copy) NSString *representedBundleId;
 - (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst protectionState:(CV3AppPanelProtectionState)protectionState;
 - (void)setIconImage:(UIImage *)image forBundleId:(NSString *)bundleId;
+- (void)setUnreadCount:(NSInteger)unreadCount;
 - (void)startBreathing;
 @end
 
@@ -438,11 +443,36 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
         ivBack.layer.shadowRadius = CV3Style.iconShadowRadius;
         ivBack.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, iconSize, iconSize) cornerRadius:CV3Style.iconCornerRadius].CGPath;
         [self.contentView addSubview:ivBack];
+
+        self.unreadAttentionRing = [[UIView alloc] initWithFrame:CGRectInset(ivBack.bounds, -4.0, -4.0)];
+        self.unreadAttentionRing.center = CGPointMake(CGRectGetMidX(ivBack.bounds), CGRectGetMidY(ivBack.bounds));
+        self.unreadAttentionRing.userInteractionEnabled = NO;
+        self.unreadAttentionRing.layer.cornerRadius = CV3Style.iconCornerRadius + 4.0;
+        self.unreadAttentionRing.layer.borderWidth = 2.0;
+        self.unreadAttentionRing.layer.borderColor = [UIColor systemRedColor].CGColor;
+        self.unreadAttentionRing.hidden = YES;
+        [ivBack addSubview:self.unreadAttentionRing];
         
         self.iconView = [[UIImageView alloc] initWithFrame:ivBack.frame];
         self.iconView.layer.cornerRadius = CV3Style.iconCornerRadius;
         self.iconView.clipsToBounds = YES;
         [self.contentView addSubview:self.iconView];
+
+        self.badgeContainer = [[UIView alloc] initWithFrame:self.contentView.bounds];
+        self.badgeContainer.userInteractionEnabled = NO;
+        self.badgeContainer.backgroundColor = [UIColor clearColor];
+        [self.contentView addSubview:self.badgeContainer];
+
+        self.badgeLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+        self.badgeLabel.backgroundColor = [UIColor systemRedColor];
+        self.badgeLabel.textColor = [UIColor whiteColor];
+        self.badgeLabel.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightBold];
+        self.badgeLabel.textAlignment = NSTextAlignmentCenter;
+        self.badgeLabel.layer.borderWidth = 1.5;
+        self.badgeLabel.layer.borderColor = [UIColor whiteColor].CGColor;
+        self.badgeLabel.layer.masksToBounds = YES;
+        self.badgeLabel.hidden = YES;
+        [self.badgeContainer addSubview:self.badgeLabel];
 
         self.pinnedIndicator = [[UIView alloc] initWithFrame:CGRectMake(iconSize - 12, -4, 16, 16)];
         self.pinnedIndicator.backgroundColor = [UIColor cyanColor];
@@ -474,12 +504,14 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
     [super prepareForReuse];
     self.representedBundleId = nil;
     self.iconView.image = nil;
+    [self setUnreadCount:0];
 }
 
 - (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst protectionState:(CV3AppPanelProtectionState)protectionState {
     self.representedBundleId = info.bundleId;
     self.iconView.image = info.icon;
     self.pinnedIndicator.hidden = !info.isPinned;
+    [self setUnreadCount:info.unreadCount];
     self.isFirstResult = isFirst;
     if (info.isPinned) [self.iconView bringSubviewToFront:self.pinnedIndicator];
 
@@ -525,10 +557,58 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
     self.iconView.image = image;
 }
 
+- (void)setUnreadCount:(NSInteger)unreadCount {
+    unreadCount = MAX(0, unreadCount);
+    BOOL hasUnread = unreadCount > 0;
+    self.badgeLabel.hidden = !hasUnread;
+    self.unreadAttentionRing.hidden = !hasUnread;
+
+    if (!hasUnread) {
+        self.badgeLabel.text = nil;
+        [self.badgeLabel.layer removeAnimationForKey:@"unreadAttention"];
+        [self.unreadAttentionRing.layer removeAnimationForKey:@"unreadAttention"];
+        return;
+    }
+
+    NSString *badgeText = unreadCount > 99 ? @"99+" : [NSString stringWithFormat:@"%ld", (long)unreadCount];
+    self.badgeLabel.text = badgeText;
+    CGFloat badgeWidth = unreadCount > 9 ? 30.0 : 22.0;
+    CGFloat iconMaxX = CGRectGetMaxX(self.iconView.frame);
+    self.badgeLabel.frame = CGRectMake(iconMaxX - badgeWidth * 0.48, 0.0, badgeWidth, 22.0);
+    self.badgeLabel.layer.cornerRadius = 11.0;
+
+    if (UIAccessibilityIsReduceMotionEnabled() ||
+        [self.badgeLabel.layer animationForKey:@"unreadAttention"]) {
+        return;
+    }
+
+    CAKeyframeAnimation *badgePulse = [CAKeyframeAnimation animationWithKeyPath:@"transform.scale"];
+    badgePulse.values = @[@1.0, @1.0, @1.18, @1.0, @1.0];
+    badgePulse.keyTimes = @[@0.0, @0.58, @0.72, @0.86, @1.0];
+    badgePulse.duration = 2.8;
+    badgePulse.repeatCount = HUGE_VALF;
+    badgePulse.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [self.badgeLabel.layer addAnimation:badgePulse forKey:@"unreadAttention"];
+
+    CAAnimationGroup *ringPulse = [CAAnimationGroup animation];
+    CAKeyframeAnimation *ringScale = [CAKeyframeAnimation animationWithKeyPath:@"transform.scale"];
+    ringScale.values = @[@1.0, @1.0, @1.12, @1.2];
+    ringScale.keyTimes = @[@0.0, @0.58, @0.76, @1.0];
+    CAKeyframeAnimation *ringOpacity = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
+    ringOpacity.values = @[@0.0, @0.0, @0.55, @0.0];
+    ringOpacity.keyTimes = ringScale.keyTimes;
+    ringPulse.animations = @[ringScale, ringOpacity];
+    ringPulse.duration = 2.8;
+    ringPulse.repeatCount = HUGE_VALF;
+    ringPulse.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+    [self.unreadAttentionRing.layer addAnimation:ringPulse forKey:@"unreadAttention"];
+}
+
 - (void)startBreathing {
     [self.contentView.layer removeAnimationForKey:@"breathing"];
     [self.iconBackdrop.layer removeAnimationForKey:@"breathing"];
     [self.iconView.layer removeAnimationForKey:@"breathing"];
+    [self.badgeContainer.layer removeAnimationForKey:@"breathing"];
 
     CGFloat lift = 7.0 + (arc4random_uniform(18) / 10.0);
     CGFloat duration = 6.8 + (arc4random_uniform(18) / 10.0);
@@ -557,6 +637,7 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
 
     [self.iconBackdrop.layer addAnimation:makeFloatGroup() forKey:@"breathing"];
     [self.iconView.layer addAnimation:makeFloatGroup() forKey:@"breathing"];
+    [self.badgeContainer.layer addAnimation:makeFloatGroup() forKey:@"breathing"];
 }
 @end
 
@@ -2140,6 +2221,7 @@ static CV3AppInfo *CV3CopyAppInfo(CV3AppInfo *source) {
     info.pinyinInitial = source.pinyinInitial;
     info.category = source.category;
     info.isPinned = source.isPinned;
+    info.unreadCount = source.unreadCount;
     info.lastUsedDate = source.lastUsedDate;
     return info;
 }
@@ -2385,6 +2467,14 @@ static BOOL CV3ConsumePendingNotificationForLaunch(NSString *bundleID) {
 }
 
 static BOOL CV3RedirectPendingNotificationLaunch(NSString *bundleID) {
+    if (![NSThread isMainThread]) {
+        __block BOOL redirected = NO;
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            redirected = CV3RedirectPendingNotificationLaunch(bundleID);
+        });
+        return redirected;
+    }
+
     if (!CV3ConsumePendingNotificationForLaunch(bundleID)) return NO;
 
     CV3LogToFile(@"[NotificationSplit] 拦截通知默认启动并改为分屏: %@", bundleID);
@@ -2394,6 +2484,14 @@ static BOOL CV3RedirectPendingNotificationLaunch(NSString *bundleID) {
 }
 
 static BOOL CV3RedirectPendingNotificationTransition(id transitionRequest, NSString *source) {
+    if (![NSThread isMainThread]) {
+        __block BOOL redirected = NO;
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            redirected = CV3RedirectPendingNotificationTransition(transitionRequest, source);
+        });
+        return redirected;
+    }
+
     if (!CV3PendingNotificationIsFresh()) return NO;
 
     NSString *bundleID = CV3NotificationBundleIDFromObject(transitionRequest, 0);

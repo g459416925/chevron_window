@@ -768,6 +768,12 @@ static NSString *CV3AppPanelProtectionReason(CV3AppPanelProtectionState state) {
 
 static void CV3RemoveViewAnimationsRecursively(UIView *view) {
     if (!view) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CV3RemoveViewAnimationsRecursively(view);
+        });
+        return;
+    }
     [view.layer removeAllAnimations];
     for (UIView *subview in view.subviews) {
         CV3RemoveViewAnimationsRecursively(subview);
@@ -809,6 +815,12 @@ static void CV3CancelCompetingHomeScreenPans(UIGestureRecognizer *ownedGesture) 
 
 static void CV3FinalizePanelHiddenState(CV3Window *launcherWindow) {
     if (!launcherWindow) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CV3FinalizePanelHiddenState(launcherWindow);
+        });
+        return;
+    }
 
     launcherWindow.interactionCount++;
     CV3RemoveViewAnimationsRecursively(launcherWindow.panelContainer);
@@ -837,6 +849,12 @@ static void CV3FinalizePanelHiddenState(CV3Window *launcherWindow) {
 
 static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     if (!launcherWindow) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CV3HidePanelImmediately(launcherWindow);
+        });
+        return;
+    }
 
     CV3SetKeyboardSuppressedByPanel(NO);
     CV3SetHomeScreenPullDownSuppressed(NO);
@@ -3087,23 +3105,117 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     }
 }
 
-static NSSet<NSString *> *CV3LaunchableSpringBoardIconBundleIDs(void) {
-    if (![NSThread isMainThread]) return [NSSet set];
+static NSInteger CV3UnreadCountFromIconObject(id icon) {
+    for (NSString *key in @[@"badgeValue", @"badgeNumber", @"displayedBadgeValue", @"badgeString"]) {
+        id value = nil;
+        @try {
+            value = [icon valueForKey:key];
+        } @catch (__unused NSException *exception) {
+            value = nil;
+        }
+        if (!value || value == [NSNull null]) continue;
+
+        if ([value isKindOfClass:[NSString class]]) {
+            NSString *badgeText = [(NSString *)value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (badgeText.length == 0 || [badgeText isEqualToString:@"0"]) continue;
+            NSInteger count = badgeText.integerValue;
+            return count > 0 ? count : 1;
+        }
+        if ([value respondsToSelector:@selector(integerValue)]) {
+            NSInteger count = [value integerValue];
+            if (count > 0) return count;
+        }
+    }
+    return 0;
+}
+
+static NSMutableDictionary<NSString *, NSNumber *> *CV3NotificationPermissionCache(void) {
+    static NSMutableDictionary<NSString *, NSNumber *> *cache = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [NSMutableDictionary dictionary];
+    });
+    return cache;
+}
+
+static NSMutableDictionary<NSString *, NSNumber *> *CV3NotificationPermissionRequestDates(void) {
+    static NSMutableDictionary<NSString *, NSNumber *> *dates = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        dates = [NSMutableDictionary dictionary];
+    });
+    return dates;
+}
+
+static id CV3NotificationSettingsGateway(void) {
+    static id gateway = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Class gatewayClass = CV3ClassNamed(@"BBSettingsGateway");
+        if (gatewayClass) gateway = [[gatewayClass alloc] init];
+    });
+    return gateway;
+}
+
+static void CV3RequestNotificationPermissionForBundleID(NSString *bundleID) {
+    if (![NSThread isMainThread] || bundleID.length == 0) return;
+
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    NSMutableDictionary<NSString *, NSNumber *> *requestDates = CV3NotificationPermissionRequestDates();
+    NSTimeInterval previousRequest = [requestDates[bundleID] doubleValue];
+    if (previousRequest > 0.0 && now - previousRequest < 5.0) return;
+
+    id gateway = CV3NotificationSettingsGateway();
+    SEL selector = NSSelectorFromString(@"getSectionInfoForSectionID:withCompletion:");
+    if (!gateway || ![gateway respondsToSelector:selector]) {
+        CV3NotificationPermissionCache()[bundleID] = @NO;
+        return;
+    }
+
+    requestDates[bundleID] = @(now);
+    void (^completion)(id) = ^(id sectionInfo) {
+        BOOL allowsNotifications = CV3InvokeBool(sectionInfo, NSSelectorFromString(@"allowsNotifications"), NO);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CV3NotificationPermissionCache()[bundleID] = @(allowsNotifications);
+        });
+    };
+
+    @try {
+        ((void (*)(id, SEL, NSString *, id))objc_msgSend)(gateway, selector, bundleID, completion);
+    } @catch (__unused NSException *exception) {
+        CV3NotificationPermissionCache()[bundleID] = @NO;
+    }
+}
+
+static BOOL CV3AppHasNotificationPermission(NSString *bundleID) {
+    if (bundleID.length == 0) return NO;
+    CV3RequestNotificationPermissionForBundleID(bundleID);
+    return [CV3NotificationPermissionCache()[bundleID] boolValue];
+}
+
+static NSDictionary<NSString *, NSNumber *> *CV3SpringBoardIconBadgeSnapshot(void) {
+    if (![NSThread isMainThread]) return nil;
 
     id iconController = [CV3ClassNamed(@"SBIconController") sharedInstance];
     id iconManager = CV3InvokeObject(iconController, @selector(iconManager));
     id iconModel = CV3InvokeObject(iconManager, @selector(model));
     if (!iconModel) iconModel = CV3InvokeObject(iconController, @selector(model));
 
-    NSMutableSet<NSString *> *bundleIDs = [NSMutableSet set];
     id leafIcons = CV3InvokeObject(iconModel, @selector(leafIcons));
+    if (![leafIcons conformsToProtocol:@protocol(NSFastEnumeration)]) return nil;
+
+    NSMutableDictionary<NSString *, NSNumber *> *snapshot = [NSMutableDictionary dictionary];
     if ([leafIcons conformsToProtocol:@protocol(NSFastEnumeration)]) {
         for (id icon in leafIcons) {
             NSString *bundleID = CV3BundleIdentifierFromIconObject(icon);
-            if (bundleID.length > 0) [bundleIDs addObject:bundleID];
+            if (bundleID.length == 0) continue;
+
+            NSInteger unreadCount = CV3UnreadCountFromIconObject(icon);
+            if (unreadCount > 0 && !CV3AppHasNotificationPermission(bundleID)) unreadCount = 0;
+            snapshot[bundleID] = @(unreadCount);
         }
     }
-    return [bundleIDs copy];
+    return [snapshot copy];
 }
 
 - (BOOL)shouldIncludeApp:(id)appProxy launchableBundleIDs:(NSSet<NSString *> *)launchableBundleIDs {
@@ -3263,7 +3375,8 @@ static NSUInteger CV3IconCacheCost(UIImage *image) {
     BOOL needsFullReload = self.needsFullReload || self.apps.count == 0;
     NSArray<CV3AppInfo *> *appsSnapshot = [self.apps copy] ?: @[];
     NSSet *pinnedSnapshot = [self.pinnedBundleIDs copy] ?: [NSSet set];
-    NSSet<NSString *> *launchableBundleIDs = CV3LaunchableSpringBoardIconBundleIDs();
+    NSDictionary<NSString *, NSNumber *> *badgeSnapshot = CV3SpringBoardIconBadgeSnapshot();
+    NSSet<NSString *> *launchableBundleIDs = badgeSnapshot ? [NSSet setWithArray:badgeSnapshot.allKeys] : [NSSet set];
 
     dispatch_async(CV3AppLoadQueue(), ^{
         @autoreleasepool {
@@ -3294,6 +3407,7 @@ static NSUInteger CV3IconCacheCost(UIImage *image) {
 
             for (CV3AppInfo *info in workingApps) {
                 info.isPinned = [pinnedSnapshot containsObject:info.bundleId];
+                info.unreadCount = [badgeSnapshot[info.bundleId] integerValue];
                 NSArray *ts = usageData[info.bundleId];
                 if (ts && ts.count > 0) {
                     info.lastUsedDate = [[ts lastObject] doubleValue];
@@ -3363,6 +3477,13 @@ static NSUInteger CV3IconCacheCost(UIImage *image) {
 - (void)refreshProtectedAppMarkers {
     if (!self.isPanelShowing || self.collectionView.hidden) return;
     if (CV3ScrollViewIsActivelyControlled(self.collectionView)) return;
+
+    NSDictionary<NSString *, NSNumber *> *badgeSnapshot = CV3SpringBoardIconBadgeSnapshot();
+    if (badgeSnapshot) {
+        for (CV3AppInfo *info in self.apps) {
+            info.unreadCount = [badgeSnapshot[info.bundleId] integerValue];
+        }
+    }
 
     NSArray<NSIndexPath *> *visibleIndexPaths = [self.collectionView indexPathsForVisibleItems];
     if (visibleIndexPaths.count == 0) return;
