@@ -651,9 +651,7 @@ static void CV3RefreshFloatingHomeBarAfterPresentation(CV3FloatingAppWindow *win
                    dispatch_get_main_queue(), refresh);
 }
 
-// Entry point shared by the launcher and notification taps. Notification
-// callbacks are owned by SpringBoard, so keep all hosted-window work on the
-// main thread and do not require the launcher panel to be visible.
+// Entry point shared by the launcher and notification delivery callbacks.
 static BOOL CV3OpenBundleInFloatingWindow(NSString *bundleID, NSString *reason) {
     if (bundleID.length == 0) return NO;
 
@@ -672,6 +670,12 @@ static BOOL CV3OpenBundleInFloatingWindow(NSString *bundleID, NSString *reason) 
 
     CV3FloatingAppWindow *existingWindow = CV3FloatingWindowForBundleID(bundleID);
     if (existingWindow) {
+        if (CV3LockScreenPresented) {
+            existingWindow.isSuppressedByLockScreen = YES;
+            [existingWindow setHidden:YES];
+            CV3LogToFile(@"[NotificationSplit] 锁屏期间保持已有分屏隐藏: %@ (%@)", bundleID, reason ?: @"Unknown");
+            return YES;
+        }
         [existingWindow restoreFromStash];
         [existingWindow setWindowFocused:YES];
         CV3RefreshFloatingHomeBarAfterPresentation(existingWindow);
@@ -705,13 +709,19 @@ static BOOL CV3OpenBundleInFloatingWindow(NSString *bundleID, NSString *reason) 
     if (!floatingWindow) return NO;
 
     floatingWindow.targetOrientation = CV3TrustedInterfaceOrientation(scene);
+    floatingWindow.isSuppressedByLockScreen = CV3LockScreenPresented;
     [floatingWindows addObject:floatingWindow];
-    [floatingWindow makeKeyAndVisible];
+    if (CV3LockScreenPresented) {
+        [floatingWindow setHidden:YES];
+    } else {
+        [floatingWindow makeKeyAndVisible];
+    }
     floatingWindow.windowLevel = CV3Style.floatingApp;
-    CV3RefreshFloatingHomeBarAfterPresentation(floatingWindow);
+    if (!CV3LockScreenPresented) CV3RefreshFloatingHomeBarAfterPresentation(floatingWindow);
     CV3UpdateFloatingBackdrop(scene);
     [[NSNotificationCenter defaultCenter] postNotificationName:CV3FloatingWindowsDidChangeNotification object:nil];
-    CV3LogToFile(@"[NotificationSplit] 通知点击开启分屏: %@ (%@)", bundleID, reason ?: @"Unknown");
+    CV3LogToFile(@"[NotificationSplit] 开启分屏: %@ (%@) locked=%d",
+                 bundleID, reason ?: @"Unknown", CV3LockScreenPresented);
     return YES;
 }
 
@@ -823,6 +833,7 @@ static void CV3FinalizePanelHiddenState(CV3Window *launcherWindow) {
     }
 
     launcherWindow.interactionCount++;
+    launcherWindow.panelVisibilityAnimator = nil;
     CV3RemoveViewAnimationsRecursively(launcherWindow.panelContainer);
     [launcherWindow.bezierContainer.layer removeAllAnimations];
     [launcherWindow.bezierLayer removeAllAnimations];
@@ -835,6 +846,8 @@ static void CV3FinalizePanelHiddenState(CV3Window *launcherWindow) {
         launcherWindow.panelContainer.hidden = YES;
         launcherWindow.panelContainer.layer.shadowOpacity = 0.0;
         launcherWindow.panelContainer.layer.shadowPath = nil;
+        launcherWindow.panelContainer.layer.shouldRasterize = NO;
+        launcherWindow.panelContainer.userInteractionEnabled = YES;
         launcherWindow.appPanel.alpha = 0.0;
         launcherWindow.collectionView.alpha = 0.0;
         launcherWindow.contrastBackdrop.hidden = YES;
@@ -858,6 +871,10 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 
     CV3SetKeyboardSuppressedByPanel(NO);
     CV3SetHomeScreenPullDownSuppressed(NO);
+    UIViewPropertyAnimator *visibilityAnimator = launcherWindow.panelVisibilityAnimator;
+    launcherWindow.panelDismissCompletion = nil;
+    launcherWindow.panelVisibilityAnimator = nil;
+    [visibilityAnimator stopAnimation:YES];
     launcherWindow.isPanelShowing = NO;
     launcherWindow.isAnimating = NO;
     CV3FinalizePanelHiddenState(launcherWindow);
@@ -972,8 +989,12 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         [defaults synchronize];
     });
 
+    NSString *launchBundleID = [bid copy];
+    self.panelDismissCompletion = ^{
+        CV3OpenApplicationFast(launchBundleID,
+                               [NSString stringWithFormat:@"LauncherOpen:%@", launchBundleID]);
+    };
     [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
-    CV3OpenApplicationFast(bid, [NSString stringWithFormat:@"LauncherOpen:%@", bid]);
 }
 
 - (void)searchTextChanged:(UITextField *)textField {
@@ -1202,13 +1223,18 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         [self.searchBackground removeAllAnimations];
         [self.appPanel.layer removeAnimationForKey:@"liquidCorner"];
 
-        [UIView animateWithDuration:0.3 animations:^{
+        void (^resetSearchVisuals)(void) = ^{
             container.transform = CGAffineTransformIdentity;
             self.searchBackground.shadowOpacity = 0;
             self.searchBackground.shadowRadius = 0;
             self.searchBackground.path = [UIBezierPath bezierPathWithRoundedRect:self.searchBackground.bounds cornerRadius:10].CGPath;
             self.searchBackground.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.1].CGColor;
-        }];
+        };
+        if (self.isPanelShowing) {
+            [UIView animateWithDuration:0.3 animations:resetSearchVisuals];
+        } else {
+            [UIView performWithoutAnimation:resetSearchVisuals];
+        }
     }
 }
 
@@ -2887,13 +2913,22 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 }
 
 - (void)animateSpotlight:(BOOL)visible fromPoint:(CGPoint)point velocity:(CGFloat)velocity {
-    if (self.isAnimating) return;
+    // Dismissal may interrupt presentation; repeated dismissal and a second
+    // presentation request still wait for the active transition to finish.
+    if (self.isAnimating && (visible || !self.isPanelShowing)) return;
     if (visible) {
         CV3SetHomeScreenPullDownSuppressed(YES);
         CV3ExitExposeModeIfNeeded(nil, NO);
     }
     self.isPanelShowing = visible; self.isAnimating = YES;
     if (visible) {
+        UIViewPropertyAnimator *visibilityAnimator = self.panelVisibilityAnimator;
+        self.panelDismissCompletion = nil;
+        self.panelVisibilityAnimator = nil;
+        [visibilityAnimator stopAnimation:YES];
+        self.panelContainer.userInteractionEnabled = YES;
+        self.panelContainer.layer.shouldRasterize = NO;
+
         CV3SetKeyboardSuppressedByPanel(YES);
         [self startPanelStateRefreshTimer];
         self.searchField.text = @"";
@@ -2989,7 +3024,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             CV3UpdateAdaptiveTint([self currentActiveBundleID]);
         };
         void (^presentationCompletion)(BOOL) = ^(BOOL finished) {
-            self.isAnimating = NO; 
+            if (finished && self.isPanelShowing) self.isAnimating = NO;
         };
 
         [UIView animateWithDuration:kCV3PanelPresentDuration
@@ -3001,65 +3036,94 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
                          completion:presentationCompletion];
     } else {
         [self stopPanelStateRefreshTimer];
-        // 关键修复：不要同步收起键盘，因为 resignFirstResponder 是重度同步操作，会阻塞动画开始
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self.searchField resignFirstResponder];
-        });
-
         [self updateTrafficLightsFocus:NO];
-        [self refreshGlassAccentSurfaces];
-        
-        CALayer *presentationLayer = self.panelContainer.layer.presentationLayer;
-        if (presentationLayer) {
-            self.panelContainer.center = presentationLayer.position;
-            self.panelContainer.transform = CATransform3DGetAffineTransform(presentationLayer.transform);
-            self.panelContainer.alpha = presentationLayer.opacity;
-        }
 
-        // Flatten the visual-effect subtree for the short closing transition.
-        // This permits a subtle settle without asking Backdrop to resample every
-        // transformed frame, which previously produced visible edge trails.
-        self.panelContainer.layer.shouldRasterize = YES;
-        self.panelContainer.layer.rasterizationScale = [UIScreen mainScreen].scale;
-        CGAffineTransform baseTransform = self.panelContainer.transform;
-        CGAffineTransform settleTransform = CGAffineTransformScale(baseTransform, 1.008, 1.008);
-        CGAffineTransform dismissTransform = CGAffineTransformScale(baseTransform, 0.94, 0.94);
-        CGPoint dismissCenter = self.panelContainer.center;
+        CALayer *presentationLayer = self.panelContainer.layer.presentationLayer;
+        CGPoint currentCenter = presentationLayer ? presentationLayer.position : self.panelContainer.center;
+        CGAffineTransform currentTransform = presentationLayer
+            ? CATransform3DGetAffineTransform(presentationLayer.transform)
+            : self.panelContainer.transform;
+        CGFloat currentAlpha = presentationLayer ? presentationLayer.opacity : self.panelContainer.alpha;
+        CGFloat currentShadowOpacity = presentationLayer
+            ? presentationLayer.shadowOpacity
+            : self.panelContainer.layer.shadowOpacity;
+        CALayer *windowPresentationLayer = self.layer.presentationLayer;
+        UIColor *currentBackgroundColor = windowPresentationLayer.backgroundColor
+            ? [UIColor colorWithCGColor:windowPresentationLayer.backgroundColor]
+            : self.backgroundColor;
+
+        // Continue from the exact visible frame before removing any stale layer
+        // animation. This prevents a one-frame snap when dismissal interrupts a
+        // presentation or an orientation update.
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        self.panelContainer.layer.position = currentCenter;
+        self.panelContainer.layer.affineTransform = currentTransform;
+        self.panelContainer.layer.opacity = currentAlpha;
+        self.panelContainer.layer.shadowOpacity = currentShadowOpacity;
+        [self.panelContainer.layer removeAllAnimations];
+        self.layer.backgroundColor = currentBackgroundColor.CGColor;
+        [self.layer removeAnimationForKey:@"backgroundColor"];
+        [CATransaction commit];
+
+        BOOL reduceMotion = UIAccessibilityIsReduceMotionEnabled();
+        CGAffineTransform dismissTransform = reduceMotion
+            ? currentTransform
+            : CGAffineTransformScale(currentTransform, 0.965, 0.965);
+        CGPoint dismissCenter = currentCenter;
         CGPoint edgePoint = self.lastTriggerPoint;
         CGFloat dx = edgePoint.x - dismissCenter.x;
         CGFloat dy = edgePoint.y - dismissCenter.y;
         CGFloat distance = sqrt(dx * dx + dy * dy);
-        if (distance > 1.0) {
-            dismissCenter.x += (dx / distance) * 14.0;
-            dismissCenter.y += (dy / distance) * 14.0;
+        if (!reduceMotion && distance > 1.0) {
+            dismissCenter.x += (dx / distance) * 10.0;
+            dismissCenter.y += (dy / distance) * 10.0;
         }
 
-        [UIView animateKeyframesWithDuration:kCV3PanelDismissDuration
-                                       delay:0
-                                     options:UIViewKeyframeAnimationOptionBeginFromCurrentState | UIViewKeyframeAnimationOptionAllowUserInteraction | UIViewKeyframeAnimationOptionCalculationModeCubic
-                                  animations:^{
-            [UIView addKeyframeWithRelativeStartTime:0.0 relativeDuration:0.22 animations:^{
-                self.panelContainer.transform = settleTransform;
-                self.panelContainer.layer.shadowOpacity = CV3Style.shadowOpacityMask * 0.55;
-            }];
-            [UIView addKeyframeWithRelativeStartTime:0.18 relativeDuration:0.82 animations:^{
-                self.backgroundColor = [UIColor clearColor];
-                self.panelContainer.center = dismissCenter;
-                self.panelContainer.alpha = 0.0;
-                self.panelContainer.transform = dismissTransform;
-                self.panelContainer.layer.shadowOpacity = 0.0;
-                self.bezierContainer.alpha = 0.0;
-            }];
-        } completion:^(BOOL f){
-            self.panelContainer.layer.shouldRasterize = NO;
-            self.panelContainer.layer.rasterizationScale = 1.0;
-            self.isAnimating = NO;
-            CV3FinalizePanelHiddenState(self);
-            CV3SetKeyboardSuppressedByPanel(NO);
-            // Re-enable Home Screen pull-down only after the panel's dismissal
-            // animation has completed and the panel is no longer visible.
-            CV3SetHomeScreenPullDownSuppressed(NO);
+        UICubicTimingParameters *timing = [[UICubicTimingParameters alloc]
+            initWithControlPoint1:CGPointMake(0.20, 0.0)
+            controlPoint2:CGPointMake(0.0, 1.0)];
+        NSTimeInterval duration = reduceMotion ? 0.18 : kCV3PanelDismissDuration;
+        UIViewPropertyAnimator *animator = [[UIViewPropertyAnimator alloc]
+            initWithDuration:duration
+            timingParameters:timing];
+        self.panelContainer.userInteractionEnabled = NO;
+        self.panelVisibilityAnimator = animator;
+
+        [animator addAnimations:^{
+            self.backgroundColor = [UIColor clearColor];
+            self.panelContainer.center = dismissCenter;
+            self.panelContainer.alpha = 0.0;
+            self.panelContainer.transform = dismissTransform;
+            self.panelContainer.layer.shadowOpacity = 0.0;
+            self.bezierContainer.alpha = 0.0;
+            self.bezierLayer.opacity = 0.0;
         }];
+
+        __weak CV3Window *weakSelf = self;
+        __weak UIViewPropertyAnimator *weakAnimator = animator;
+        [animator addCompletion:^(__unused UIViewAnimatingPosition finalPosition) {
+            CV3Window *strongSelf = weakSelf;
+            UIViewPropertyAnimator *completedAnimator = weakAnimator;
+            if (!strongSelf || strongSelf.panelVisibilityAnimator != completedAnimator) return;
+
+            dispatch_block_t completion = strongSelf.panelDismissCompletion;
+            strongSelf.panelDismissCompletion = nil;
+            strongSelf.panelVisibilityAnimator = nil;
+            strongSelf.isAnimating = NO;
+            CV3FinalizePanelHiddenState(strongSelf);
+            CV3SetKeyboardSuppressedByPanel(NO);
+            CV3SetHomeScreenPullDownSuppressed(NO);
+            if (completion) completion();
+        }];
+
+        [animator startAnimation];
+
+        // Keyboard teardown can synchronously traverse its visual-effect tree.
+        // Start the panel animation first so that work cannot delay its first frame.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.searchField resignFirstResponder];
+        });
     }
 }
 
@@ -3496,7 +3560,7 @@ static NSUInteger CV3IconCacheCost(UIImage *image) {
 - (void)startPanelStateRefreshTimer {
     if (self.panelStateRefreshTimer) return;
 
-    self.panelStateRefreshTimer = [NSTimer scheduledTimerWithTimeInterval:0.5
+    self.panelStateRefreshTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
                                                                    target:self
                                                                  selector:@selector(refreshProtectedAppMarkers)
                                                                  userInfo:nil
