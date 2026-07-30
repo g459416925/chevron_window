@@ -2659,8 +2659,8 @@ void CV3ToggleExposeMode(void) {
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(attachToCurrentActiveScene) name:UISceneDidActivateNotification object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(enforceSceneForegroundState) name:UISceneDidEnterBackgroundNotification object:nil];
 
-        // 启动主动保活断言看门狗定时器
-        self.assertionWatchdogTimer = [NSTimer scheduledTimerWithTimeInterval:5.0 target:self selector:@selector(assertionWatchdogTick:) userInfo:nil repeats:YES];
+        // Assertions are refreshed by state changes; this slower watchdog only retries failures.
+        self.assertionWatchdogTimer = [NSTimer scheduledTimerWithTimeInterval:15.0 target:self selector:@selector(assertionWatchdogTick:) userInfo:nil repeats:YES];
         
         // [SHM Lazy Unmapping] 持有共享内存引用计数
         CV3RetainSharedGeometry(self.bundleID);
@@ -2670,7 +2670,12 @@ void CV3ToggleExposeMode(void) {
 }
 
 - (void)setHidden:(BOOL)hidden {
-    // 核心修复：禁止系统强制隐藏窗口（除非是明确的关闭操作或 Stash）
+    if (self.isSuppressedByLockScreen) {
+        [super setHidden:YES];
+        return;
+    }
+
+    // Keep a visible hosted window attached during ordinary workspace transitions.
     if (hidden && !self.isStashed && !self.isClosing) {
         CV3LogToFile(@"[Visibility] 拦截系统隐藏请求: %@", self.bundleID);
         [super setHidden:NO];
@@ -2970,35 +2975,72 @@ void CV3ToggleExposeMode(void) {
 - (void)updateSovereigntyAssertion {
     if (!self.bundleID || self.isClosing) return;
 
-    @try {
-        if (self.rbsAssertion) {
-            [self.rbsAssertion invalidate];
-            self.rbsAssertion = nil;
-        }
+    NSString *attributeName = self.isStashed ? @"UserInitiated" : @"UserInteractive";
+    if (self.rbsAssertion && [self.rbsAssertionAttributeName isEqualToString:attributeName]) return;
 
+    if (![self.rbsAssertionLastAttemptedAttributeName isEqualToString:attributeName]) {
+        self.rbsAssertionLastAttemptedAttributeName = attributeName;
+        self.rbsAssertionFailureCount = 0;
+        self.rbsAssertionRetryAfter = 0;
+    }
+    if (self.rbsAssertionFailureCount >= 5) return;
+
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (now < self.rbsAssertionRetryAfter) return;
+
+    @try {
         RBSProcessIdentity *identity = [CV3ClassNamed(@"RBSProcessIdentity") identityForEmbeddedApplicationIdentifier:self.bundleID];
         RBSTarget *target = [CV3ClassNamed(@"RBSTarget") targetWithProcessIdentity:identity];
-        
-        // 所有可见分屏都必须维持 UserInteractive。否则 SpringBoard/RunningBoard
-        // 会把非最后聚焦的托管 App 当后台进程降级，表现为画面存在但触控/刷新冻结。
-        NSString *attributeName = self.isStashed ? @"UserInitiated" : @"UserInteractive";
-        
         RBSDomainAttribute *attr = [CV3ClassNamed(@"RBSDomainAttribute") attributeWithDomain:@"com.apple.common" name:attributeName];
-        
-        self.rbsAssertion = [[CV3ClassNamed(@"RBSAssertion") alloc] initWithExplanation:[NSString stringWithFormat:@"ChevronV3 Sovereignty (%@) for %@", attributeName, self.bundleID] 
-                                                                   target:target 
-                                                               attributes:@[attr]];
-        
+        if (!identity || !target || !attr) {
+            @throw [NSException exceptionWithName:@"CV3RBSConfigurationException"
+                                           reason:[NSString stringWithFormat:@"Unavailable RBS target or attribute %@", attributeName]
+                                         userInfo:nil];
+        }
+
+        RBSAssertion *replacement = [[CV3ClassNamed(@"RBSAssertion") alloc]
+            initWithExplanation:[NSString stringWithFormat:@"ChevronV3 Sovereignty (%@) for %@", attributeName, self.bundleID]
+            target:target
+            attributes:@[attr]];
+        if (!replacement) {
+            @throw [NSException exceptionWithName:@"CV3RBSConfigurationException"
+                                           reason:@"Unable to construct RBS assertion"
+                                         userInfo:nil];
+        }
+
         NSError *error = nil;
-        if ([self.rbsAssertion acquireWithError:&error]) {
+        if ([replacement acquireWithError:&error]) {
+            RBSAssertion *previous = self.rbsAssertion;
+            self.rbsAssertion = replacement;
+            self.rbsAssertionAttributeName = attributeName;
+            self.rbsAssertionFailureCount = 0;
+            self.rbsAssertionRetryAfter = 0;
+            [previous invalidate];
             CV3LogToFile(@"[Immortality] 已动态更新 %@ 优先级断言 -> %@", self.bundleID, attributeName);
             CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=RBSAssertionAcquired bundle=%@ attribute=%@",
                          self.bundleID, attributeName);
         } else {
+            [replacement invalidate];
+            self.rbsAssertionFailureCount++;
+            NSUInteger exponent = MIN(self.rbsAssertionFailureCount, (NSUInteger)5);
+            self.rbsAssertionRetryAfter = self.rbsAssertionFailureCount >= 5
+                ? DBL_MAX
+                : now + MIN(60.0, (NSTimeInterval)(1ULL << exponent));
             CV3LogToFile(@"[Error] RBSAssertion (%@) 更新失败: %@", attributeName, error);
+            if (self.rbsAssertionFailureCount >= 5) {
+                CV3LogToFile(@"[Warning] RBSAssertion (%@) 连续失败，已停止定时重试: %@", attributeName, self.bundleID);
+            }
         }
     } @catch (NSException *e) {
+        self.rbsAssertionFailureCount++;
+        NSUInteger exponent = MIN(self.rbsAssertionFailureCount, (NSUInteger)5);
+        self.rbsAssertionRetryAfter = self.rbsAssertionFailureCount >= 5
+            ? DBL_MAX
+            : now + MIN(60.0, (NSTimeInterval)(1ULL << exponent));
         CV3LogToFile(@"[Error] updateSovereigntyAssertion 异常: %@", e);
+        if (self.rbsAssertionFailureCount >= 5) {
+            CV3LogToFile(@"[Warning] RBSAssertion (%@) 连续异常，已停止定时重试: %@", attributeName, self.bundleID);
+        }
     }
 }
 
@@ -3700,34 +3742,7 @@ void CV3ToggleExposeMode(void) {
             [self ensureLaunchSplashVisible];
             [[UIApplication sharedApplication] launchApplicationWithIdentifier:self.bundleID suspended:YES];
             
-            // [Foreground Sovereignty] Inject RunningBoard assertion to prevent process suspension
-            if (self.rbsAssertion) {
-                [self.rbsAssertion invalidate];
-                self.rbsAssertion = nil;
-            }
-            
-            @try {
-                RBSProcessIdentity *identity = [CV3ClassNamed(@"RBSProcessIdentity") identityForEmbeddedApplicationIdentifier:self.bundleID];
-                RBSTarget *target = [CV3ClassNamed(@"RBSTarget") targetWithProcessIdentity:identity];
-                
-                // 使用 UserInteractive 域和 Foreground 属性，模拟原生前台 App 的优先级
-                RBSDomainAttribute *foregroundAttr = [CV3ClassNamed(@"RBSDomainAttribute") attributeWithDomain:@"com.apple.common" name:@"UserInteractive"];
-                
-                self.rbsAssertion = [[CV3ClassNamed(@"RBSAssertion") alloc] initWithExplanation:[NSString stringWithFormat:@"ChevronV3 Sovereignty for %@", self.bundleID] 
-                                                                           target:target 
-                                                                       attributes:@[foregroundAttr]];
-                
-                NSError *error = nil;
-                if ([self.rbsAssertion acquireWithError:&error]) {
-                    CV3LogToFile(@"[Immortality] 成功为 %@ 注入前台优先级断连 (RBSAssertion)", self.bundleID);
-                    CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=RBSAssertionAcquired bundle=%@ attribute=UserInteractive",
-                                 self.bundleID);
-                } else {
-                    CV3LogToFile(@"[Error] RBSAssertion 注入失败: %@", error);
-                }
-            } @catch (NSException *e) {
-                CV3LogToFile(@"[Error] RBSAssertion 流程异常: %@", e);
-            }
+            [self updateSovereigntyAssertion];
 
             // Start polling with initial delay of 0.3s, up to 10 retries (more resilient for cold starts)
             [self attemptToHostSceneWithRetries:10 delay:0.3];
@@ -4680,13 +4695,13 @@ void CV3ToggleExposeMode(void) {
     }
     if (self.hidden) return;
     
-    // 定时器触发，重新校验并刷新前台运行断言，防止断言在未知状态下失效或被系统回收
+    // State changes perform immediate updates. Matching assertions return immediately;
+    // this call only fills a missing assertion or retries a failed priority change.
     @try {
         [self updateSovereigntyAssertion];
     } @catch (NSException *e) {}
-    
-    // 动态调整定时间隔：低电量下退避至 15s 减少唤醒
-    NSTimeInterval targetInterval = isLowPower ? 15.0 : 5.0;
+
+    NSTimeInterval targetInterval = isLowPower ? 30.0 : 15.0;
     if (fabs(timer.timeInterval - targetInterval) > 0.1) {
         [self.assertionWatchdogTimer invalidate];
         self.assertionWatchdogTimer = [NSTimer scheduledTimerWithTimeInterval:targetInterval

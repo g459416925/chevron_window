@@ -99,6 +99,7 @@ typedef NS_ENUM(uint8_t, CV3PlaybackTraceEvent) {
 
 static BOOL CV3ControllerLikelyOwnsFullscreenVideo(UIViewController *controller);
 static void CV3InstallLifecycleDelegateHooks(void);
+static void CV3InstallHostedAppHooksIfNeeded(void);
 
 static uint64_t CV3StableBundleHash(NSString *bundleID) {
     const unsigned char *bytes = (const unsigned char *)[bundleID UTF8String];
@@ -188,6 +189,7 @@ static void CV3RefreshHostedState(int token) {
             CV3PlaybackTransitionGraceDeadline = now + 0.85;
         }
         if (CV3ApplicationIsChevronHosted) {
+            CV3InstallHostedAppHooksIfNeeded();
             dispatch_async(dispatch_get_main_queue(), ^{
                 CV3InstallLifecycleDelegateHooks();
             });
@@ -245,7 +247,7 @@ static IMP CV3OriginalLifecycleIMPForObject(id object, SEL selector) {
 }
 
 static void CV3LifecycleDelegateReplacement(id self, SEL selector, id context) {
-    if (CV3ApplicationIsChevronHosted) {
+    if (CV3ShouldProtectHostedPlayback()) {
         if (selector == @selector(applicationWillResignActive:)) {
             CV3PostPlaybackTrace(CV3PlaybackTraceApplicationWillResign);
         } else if (selector == @selector(applicationDidEnterBackground:)) {
@@ -401,6 +403,8 @@ static BOOL CV3ControllerLikelyOwnsFullscreenVideo(UIViewController *controller)
            [className rangeOfString:@"FullScreen" options:NSCaseInsensitiveSearch].location != NSNotFound;
 }
 
+%group CV3HostedAppHooks
+
 %hook UIWindowScene
 - (void)requestGeometryUpdateWithPreferences:(id)preferences errorHandler:(id)errorHandler {
     SEL selector = NSSelectorFromString(@"interfaceOrientations");
@@ -510,7 +514,7 @@ static BOOL CV3ControllerLikelyOwnsFullscreenVideo(UIViewController *controller)
 }
 
 - (UIApplicationState)applicationState {
-    if (CV3ApplicationIsChevronHosted) {
+    if (CV3ShouldProtectHostedPlayback()) {
         return UIApplicationStateActive;
     }
     return %orig;
@@ -524,7 +528,7 @@ static BOOL CV3ControllerLikelyOwnsFullscreenVideo(UIViewController *controller)
 }
 
 - (UISceneActivationState)activationState {
-    if (CV3ApplicationIsChevronHosted) {
+    if (CV3ShouldProtectHostedPlayback()) {
         return UISceneActivationStateForegroundActive;
     }
     return %orig;
@@ -535,10 +539,7 @@ static BOOL CV3ControllerLikelyOwnsFullscreenVideo(UIViewController *controller)
 - (void)_performBlock:(id)block
 withApplicationOfDeactivationReasons:(NSUInteger)reasons
           fromReasons:(NSUInteger)fromReasons {
-    // UIKit 会绕过 NSNotificationCenter，直接在此处向 App/Scene delegate
-    // 分发 willResignActive / didEnterBackground。整个托管生命周期内跳过整段
-    // lifecycle block，同时避免 UIApplication 内部的 deactivation mask 被更改。
-    if (CV3ApplicationIsChevronHosted && reasons != 0) {
+    if (CV3ShouldProtectHostedPlayback() && reasons != 0) {
         CV3PostPlaybackTrace(CV3PlaybackTraceLifecycleMultiplexer);
         NSLog(@"[ChevronV3VideoBridge] Suppressed lifecycle deactivation reasons=%lu from=%lu",
               (unsigned long)reasons,
@@ -551,7 +552,7 @@ withApplicationOfDeactivationReasons:(NSUInteger)reasons
 
 %hook NSNotificationCenter
 - (void)postNotification:(NSNotification *)notification {
-    if (CV3ApplicationIsChevronHosted &&
+    if (CV3ShouldProtectHostedPlayback() &&
         CV3IsLifecycleDeactivationNotification(notification.name)) {
         CV3PostPlaybackTrace(CV3PlaybackTraceLifecycleNotification);
         return;
@@ -564,7 +565,7 @@ withApplicationOfDeactivationReasons:(NSUInteger)reasons
 }
 
 - (void)postNotificationName:(NSNotificationName)name object:(id)object {
-    if (CV3ApplicationIsChevronHosted &&
+    if (CV3ShouldProtectHostedPlayback() &&
         CV3IsLifecycleDeactivationNotification(name)) {
         CV3PostPlaybackTrace(CV3PlaybackTraceLifecycleNotification);
         return;
@@ -573,7 +574,7 @@ withApplicationOfDeactivationReasons:(NSUInteger)reasons
 }
 
 - (void)postNotificationName:(NSNotificationName)name object:(id)object userInfo:(NSDictionary *)userInfo {
-    if (CV3ApplicationIsChevronHosted &&
+    if (CV3ShouldProtectHostedPlayback() &&
         CV3IsLifecycleDeactivationNotification(name)) {
         CV3PostPlaybackTrace(CV3PlaybackTraceLifecycleNotification);
         return;
@@ -585,6 +586,23 @@ withApplicationOfDeactivationReasons:(NSUInteger)reasons
     %orig(name, object, userInfo);
 }
 %end
+
+%end
+
+static BOOL CV3HostedAppHooksInstalled = NO;
+
+static void CV3InstallHostedAppHooksIfNeeded(void) {
+    if (CV3HostedAppHooksInstalled) return;
+    CV3HostedAppHooksInstalled = YES;
+    %init(CV3HostedAppHooks);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        CV3InstallLifecycleDelegateHooks();
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.75 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        CV3InstallLifecycleDelegateHooks();
+    });
+}
 
 %group CV3GlobalIconImageHooks
 %hook UIImage
@@ -659,14 +677,6 @@ withApplicationOfDeactivationReasons:(NSUInteger)reasons
                                  dispatch_get_main_queue(),
                                  ^(__unused int token) {
             CV3RefreshHostedState(CV3HostedStateNotificationToken);
-        });
-        %init;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            CV3InstallLifecycleDelegateHooks();
-        });
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.75 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            CV3InstallLifecycleDelegateHooks();
         });
     }
 }
