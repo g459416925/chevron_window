@@ -13,11 +13,13 @@ Target: iPhone 14 Pro Max, iOS 16.5.1, RootHide.
 - Open, focus, drag, resize, stash, restore and close one floating App.
 - Repeat with three simultaneous floating Apps and enter/exit Expose mode.
 - Kill a hosted App and confirm its Scene reconnects without a stale snapshot.
-- Lock/unlock, open Control Center and enter/exit App Switcher with windows active.
+- Lock with one or more windows active and verify hosted content and controls are hidden. Unlock and verify only non-stashed windows return without restarting their hosted Scenes.
+- Open Control Center and enter/exit App Switcher with windows active.
 - With an App hosted, tap its Home Screen, Dock, Spotlight and App Library icon; verify the existing floating window receives focus and no fullscreen transition or dim overlay begins.
-- Trigger the same hosted App through LaunchServices and a notification; verify the fullscreen launch is rejected until the floating window is closed.
-- Trigger a notification launch while the underlying LaunchServices request runs on a global queue; verify all panel dismissal and floating-window UI work is handed to the main thread and SpringBoard does not abort with `CA_ABORT_ON_NON_MAIN_THREAD_TRANSACTION_PUSH`.
+- Deliver a new notification while unlocked and verify the top/Dynamic Island banner appears without opening a hosted window. Tap the live banner and verify it opens exactly one split-screen window.
+- While locked, deliver and tap a lock-screen notification. Verify the system opens the App normally and Chevron does not create or focus a split-screen window.
 - Enter App Switcher with one and three hosted Apps. Verify hosted cards are invisible, unrelated cards remain visible and horizontally scroll without delayed touches.
+- Compare portrait and landscape App Switcher layouts. Verify all unrelated cards use one consistent size and the invisible hosted card does not collapse surrounding geometry.
 - Repeatedly enter and leave App Switcher 20 times; verify no floating window becomes the key window while the switcher is visible and SpringBoard does not enter Safe Mode.
 
 ## Identity isolation
@@ -68,5 +70,6 @@ Target: iPhone 14 Pro Max, iOS 16.5.1, RootHide.
 - Repeat open/resize/close for at least 30 cycles and inspect memory growth.
 - Exercise Low Power Mode and a memory warning.
 - Inspect SpringBoard crash logs, RunningBoard messages and `ChevronV3_Logs.txt` for errors.
+- If an RBS attribute is unavailable, verify retries stop after five failures and resume only after the window changes between visible and stashed priority.
 - Respring or deliberately terminate SpringBoard while an App is hosted; after SpringBoard returns, verify the client does not retain stale hosted/audio-protection state.
 - While hosted but outside a workspace transition, pause playback and deactivate the App audio session; verify those explicit App actions are not suppressed.

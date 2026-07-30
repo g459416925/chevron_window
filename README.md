@@ -20,4 +20,4 @@ Both `arm64` and `arm64e` are built. The target environment is RootHide on iOS 1
 
 ## Diagnostics
 
-Runtime diagnostics are written to `/var/mobile/Documents/ChevronV3_Logs.txt`. A successful build only validates compilation; use the device matrix in `test_plan.md` before release.
+Runtime diagnostics are written to `/var/mobile/Library/Logs/ChevronV3_Logs.txt` and rotated to `ChevronV3_Logs.txt.1` at 10 MB. A successful build only validates compilation; use the device matrix in `test_plan.md` before release.
