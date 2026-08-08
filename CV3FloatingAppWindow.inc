@@ -1608,11 +1608,27 @@ void CV3ToggleExposeMode(void) {
     UIVisualEffectView *blurView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterial]];
     blurView.userInteractionEnabled = NO;
     blurView.clipsToBounds = YES;
+    if (@available(iOS 13.0, *)) {
+        blurView.layer.cornerCurve = kCACornerCurveContinuous;
+    }
     [bar addSubview:blurView];
+
+    // Apple Design: 经典 iOS 内嵌指示胶囊条 (Home Capsule Pill)
+    UIView *pill = [[UIView alloc] initWithFrame:CGRectZero];
+    pill.backgroundColor = [[UIColor labelColor] colorWithAlphaComponent:0.65];
+    pill.userInteractionEnabled = NO;
+    pill.layer.cornerRadius = 2.25;
+    if (@available(iOS 13.0, *)) {
+        pill.layer.cornerCurve = kCACornerCurveContinuous;
+    }
+    [blurView.contentView addSubview:pill];
 
     CAGradientLayer *glow = [CAGradientLayer layer];
     glow.startPoint = CGPointMake(0.0, 0.5);
     glow.endPoint = CGPointMake(1.0, 0.5);
+    if (@available(iOS 13.0, *)) {
+        glow.cornerCurve = kCACornerCurveContinuous;
+    }
     [bar.layer insertSublayer:glow atIndex:0];
 
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleHomeBarTap:)];
@@ -1632,6 +1648,7 @@ void CV3ToggleExposeMode(void) {
     self.homeBarView = bar;
     self.homeBarBlurView = blurView;
     self.homeBarGlowLayer = glow;
+    self.homeBarPillIndicator = pill;
     self.homeBarPlacement = 0;
     UIView *homeBarContainer = self.appContentWrapper ?: self;
     [homeBarContainer addSubview:self.homeBarView];
@@ -1829,6 +1846,14 @@ void CV3ToggleExposeMode(void) {
     self.homeBarBlurView.layer.cornerRadius = barThickness / 2.0;
     self.homeBarGlowLayer.frame = self.homeBarView.bounds;
     self.homeBarGlowLayer.cornerRadius = barThickness / 2.0;
+
+    if (self.homeBarPillIndicator) {
+        CGFloat pillW = 36.0 * scale;
+        CGFloat pillH = 4.5 * scale;
+        self.homeBarPillIndicator.bounds = CGRectMake(0, 0, pillW, pillH);
+        self.homeBarPillIndicator.center = CGPointMake(barLength * 0.5, barThickness * 0.5);
+        self.homeBarPillIndicator.layer.cornerRadius = pillH * 0.5;
+    }
 
     CGPoint center = CGPointMake(CGRectGetMidX(bounds), CGRectGetMaxY(bounds) - barThickness * 0.5 + protrusion);
     CGAffineTransform orientationTransform = CGAffineTransformIdentity;
@@ -2028,6 +2053,17 @@ void CV3ToggleExposeMode(void) {
         self.bounds = CGRectMake(0, 0, newFrame.size.width, newFrame.size.height);
         self.center = CGPointMake(CGRectGetMidX(newFrame), CGRectGetMidY(newFrame));
         [self layoutFloatingHomeBarForBounds:self.appContentWrapper.bounds];
+        
+        // Apple Design Rule 8: 拖拽动态 Morphing 形变暗示
+        if (self.homeBarPillIndicator) {
+            CGFloat scale = MIN(1.18, MAX(0.82, finalWidth / 390.0));
+            CGFloat pillStretch = MIN(14.0, fabs(dominantTranslation) * 0.15);
+            CGFloat pillW = 36.0 * scale + pillStretch;
+            CGFloat pillH = 4.5 * scale;
+            self.homeBarPillIndicator.bounds = CGRectMake(0, 0, pillW, pillH);
+            self.homeBarPillIndicator.layer.cornerRadius = pillH * 0.5;
+            self.homeBarPillIndicator.backgroundColor = [[UIColor labelColor] colorWithAlphaComponent:0.95];
+        }
         [CATransaction commit];
         [self syncWindowBoundsToClientAndNotify:NO];
     }
@@ -2080,9 +2116,17 @@ void CV3ToggleExposeMode(void) {
             CGFloat finalRadius = MAX(CV3Style.adaptiveCornerRadiusMin, MIN(CV3Style.adaptiveCornerRadiusMax, minEdge * CV3Style.adaptiveCornerRadiusRatio));
             [self visualShadowLayer].shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:finalRadius].CGPath;
             [self animateFocusShadow:self.isFocused];
-            [UIView animateWithDuration:0.4 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
+            [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.80 initialSpringVelocity:0.5 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
                 self.glassBackdrop.effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial];
                 self.glassBackdrop.backgroundColor = [UIColor clearColor];
+                if (self.homeBarPillIndicator) {
+                    CGFloat minEdge = MIN(self.bounds.size.width, self.bounds.size.height);
+                    CGFloat scale = MIN(1.18, MAX(0.82, minEdge / 390.0));
+                    CGFloat pillW = 36.0 * scale;
+                    CGFloat pillH = 4.5 * scale;
+                    self.homeBarPillIndicator.bounds = CGRectMake(0, 0, pillW, pillH);
+                    self.homeBarPillIndicator.backgroundColor = [[UIColor labelColor] colorWithAlphaComponent:0.65];
+                }
             } completion:nil];
         }
 
@@ -2107,8 +2151,8 @@ void CV3ToggleExposeMode(void) {
 
         UIView *snapshot = self.liveResizeSnapshotView;
         self.liveResizeSnapshotView = nil;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [UIView animateWithDuration:0.4 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [UIView animateWithDuration:0.25 delay:0 options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState animations:^{
                 self.hostView.alpha = 1.0;
                 if (snapshot) snapshot.alpha = 0;
             } completion:^(BOOL finished) {
@@ -2158,8 +2202,9 @@ void CV3ToggleExposeMode(void) {
 
             snapFrame = [self constrainedFloatingFrameForSize:finalSize preferredCenter:CGPointMake(CGRectGetMidX(snapFrame), CGRectGetMidY(snapFrame))];
 
-            CGFloat springVelocity = MIN(4.0, MAX(0.5, fabs(axisVelocity) / 800.0));
-            [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.75 initialSpringVelocity:springVelocity options:0 animations:^{
+            CGFloat springVelocity = MIN(3.5, MAX(0.6, fabs(axisVelocity) / 750.0));
+            // Stage Manager 级流体 Spring 阻尼与动量过渡
+            [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.82 initialSpringVelocity:springVelocity options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
                 self.bounds = CGRectMake(0, 0, snapFrame.size.width, snapFrame.size.height);
                 self.center = CGPointMake(CGRectGetMidX(snapFrame), CGRectGetMidY(snapFrame));
                 [self setNeedsLayout];
@@ -2603,7 +2648,7 @@ void CV3ToggleExposeMode(void) {
         [self ensureLaunchSplashVisible];
         
         // 侧边隐藏拉手 (Grabber -> Prism Switcher)
-        self.stashGrabber = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kCV3StashIconSize, kCV3StashIconSize)];
+        self.stashGrabber = [[CV3StashGrabberView alloc] initWithFrame:CGRectMake(0, 0, kCV3StashIconSize, kCV3StashIconSize)];
         self.stashGrabber.backgroundColor = [UIColor clearColor];
         self.stashGrabber.layer.cornerRadius = 0;
         self.stashGrabber.layer.borderWidth = 0;
@@ -3506,22 +3551,12 @@ void CV3ToggleExposeMode(void) {
         jellyTransform = CGAffineTransformMakeScale(scaleX, scaleY);
     } else {
         if (self.collisionReleaseValue > 0.001) {
-            if (self.collisionReleaseTime == 0) {
-                self.collisionReleaseTime = CACurrentMediaTime();
-            }
-            NSTimeInterval elapsed = CACurrentMediaTime() - self.collisionReleaseTime;
-            if (elapsed < 0.4) {
-                CGFloat decay = exp(-elapsed * 10.0);
-                CGFloat overshoot = self.collisionReleaseValue * decay * sin(elapsed * 25.0);
-                
-                CGFloat scaleX = (self.collisionReleaseAxis == 1) ? (1.0 + overshoot) : 1.0;
-                CGFloat scaleY = (self.collisionReleaseAxis == 2) ? (1.0 + overshoot) : 1.0;
-                jellyTransform = CGAffineTransformMakeScale(scaleX, scaleY);
-                [self setNeedsLayout];
-            } else {
-                self.collisionReleaseValue = 0;
-                self.collisionReleaseTime = 0;
-            }
+            self.collisionReleaseValue = 0;
+            self.collisionReleaseTime = 0;
+            // 优化：解耦 layoutSubviews 递归 pass，改用平滑 Spring 过渡复位
+            [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.75 initialSpringVelocity:0.5 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+                self.rootTransformContainer.transform = CGAffineTransformIdentity;
+            } completion:nil];
         }
     }
     self.rootTransformContainer.transform = CGAffineTransformConcat(self.rootTransformContainer.transform, jellyTransform);
@@ -3534,6 +3569,10 @@ void CV3ToggleExposeMode(void) {
     CGFloat adaptiveRadius = MAX(CV3Style.adaptiveCornerRadiusMin, MIN(CV3Style.adaptiveCornerRadiusMax, minEdge * CV3Style.adaptiveCornerRadiusRatio));
     self.layer.cornerRadius = adaptiveRadius;
     self.clippingContainer.layer.cornerRadius = adaptiveRadius;
+    if (@available(iOS 13.0, *)) {
+        self.layer.cornerCurve = kCACornerCurveContinuous;
+        self.clippingContainer.layer.cornerCurve = kCACornerCurveContinuous;
+    }
     self.clippingContainer.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;
 
     [CATransaction begin];
@@ -3549,6 +3588,12 @@ void CV3ToggleExposeMode(void) {
     
     self.specularHighlight.frame = self.clippingContainer.bounds;
     self.specularHighlight.cornerRadius = adaptiveRadius;
+    if (@available(iOS 13.0, *)) {
+        self.cyanLayer.cornerCurve = kCACornerCurveContinuous;
+        self.magentaLayer.cornerCurve = kCACornerCurveContinuous;
+        self.innerGlowLayer.cornerCurve = kCACornerCurveContinuous;
+        self.specularHighlight.cornerCurve = kCACornerCurveContinuous;
+    }
     [CATransaction commit];
 
     // 5. 更新内部 App 场景 (等比铺满算法：基于直立窗口比例动态映射虚拟画布)
@@ -4319,10 +4364,13 @@ void CV3ToggleExposeMode(void) {
         [gen impactOccurred];
 
         self.isLiveResizing = YES;
-        [self visualShadowLayer].shadowPath = nil;
+        CALayer *shadowLayer = [self visualShadowLayer];
+        shadowLayer.shadowPath = nil;
+        shadowLayer.shouldRasterize = YES;
+        shadowLayer.rasterizationScale = [UIScreen mainScreen].scale;
         [self startLiquidMotion];
         [UIView animateWithDuration:0.2 animations:^{
-            [self visualShadowLayer].shadowOpacity = CV3Style.shadowOpacityUnfocused * 0.5;
+            shadowLayer.shadowOpacity = CV3Style.shadowOpacityUnfocused * 0.5;
             self.glassBackdrop.effect = nil;
             self.glassBackdrop.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.2];
         }];
@@ -4458,6 +4506,8 @@ void CV3ToggleExposeMode(void) {
         gesture.state == UIGestureRecognizerStateFailed) {
         
         [self stopLiquidMotion];
+        
+        [self visualShadowLayer].shouldRasterize = NO;
         
         if (gesture.state != UIGestureRecognizerStateEnded) {
             self.isLiveResizing = NO;

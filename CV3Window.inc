@@ -1091,20 +1091,30 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     UIInterfaceOrientation accessoryOrientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
     BOOL accessoryAllowed = !UIInterfaceOrientationIsLandscape(accessoryOrientation);
 
-    // 优化：仅在必要时刷新 inputAccessoryView。横屏时禁用，避免键盘附件脱离主面板旋转坐标。
-    if (!hasSearch && accessoryAllowed) {
-        if (!self.searchField.inputAccessoryView && self.apps.count > 0) {
-            NSArray *topApps = [self.apps subarrayWithRange:NSMakeRange(0, MIN(5, self.apps.count))];
+    // 键盘候选 App 快捷栏 (inputAccessoryView)：未搜索时展示常驻/最近 App，搜索时动态展示匹配候选 App
+    if (accessoryAllowed) {
+        NSArray<CV3AppInfo *> *candidateSource = hasSearch ? self.filteredApps : (self.recentlyUsedApps.count > 0 ? self.recentlyUsedApps : self.apps);
+        if (candidateSource.count > 0) {
+            NSArray *topCandidates = [candidateSource subarrayWithRange:NSMakeRange(0, MIN(6, candidateSource.count))];
             __weak typeof(self) weakSelf = self;
-            self.searchField.inputAccessoryView = [[CV3QuickAccessView alloc] initWithApps:topApps selectionHandler:^(CV3AppInfo *appInfo) {
+            self.searchField.inputAccessoryView = [[CV3QuickAccessView alloc] initWithApps:topCandidates selectionHandler:^(CV3AppInfo *appInfo) {
                 [weakSelf launchApp:appInfo];
             }];
-            [self.searchField reloadInputViews];
+            if (self.searchField.isFirstResponder) {
+                [self.searchField reloadInputViews];
+            }
+        } else if (self.searchField.inputAccessoryView) {
+            self.searchField.inputAccessoryView = nil;
+            if (self.searchField.isFirstResponder) {
+                [self.searchField reloadInputViews];
+            }
         }
     } else {
         if (self.searchField.inputAccessoryView) {
             self.searchField.inputAccessoryView = nil;
-            [self.searchField reloadInputViews];
+            if (self.searchField.isFirstResponder) {
+                [self.searchField reloadInputViews];
+            }
         }
     }
     self.noResultsLabel.hidden = (self.filteredApps.count > 0);
@@ -1145,6 +1155,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     if (textField == self.searchField) {
         CV3SetKeyboardSuppressedByPanel(self.isPanelShowing);
         CV3ExitExposeModeIfNeeded(nil, NO);
+        [self filterApps];
         UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
         CV3LogToFile(@"[Warning][KeyboardDebug] didBegin searchField orientation=%ld isFirstResponder=%d window=%@ keyWindow=%d accessory=%@ inputView=%@",
                      (long)orientation,
@@ -1155,57 +1166,17 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
                      textField.inputView);
         UIView *container = textField.superview;
         
-        // 建议2：搜索框液态响应 (Liquid Search Focus)
-        // 面板圆角呼吸动画：28pt -> 32pt -> 28pt
-        CABasicAnimation *cornerAnim = [CABasicAnimation animationWithKeyPath:@"cornerRadius"];
-        cornerAnim.fromValue = @(CV3Style.cornerRadius);
-        cornerAnim.toValue = @(32.0);
-        cornerAnim.duration = 0.6;
-        cornerAnim.autoreverses = YES;
-        cornerAnim.repeatCount = HUGE_VALF;
-        cornerAnim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-        [self.appPanel.layer addAnimation:cornerAnim forKey:@"liquidCorner"];
-
-        // 1. 基础缩放与阴影动画
-        [UIView animateWithDuration:0.5 delay:0 options:UIViewAnimationOptionAutoreverse | UIViewAnimationOptionRepeat | UIViewAnimationOptionAllowUserInteraction animations:^{
-            container.transform = CGAffineTransformMakeScale(1.02, 1.02);
+        // 搜索框焦点态：单次平滑 Spring 响应 (根据 emil-design-eng & fixing-motion-performance 规范，避免无限循环 CPU/GPU 重绘)
+        CGFloat concentricRadius = CV3ConcentricCornerRadius(CV3Style.cornerRadius, 15.0);
+        [UIView animateWithDuration:0.25 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0.3 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+            container.transform = CGAffineTransformMakeScale(1.015, 1.015);
             self.searchBackground.shadowColor = [UIColor labelColor].CGColor;
             self.searchBackground.shadowOffset = CGSizeZero;
-            self.searchBackground.shadowOpacity = 0.4;
-            self.searchBackground.shadowRadius = 8.0;
+            self.searchBackground.shadowOpacity = 0.25;
+            self.searchBackground.shadowRadius = 6.0;
+            self.searchBackground.strokeColor = [[UIColor cyanColor] colorWithAlphaComponent:0.5].CGColor;
+            self.searchBackground.path = [UIBezierPath bezierPathWithRoundedRect:self.searchBackground.bounds cornerRadius:concentricRadius].CGPath;
         } completion:nil];
-
-        // 2. 液态形变路径动画 (Deformation)
-        CGRect b = self.searchBackground.bounds;
-        UIBezierPath *liquidPath = [UIBezierPath bezierPath];
-        CGFloat offset = 4.0;
-        [liquidPath moveToPoint:CGPointMake(10, 0)];
-        [liquidPath addQuadCurveToPoint:CGPointMake(b.size.width-10, 0) controlPoint:CGPointMake(b.size.width/2, -offset)];
-        [liquidPath addQuadCurveToPoint:CGPointMake(b.size.width, 10) controlPoint:CGPointMake(b.size.width+offset, 0)];
-        [liquidPath addQuadCurveToPoint:CGPointMake(b.size.width, b.size.height-10) controlPoint:CGPointMake(b.size.width-offset, b.size.height/2)];
-        [liquidPath addQuadCurveToPoint:CGPointMake(b.size.width-10, b.size.height) controlPoint:CGPointMake(b.size.width, b.size.height+offset)];
-        [liquidPath addQuadCurveToPoint:CGPointMake(10, b.size.height) controlPoint:CGPointMake(b.size.width/2, b.size.height-offset)];
-        [liquidPath addQuadCurveToPoint:CGPointMake(0, b.size.height-10) controlPoint:CGPointMake(-offset, b.size.height)];
-        [liquidPath addQuadCurveToPoint:CGPointMake(0, 10) controlPoint:CGPointMake(offset, b.size.height/2)];
-        [liquidPath addQuadCurveToPoint:CGPointMake(10, 0) controlPoint:CGPointMake(0, -offset)];
-        [liquidPath closePath];
-
-        CABasicAnimation *pathAnim = [CABasicAnimation animationWithKeyPath:@"path"];
-        pathAnim.toValue = (id)liquidPath.CGPath;
-        pathAnim.duration = 0.4;
-        pathAnim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-        pathAnim.fillMode = kCAFillModeForwards;
-        pathAnim.removedOnCompletion = NO;
-        [self.searchBackground addAnimation:pathAnim forKey:@"liquidPath"];
-
-        // 3. 边框颜色流转
-        CABasicAnimation *colorAnim = [CABasicAnimation animationWithKeyPath:@"strokeColor"];
-        colorAnim.fromValue = (id)self.searchBackground.strokeColor;
-        colorAnim.toValue = (id)[[UIColor cyanColor] colorWithAlphaComponent:0.6].CGColor;
-        colorAnim.duration = 1.5;
-        colorAnim.autoreverses = YES;
-        colorAnim.repeatCount = HUGE_VALF;
-        [self.searchBackground addAnimation:colorAnim forKey:@"colorFlow"];
     }
 }
 
@@ -1221,17 +1192,17 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         UIView *container = textField.superview;
         [container.layer removeAllAnimations];
         [self.searchBackground removeAllAnimations];
-        [self.appPanel.layer removeAnimationForKey:@"liquidCorner"];
 
+        CGFloat concentricRadius = CV3ConcentricCornerRadius(CV3Style.cornerRadius, 15.0);
         void (^resetSearchVisuals)(void) = ^{
             container.transform = CGAffineTransformIdentity;
             self.searchBackground.shadowOpacity = 0;
             self.searchBackground.shadowRadius = 0;
-            self.searchBackground.path = [UIBezierPath bezierPathWithRoundedRect:self.searchBackground.bounds cornerRadius:10].CGPath;
+            self.searchBackground.path = [UIBezierPath bezierPathWithRoundedRect:self.searchBackground.bounds cornerRadius:concentricRadius].CGPath;
             self.searchBackground.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.1].CGColor;
         };
         if (self.isPanelShowing) {
-            [UIView animateWithDuration:0.3 animations:resetSearchVisuals];
+            [UIView animateWithDuration:0.25 delay:0 options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState animations:resetSearchVisuals completion:nil];
         } else {
             [UIView performWithoutAnimation:resetSearchVisuals];
         }
@@ -1548,8 +1519,11 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     self.searchField.textColor = [UIColor labelColor];
     self.searchField.font = [UIFont systemFontOfSize:14];
     self.searchField.tintColor = [UIColor labelColor];
-    // 设置占位符颜色
-    self.searchField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"搜索应用..." attributes:@{NSForegroundColorAttributeName: [UIColor secondaryLabelColor]}];
+    // Apple Design Rule 15: 小字号 +0.15pt Tracking 提升精致可读性
+    self.searchField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"搜索应用..." attributes:@{
+        NSForegroundColorAttributeName: [UIColor secondaryLabelColor],
+        NSKernAttributeName: @(0.15)
+    }];
     [self.searchField addTarget:self action:@selector(searchTextChanged:) forControlEvents:UIControlEventEditingChanged];
     self.searchField.delegate = self;
     self.searchField.returnKeyType = UIReturnKeySearch;
@@ -1558,9 +1532,11 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 
 #pragma mark - No Results Label Setup
     self.noResultsLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 150, CV3Style.panelW, 40)];
-    self.noResultsLabel.text = @"未找到相关应用";
-    self.noResultsLabel.textColor = [UIColor secondaryLabelColor];
-    self.noResultsLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    self.noResultsLabel.attributedText = [[NSAttributedString alloc] initWithString:@"未找到相关应用" attributes:@{
+        NSForegroundColorAttributeName: [UIColor secondaryLabelColor],
+        NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightMedium],
+        NSKernAttributeName: @(0.15)
+    }];
     self.noResultsLabel.textAlignment = NSTextAlignmentCenter;
     self.noResultsLabel.hidden = YES;
     [self.appPanel.contentView addSubview:self.noResultsLabel];
@@ -1569,6 +1545,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     self.categoryBar = [[UIScrollView alloc] initWithFrame:CGRectMake(15, 96, CV3Style.panelW - 30, 40)];
     self.categoryBar.showsHorizontalScrollIndicator = NO;
     self.categoryBar.backgroundColor = [UIColor clearColor];
+    self.categoryBar.delegate = self;
     [self.appPanel.contentView addSubview:self.categoryBar];
 
     self.resizingHandle = [[CV3ResizeHandleView alloc] initWithFrame:CGRectMake(CV3Style.panelW - 40, CV3Style.panelH - 40, 40, 40)];
@@ -2402,13 +2379,14 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 }
 
 - (void)btnTouchDown:(UIButton *)sender {
-    [UIView animateWithDuration:0.2 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
-        sender.transform = CGAffineTransformMakeScale(0.85, 0.85);
+    // Apple Design Rule 1: Instant response on touch-down (Scale 0.96 for natural physical resistance)
+    [UIView animateWithDuration:0.12 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+        sender.transform = CGAffineTransformMakeScale(0.94, 0.94);
     } completion:nil];
 }
 
 - (void)btnTouchUp:(UIButton *)sender {
-    [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.5 initialSpringVelocity:0.5 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+    [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.78 initialSpringVelocity:0.6 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
         sender.transform = CGAffineTransformIdentity;
     } completion:nil];
 }
@@ -2768,9 +2746,16 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             self.bezierLayer.path = [self pathForStretch:MAX(0, stretch) atPoint:location velocity:velocity orientation:orientation].CGPath;
             [CATransaction commit];
 
-            // 仅进行手势拉伸图形绘制，延迟 dimmingView 等呈现准备工作至阈值触发后
-            // 建议 3：Tactile Granularity (触觉颗粒感)
+            // Apple Design Rule 2: 1:1 动态面板 Peeking 随动预览
             CGFloat triggerProgress = MIN(1.0, MAX(0.0, stretch / MAX(triggerDistance, 1.0)));
+            if (!self.isPanelShowing) {
+                self.panelContainer.hidden = NO;
+                self.panelContainer.alpha = triggerProgress * 0.45;
+                CGAffineTransform peekTransform = CGAffineTransformScale(self.baseRotationTransform, 0.91 + triggerProgress * 0.09, 0.91 + triggerProgress * 0.09);
+                self.panelContainer.transform = peekTransform;
+            }
+
+            // 触觉颗粒感 (Tactile Granularity)
             CGFloat hapticInterval = MAX(8.0, 20.0 - triggerProgress * 12.0);
             if (fabs(stretch - self.lastHapticX) > hapticInterval) {
                 UIImpactFeedbackGenerator *rigid = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid];
@@ -2795,7 +2780,11 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         self.triggerPreviewLayer.opacity = 0;
         [CATransaction commit];
 
-        if (self.bezierContainer.alpha > 0 && !self.isPanelShowing && vel > 300 && gesture.state != UIGestureRecognizerStateCancelled) {
+        // Apple Design Rule 6: 滑行动量投射 Endpoint 预测 (Deceleration Projection)
+        CGFloat projectedStretch = stretch + (vel / 1000.0) * 0.998 / (1.0 - 0.998);
+        BOOL shouldActivate = (stretch > triggerDistance || projectedStretch > triggerDistance || vel > 320.0);
+
+        if (self.bezierContainer.alpha > 0 && !self.isPanelShowing && shouldActivate && gesture.state == UIGestureRecognizerStateEnded) {
             [self requestPanelPresentationFromPoint:location velocity:vel];
         } else if (!self.isPanelShowing) {
             // 修复：确保中断时重置所有状态
@@ -2842,8 +2831,14 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 }
 
 
+static inline CGFloat CV3AppleRubberband(CGFloat x, CGFloat dimension) {
+    CGFloat c = 0.55;
+    return (x * dimension * c) / (dimension + c * fabs(x));
+}
+
 - (UIBezierPath *)pathForStretch:(CGFloat)stretch atPoint:(CGPoint)point velocity:(CGPoint)velocity orientation:(UIInterfaceOrientation)orientation {
-    CGFloat s = MIN(stretch * 0.7, 95); 
+    // Apple Design Rule 9: 苹果官方对数 Rubber-Banding 连续抗力函数 (替代硬性 95pt 线性钳位)
+    CGFloat s = CV3AppleRubberband(MAX(0, stretch), 110.0); 
     CGFloat baseW = 130 + stretch * 0.2;
     CGFloat cp1Offset = 65 + stretch * 0.5;
     CGFloat cp2Offset = 45 + stretch * 0.2;
@@ -2913,15 +2908,12 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 }
 
 - (void)animateSpotlight:(BOOL)visible fromPoint:(CGPoint)point velocity:(CGFloat)velocity {
-    // Dismissal may interrupt presentation; repeated dismissal and a second
-    // presentation request still wait for the active transition to finish.
-    if (self.isAnimating && (visible || !self.isPanelShowing)) return;
+    // Apple Design Rule 3: 绝对中断性支持 — 移除硬卡顿阻断，支持动效中途反向实时接管
+    self.isPanelShowing = visible;
+    self.isAnimating = YES;
     if (visible) {
         CV3SetHomeScreenPullDownSuppressed(YES);
         CV3ExitExposeModeIfNeeded(nil, NO);
-    }
-    self.isPanelShowing = visible; self.isAnimating = YES;
-    if (visible) {
         UIViewPropertyAnimator *visibilityAnimator = self.panelVisibilityAnimator;
         self.panelDismissCompletion = nil;
         self.panelVisibilityAnimator = nil;
@@ -2966,7 +2958,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         self.trafficCapsule.transform = CGAffineTransformIdentity;
         self.resizingHandle.transform = CGAffineTransformIdentity;
 
-        // 设置初始 bounds 和子组件大小，防止在 layoutSubviews 锁定期间出现错位
+        // 设置初始 bounds 和子组件大小
         self.panelContainer.bounds = CGRectMake(0, 0, targetW, targetH);
         self.appPanel.frame = self.panelContainer.bounds;
         
@@ -2974,7 +2966,8 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         searchContainer.frame = CGRectMake(15, 50, targetW - 30, 36);
         self.searchField.frame = CGRectInset(searchContainer.bounds, 10, 0);
         self.searchBackground.frame = searchContainer.bounds;
-        self.searchBackground.path = [UIBezierPath bezierPathWithRoundedRect:searchContainer.bounds cornerRadius:10].CGPath;
+        CGFloat concentricRadius = CV3ConcentricCornerRadius(CV3Style.cornerRadius, 15.0);
+        self.searchBackground.path = [UIBezierPath bezierPathWithRoundedRect:searchContainer.bounds cornerRadius:concentricRadius].CGPath;
 
         self.categoryBar.frame = CGRectMake(15, 96, targetW - 30, 40);
         self.collectionView.frame = CGRectMake(0, 140, targetW, targetH - 140);
@@ -2993,25 +2986,29 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         self.panelContainer.layer.shadowRadius = CV3Style.shadowRadiusMask;
         self.panelContainer.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.panelContainer.bounds cornerRadius:CV3Style.cornerRadius].CGPath;
 
-        // Start compact and asymmetrical so the spring visibly overshoots in
-        // both axes, producing the launcher panel's jelly-like pop.
+        // Apple Design Rule 7: 来源锚定 (Anchor to Source)
+        // 计算手势触发点与居中目标的向量差，在初始帧赋予微小来源偏移与位移拉伸
+        CGPoint targetCenter = (self.cachedTargetCenter.x > 0) ? self.cachedTargetCenter : [self calculateTargetCenter];
+        CGFloat offsetX = (point.x > 0 && point.x < self.bounds.size.width) ? (point.x - targetCenter.x) * 0.12 : 0;
+        CGFloat offsetY = (point.y > 0 && point.y < self.bounds.size.height) ? (point.y - targetCenter.y) * 0.12 : 0;
+        
         CGFloat jellyStrength = kCV3PanelJellyStrength;
-        CGFloat velocityStretch = MIN(fabs(velocity) / 8000.0, 0.08) * jellyStrength;
-        CGFloat initialScaleX = 0.90 - jellyStrength * 0.43 - velocityStretch;
-        CGFloat initialScaleY = 0.90 - jellyStrength * 0.19 + velocityStretch * 0.25;
-        CGFloat springVelocity = MIN(2.4, MAX(1.15, fabs(velocity) / 1400.0));
-        CGFloat springDamping = 0.82 - jellyStrength * 0.42;
-        self.panelPresentationStartTransform = CGAffineTransformScale(initialRotation,
-                                                                       initialScaleX,
-                                                                       initialScaleY);
+        CGFloat velocityStretch = MIN(fabs(velocity) / 7500.0, 0.09) * jellyStrength;
+        CGFloat initialScaleX = 0.91 - jellyStrength * 0.35 - velocityStretch;
+        CGFloat initialScaleY = 0.91 - jellyStrength * 0.15 + velocityStretch * 0.20;
+        
+        // Apple Design Rule 5 & 6: 速度手接 handoff 与 Spring 速度换算
+        CGFloat springVelocity = MIN(3.2, MAX(1.10, fabs(velocity) / 1200.0));
+        CGFloat springDamping = 0.82;
+        
+        CGAffineTransform sourceTransform = CGAffineTransformTranslate(initialRotation, offsetX, offsetY);
+        self.panelPresentationStartTransform = CGAffineTransformScale(sourceTransform, initialScaleX, initialScaleY);
         CV3RemoveViewAnimationsRecursively(self.panelContainer);
         self.panelContainer.transform = self.panelPresentationStartTransform;
         self.panelContainer.alpha = 0;
         self.appPanelPresentationStartTransform = CGAffineTransformIdentity;
         self.appPanel.transform = CGAffineTransformIdentity;
 
-        // 建议3：使用预热缓存的中心点 (Layout Pre-warming)
-        CGPoint targetCenter = (self.cachedTargetCenter.x > 0) ? self.cachedTargetCenter : [self calculateTargetCenter];
         self.panelContainer.center = targetCenter;
 
         void (^presentationAnimations)(void) = ^{
@@ -3148,25 +3145,13 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
 - (void)scrollViewWillBeginDragging:(UIScrollView *)scrollView {
     [self.searchField resignFirstResponder];
-    [self.collectionView.layer removeAllAnimations];
-    for (UICollectionViewCell *cell in self.collectionView.visibleCells) {
-        [cell.layer removeAllAnimations];
-        cell.transform = CGAffineTransformIdentity;
-        cell.alpha = 1.0;
-    }
 }
 
 - (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView {
-    [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.6 initialSpringVelocity:0.5 options:0 animations:^{
-        self.collectionView.layer.transform = CATransform3DIdentity;
-        self.collectionView.alpha = 1.0;
-    } completion:nil];
+    // 减速自然归位：保持主线程零干预，使原生 120Hz ProMotion 减速平滑衰减至静止
 }
 
 - (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {
-    if (!decelerate) {
-        [self scrollViewDidEndDecelerating:scrollView];
-    }
 }
 
 static NSInteger CV3UnreadCountFromIconObject(id icon) {
