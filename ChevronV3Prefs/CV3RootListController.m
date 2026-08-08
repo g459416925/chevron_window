@@ -48,7 +48,20 @@ static PSSpecifier *CV3Group(NSString *name, NSString *footer) {
                                                            edit:nil];
     send->action = @selector(sendSimulatedNotification:);
 
-    _specifiers = [@[group, bundleID, send] mutableCopy];
+    PSSpecifier *homeGroup = CV3Group(@"主屏幕编辑手势控制", @"禁止长按主屏幕空白处进入编辑模式。开启后，仅支持通过长按 App 图标或从 App 快捷菜单中选择“编辑主屏幕”进入编辑模式。");
+
+    PSSpecifier *suppressWallpaperEdit = [PSSpecifier preferenceSpecifierNamed:@"仅长按 App 允许编辑主屏幕"
+                                                                         target:self
+                                                                            set:@selector(setPreferenceValue:specifier:)
+                                                                            get:@selector(readPreferenceValue:)
+                                                                         detail:nil
+                                                                           cell:PSSwitchCell
+                                                                           edit:nil];
+    [suppressWallpaperEdit setProperty:@"com.xu.chevronv3" forKey:@"defaults"];
+    [suppressWallpaperEdit setProperty:@"CV3SuppressWallpaperLongPress" forKey:@"key"];
+    [suppressWallpaperEdit setProperty:@YES forKey:@"default"];
+
+    _specifiers = [@[homeGroup, suppressWallpaperEdit, group, bundleID, send] mutableCopy];
     return _specifiers;
 }
 

@@ -192,3 +192,8 @@ static dispatch_queue_t CV3AppLoadQueue(void) {
     });
     return queue;
 }
+
+static inline CGFloat CV3ConcentricCornerRadius(CGFloat outerRadius, CGFloat padding) {
+    return MAX(4.0, outerRadius - padding);
+}
+
