@@ -40,6 +40,8 @@
 - (id)iconManager;
 - (id)model;
 - (id)iconViewForIcon:(id)arg1 location:(id)arg2;
+- (void)presentSpotlightAnimated:(BOOL)animated completion:(id)completion;
+- (void)presentSpotlightAnimated:(BOOL)animated;
 @end
 
 @interface SBIcon : NSObject
@@ -47,6 +49,15 @@
 @end
 
 @interface SBIconView : UIView
+@end
+
+@interface SBHHomeScreenView : UIView
+@end
+
+@interface SBIconListView : UIView
+@end
+
+@interface SBFWallpaperView : UIView
 @end
 
 @interface SBMainSwitcherGestureCoordinator : NSObject
@@ -416,16 +427,16 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
 @property (nonatomic, strong) UIView *iconBackdrop;
 @property (nonatomic, strong) UIImageView *iconView;
 @property (nonatomic, strong) UILabel *nameLabel;
+@property (nonatomic, strong) UIView *nameBackdrop;
 @property (nonatomic, strong) UIView *pinnedIndicator; 
-@property (nonatomic, strong) UIView *unreadAttentionRing;
-@property (nonatomic, strong) UIView *badgeContainer;
-@property (nonatomic, strong) UILabel *badgeLabel;
+@property (nonatomic, assign) NSInteger unreadCount;
 @property (nonatomic, assign) BOOL isFirstResult; // 新增：是否为搜索首项
 @property (nonatomic, copy) NSString *representedBundleId;
 - (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst protectionState:(CV3AppPanelProtectionState)protectionState;
 - (void)setIconImage:(UIImage *)image forBundleId:(NSString *)bundleId;
 - (void)setUnreadCount:(NSInteger)unreadCount;
 - (void)startBreathing;
+- (void)stopBreathing;
 @end
 
 @implementation CV3AppCell
@@ -443,36 +454,23 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
         ivBack.layer.shadowRadius = CV3Style.iconShadowRadius;
         ivBack.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, iconSize, iconSize) cornerRadius:CV3Style.iconCornerRadius].CGPath;
         [self.contentView addSubview:ivBack];
-
-        self.unreadAttentionRing = [[UIView alloc] initWithFrame:CGRectInset(ivBack.bounds, -4.0, -4.0)];
-        self.unreadAttentionRing.center = CGPointMake(CGRectGetMidX(ivBack.bounds), CGRectGetMidY(ivBack.bounds));
-        self.unreadAttentionRing.userInteractionEnabled = NO;
-        self.unreadAttentionRing.layer.cornerRadius = CV3Style.iconCornerRadius + 4.0;
-        self.unreadAttentionRing.layer.borderWidth = 2.0;
-        self.unreadAttentionRing.layer.borderColor = [UIColor systemRedColor].CGColor;
-        self.unreadAttentionRing.hidden = YES;
-        [ivBack addSubview:self.unreadAttentionRing];
         
         self.iconView = [[UIImageView alloc] initWithFrame:ivBack.frame];
         self.iconView.layer.cornerRadius = CV3Style.iconCornerRadius;
         self.iconView.clipsToBounds = YES;
         [self.contentView addSubview:self.iconView];
 
-        self.badgeContainer = [[UIView alloc] initWithFrame:self.contentView.bounds];
-        self.badgeContainer.userInteractionEnabled = NO;
-        self.badgeContainer.backgroundColor = [UIColor clearColor];
-        [self.contentView addSubview:self.badgeContainer];
-
-        self.badgeLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-        self.badgeLabel.backgroundColor = [UIColor systemRedColor];
-        self.badgeLabel.textColor = [UIColor whiteColor];
-        self.badgeLabel.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightBold];
-        self.badgeLabel.textAlignment = NSTextAlignmentCenter;
-        self.badgeLabel.layer.borderWidth = 1.5;
-        self.badgeLabel.layer.borderColor = [UIColor whiteColor].CGColor;
-        self.badgeLabel.layer.masksToBounds = YES;
-        self.badgeLabel.hidden = YES;
-        [self.badgeContainer addSubview:self.badgeLabel];
+        self.nameBackdrop = [[UIView alloc] initWithFrame:CGRectZero];
+        self.nameBackdrop.userInteractionEnabled = NO;
+        self.nameBackdrop.backgroundColor = [UIColor colorWithRed:1.00 green:0.20 blue:0.25 alpha:0.14];
+        self.nameBackdrop.layer.borderWidth = 1.0;
+        self.nameBackdrop.layer.borderColor = [UIColor colorWithRed:1.00 green:0.22 blue:0.26 alpha:0.55].CGColor;
+        self.nameBackdrop.layer.shadowColor = [UIColor colorWithRed:1.00 green:0.20 blue:0.25 alpha:0.35].CGColor;
+        self.nameBackdrop.layer.shadowOffset = CGSizeMake(0, 1.5);
+        self.nameBackdrop.layer.shadowRadius = 4.0;
+        self.nameBackdrop.layer.shadowOpacity = 0.85;
+        self.nameBackdrop.hidden = YES;
+        [self.contentView addSubview:self.nameBackdrop];
 
         self.pinnedIndicator = [[UIView alloc] initWithFrame:CGRectMake(iconSize - 12, -4, 16, 16)];
         self.pinnedIndicator.backgroundColor = [UIColor cyanColor];
@@ -487,17 +485,40 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
         self.pinnedIndicator.hidden = YES;
         [self.iconView addSubview:self.pinnedIndicator];
 
-        self.nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(4, iconSize + 14, frame.size.width - 8, 28)];
+        self.nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(2, iconSize + 12, frame.size.width - 4, 18)];
         self.nameLabel.textColor = [UIColor labelColor];
         self.nameLabel.font = [UIFont systemFontOfSize:10.0 weight:UIFontWeightMedium];
         self.nameLabel.textAlignment = NSTextAlignmentCenter;
-        self.nameLabel.numberOfLines = 2;
+        self.nameLabel.numberOfLines = 1;
+        self.nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        self.nameLabel.adjustsFontSizeToFitWidth = YES;
+        self.nameLabel.minimumScaleFactor = 0.85;
         [self.contentView addSubview:self.nameLabel];
         
+        if (@available(iOS 13.0, *)) {
+            ivBack.layer.cornerCurve = kCACornerCurveContinuous;
+            self.iconView.layer.cornerCurve = kCACornerCurveContinuous;
+            self.pinnedIndicator.layer.cornerCurve = kCACornerCurveContinuous;
+            self.nameBackdrop.layer.cornerCurve = kCACornerCurveContinuous;
+        }
+
         // 性能优化：在 Cell 初始化时启动动画，而不是在滚动 configure 时重复添加
         [self startBreathing];
     }
     return self;
+}
+
+- (void)setHighlighted:(BOOL)highlighted {
+    [super setHighlighted:highlighted];
+    if (highlighted) {
+        [UIView animateWithDuration:0.10 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+            self.contentView.transform = CGAffineTransformMakeScale(0.92, 0.92);
+        } completion:nil];
+    } else {
+        [UIView animateWithDuration:0.30 delay:0 usingSpringWithDamping:0.78 initialSpringVelocity:0.6 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+            self.contentView.transform = CGAffineTransformIdentity;
+        } completion:nil];
+    }
 }
 
 - (void)prepareForReuse {
@@ -511,7 +532,6 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
     self.representedBundleId = info.bundleId;
     self.iconView.image = info.icon;
     self.pinnedIndicator.hidden = !info.isPinned;
-    [self setUnreadCount:info.unreadCount];
     self.isFirstResult = isFirst;
     if (info.isPinned) [self.iconView bringSubviewToFront:self.pinnedIndicator];
 
@@ -525,10 +545,22 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
     self.iconBackdrop.layer.shadowColor = isProtected ? protectionColor.CGColor : [UIColor blackColor].CGColor;
     self.iconBackdrop.layer.shadowOpacity = isProtected ? 0.55 : (float)CV3Style.iconShadowOpacity;
     self.iconBackdrop.layer.shadowRadius = isProtected ? 9.0 : CV3Style.iconShadowRadius;
+    self.iconBackdrop.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.iconBackdrop.bounds cornerRadius:CV3Style.iconCornerRadius].CGPath;
     self.iconView.alpha = isProtected ? 0.62 : 1.0;
 
+    NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+    ps.alignment = NSTextAlignmentCenter;
+    ps.lineBreakMode = NSLineBreakByTruncatingTail;
+
+    UIColor *unreadRed = [UIColor colorWithRed:1.00 green:0.22 blue:0.26 alpha:1.0];
+    UIColor *normalTextColor = (info.unreadCount > 0) ? unreadRed : (isProtected ? protectionColor : [UIColor labelColor]);
+
     if (searchText && searchText.length > 0) {
-        NSMutableAttributedString *as = [[NSMutableAttributedString alloc] initWithString:info.name attributes:@{NSForegroundColorAttributeName: isProtected ? protectionColor : [UIColor labelColor]}];
+        NSMutableAttributedString *as = [[NSMutableAttributedString alloc] initWithString:info.name attributes:@{
+            NSForegroundColorAttributeName: normalTextColor,
+            NSKernAttributeName: @(0.15),
+            NSParagraphStyleAttributeName: ps
+        }];
         NSRange range = [info.name rangeOfString:searchText options:NSCaseInsensitiveSearch];
         if (range.location != NSNotFound) {
             [as addAttribute:NSForegroundColorAttributeName value:[UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:1.0] range:range];
@@ -544,12 +576,18 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
             self.iconView.layer.borderColor = isProtected ? [protectionColor colorWithAlphaComponent:0.9].CGColor : [UIColor clearColor].CGColor;
         }
     } else {
-        self.nameLabel.attributedText = nil;
-        self.nameLabel.text = info.name;
-        self.nameLabel.textColor = isProtected ? protectionColor : [UIColor labelColor];
+        NSMutableAttributedString *as = [[NSMutableAttributedString alloc] initWithString:info.name attributes:@{
+            NSForegroundColorAttributeName: normalTextColor,
+            NSFontAttributeName: [UIFont systemFontOfSize:10.0 weight:UIFontWeightMedium],
+            NSKernAttributeName: @(0.15),
+            NSParagraphStyleAttributeName: ps
+        }];
+        self.nameLabel.attributedText = as;
         self.iconView.layer.borderWidth = isProtected ? 1.5 : 0.0;
         self.iconView.layer.borderColor = isProtected ? [protectionColor colorWithAlphaComponent:0.9].CGColor : [UIColor clearColor].CGColor;
     }
+    
+    [self setUnreadCount:info.unreadCount];
 }
 
 - (void)setIconImage:(UIImage *)image forBundleId:(NSString *)bundleId {
@@ -559,56 +597,68 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
 
 - (void)setUnreadCount:(NSInteger)unreadCount {
     unreadCount = MAX(0, unreadCount);
+    _unreadCount = unreadCount;
     BOOL hasUnread = unreadCount > 0;
-    self.badgeLabel.hidden = !hasUnread;
-    self.unreadAttentionRing.hidden = !hasUnread;
+    
+    self.nameBackdrop.hidden = !hasUnread;
+    
+    if (self.nameLabel.attributedText) {
+        NSMutableAttributedString *mas = [self.nameLabel.attributedText mutableCopy];
+        UIColor *textColor = hasUnread ? [UIColor colorWithRed:1.00 green:0.22 blue:0.26 alpha:1.0] : nil;
+        if (!textColor) {
+            textColor = [UIColor whiteColor];
+            if (@available(iOS 13.0, *)) {
+                textColor = [UIColor labelColor];
+            }
+        }
+        [mas addAttribute:NSForegroundColorAttributeName value:textColor range:NSMakeRange(0, mas.length)];
+        self.nameLabel.attributedText = mas;
+    }
 
     if (!hasUnread) {
-        self.badgeLabel.text = nil;
-        [self.badgeLabel.layer removeAnimationForKey:@"unreadAttention"];
-        [self.unreadAttentionRing.layer removeAnimationForKey:@"unreadAttention"];
+        [self.nameBackdrop.layer removeAnimationForKey:@"unreadGlassPulse"];
         return;
     }
 
-    NSString *badgeText = unreadCount > 99 ? @"99+" : [NSString stringWithFormat:@"%ld", (long)unreadCount];
-    self.badgeLabel.text = badgeText;
-    CGFloat badgeWidth = unreadCount > 9 ? 30.0 : 22.0;
-    CGFloat iconMaxX = CGRectGetMaxX(self.iconView.frame);
-    self.badgeLabel.frame = CGRectMake(iconMaxX - badgeWidth * 0.48, 0.0, badgeWidth, 22.0);
-    self.badgeLabel.layer.cornerRadius = 11.0;
+    // 测量 App 名称宽度，自适应计算 glass 玻璃框宽度
+    NSString *name = self.nameLabel.text ?: @"";
+    CGSize textSize = [name boundingRectWithSize:CGSizeMake(self.contentView.frame.size.width - 4.0, 18.0)
+                                         options:NSStringDrawingUsesLineFragmentOrigin
+                                      attributes:@{ NSFontAttributeName: self.nameLabel.font }
+                                         context:nil].size;
+    CGFloat backdropWidth = MIN(self.contentView.frame.size.width - 2.0, MAX(36.0, ceil(textSize.width) + 12.0));
+    CGFloat backdropX = (self.contentView.frame.size.width - backdropWidth) / 2.0;
+    CGRect backdropFrame = CGRectMake(backdropX, 54.0 + 11.0, backdropWidth, 20.0);
+    
+    self.nameBackdrop.frame = backdropFrame;
+    self.nameBackdrop.layer.cornerRadius = 10.0;
+    if (@available(iOS 13.0, *)) {
+        self.nameBackdrop.layer.cornerCurve = kCACornerCurveContinuous;
+    }
+    self.nameBackdrop.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.nameBackdrop.bounds cornerRadius:10.0].CGPath;
 
-    if (UIAccessibilityIsReduceMotionEnabled() ||
-        [self.badgeLabel.layer animationForKey:@"unreadAttention"]) {
+    if (UIAccessibilityIsReduceMotionEnabled() || [self.nameBackdrop.layer animationForKey:@"unreadGlassPulse"]) {
         return;
     }
 
-    CAKeyframeAnimation *badgePulse = [CAKeyframeAnimation animationWithKeyPath:@"transform.scale"];
-    badgePulse.values = @[@1.0, @1.0, @1.18, @1.0, @1.0];
-    badgePulse.keyTimes = @[@0.0, @0.58, @0.72, @0.86, @1.0];
-    badgePulse.duration = 2.8;
-    badgePulse.repeatCount = HUGE_VALF;
-    badgePulse.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-    [self.badgeLabel.layer addAnimation:badgePulse forKey:@"unreadAttention"];
-
-    CAAnimationGroup *ringPulse = [CAAnimationGroup animation];
-    CAKeyframeAnimation *ringScale = [CAKeyframeAnimation animationWithKeyPath:@"transform.scale"];
-    ringScale.values = @[@1.0, @1.0, @1.12, @1.2];
-    ringScale.keyTimes = @[@0.0, @0.58, @0.76, @1.0];
-    CAKeyframeAnimation *ringOpacity = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
-    ringOpacity.values = @[@0.0, @0.0, @0.55, @0.0];
-    ringOpacity.keyTimes = ringScale.keyTimes;
-    ringPulse.animations = @[ringScale, ringOpacity];
-    ringPulse.duration = 2.8;
-    ringPulse.repeatCount = HUGE_VALF;
-    ringPulse.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
-    [self.unreadAttentionRing.layer addAnimation:ringPulse forKey:@"unreadAttention"];
+    // 液态玻璃红框微幅呼吸脉冲动画 (Ambient Glass Pulse)
+    CAKeyframeAnimation *glassPulse = [CAKeyframeAnimation animationWithKeyPath:@"transform.scale"];
+    glassPulse.values = @[@1.0, @1.0, @1.06, @1.0, @1.0];
+    glassPulse.keyTimes = @[@0.0, @0.60, @0.75, @0.90, @1.0];
+    glassPulse.duration = 3.2;
+    glassPulse.repeatCount = HUGE_VALF;
+    glassPulse.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [self.nameBackdrop.layer addAnimation:glassPulse forKey:@"unreadGlassPulse"];
 }
 
-- (void)startBreathing {
+- (void)stopBreathing {
     [self.contentView.layer removeAnimationForKey:@"breathing"];
     [self.iconBackdrop.layer removeAnimationForKey:@"breathing"];
     [self.iconView.layer removeAnimationForKey:@"breathing"];
-    [self.badgeContainer.layer removeAnimationForKey:@"breathing"];
+}
+
+- (void)startBreathing {
+    [self stopBreathing];
 
     CGFloat lift = 7.0 + (arc4random_uniform(18) / 10.0);
     CGFloat duration = 6.8 + (arc4random_uniform(18) / 10.0);
@@ -635,9 +685,7 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
         return group;
     };
 
-    [self.iconBackdrop.layer addAnimation:makeFloatGroup() forKey:@"breathing"];
-    [self.iconView.layer addAnimation:makeFloatGroup() forKey:@"breathing"];
-    [self.badgeContainer.layer addAnimation:makeFloatGroup() forKey:@"breathing"];
+    [self.contentView.layer addAnimation:makeFloatGroup() forKey:@"breathing"];
 }
 @end
 
@@ -656,25 +704,13 @@ static void CV3LogToFile(NSString *format, ...) {
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
 
-    // [Geek Advice] Log Leveling: Only log critical messages in Release mode
-#ifndef DEBUG
-    BOOL isCritical = [message containsString:@"[Lifecycle]"] || 
-                     [message containsString:@"[Recovery]"] || 
-                     [message containsString:@"[Orientation]"] || 
-                     [message containsString:@"[Workspace]"] ||
-                     [message containsString:@"[Scene]"] ||
-                     [message containsString:@"[Error]"] ||
-                     [message containsString:@"[Warning]"];
-    if (!isCritical) return;
-#endif
-
     // 立即输出到系统日志，作为第一层保障
     NSLog(@"[ChevronV3] %@", message);
 
     dispatch_async(CV3LogQueue(), ^{
         @try {
             NSFileManager *fm = [NSFileManager defaultManager];
-            NSString *logPath = @"/var/mobile/Library/Logs/ChevronV3_Logs.txt";
+            NSString *logPath = @"/var/mobile/Documents/ChevronV3_Logs.txt";
             NSString *parentDir = [logPath stringByDeletingLastPathComponent];
             if (![fm fileExistsAtPath:parentDir]) {
                 [fm createDirectoryAtPath:parentDir withIntermediateDirectories:YES attributes:nil error:nil];
@@ -771,10 +807,14 @@ static void CV3ApplyGlassAccentStyle(UIView *surface,
         surface.layer.cornerCurve = kCACornerCurveContinuous;
     }
     surface.layer.borderWidth = MAX(0.5 / scale, selected ? 1.0 / scale : 0.5 / scale);
-    surface.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:(0.14 + intensity * 0.12 + (selected ? 0.08 : 0.0))].CGColor;
+    surface.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:(0.16 + intensity * 0.14 + (selected ? 0.10 : 0.0))].CGColor;
 
     UIView *resolvedTintHost = tintHost ?: surface;
-    resolvedTintHost.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:(0.025 + intensity * 0.055 + (selected ? 0.025 : 0.0))];
+    resolvedTintHost.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:(0.03 + intensity * 0.05 + (selected ? 0.03 : 0.0))];
+    resolvedTintHost.layer.cornerRadius = cornerRadius;
+    if (@available(iOS 13.0, *)) {
+        resolvedTintHost.layer.cornerCurve = kCACornerCurveContinuous;
+    }
 
     CAGradientLayer *layer = highlightLayer ?: CV3EnsureGlassAccentLayer(resolvedTintHost);
     if (layer) {
@@ -782,14 +822,18 @@ static void CV3ApplyGlassAccentStyle(UIView *surface,
         if (CGRectIsEmpty(layerBounds)) layerBounds = surface.bounds;
         layer.frame = layerBounds;
         layer.cornerRadius = cornerRadius;
-        layer.startPoint = CGPointMake(0.0, 0.0);
-        layer.endPoint = CGPointMake(1.0, 1.0);
+        if (@available(iOS 13.0, *)) {
+            layer.cornerCurve = kCACornerCurveContinuous;
+        }
+        // Apple Design Material Rule 12: 顶部边缘天光折射高光 (Top-Edge Light Catching)
+        layer.startPoint = CGPointMake(0.5, 0.0);
+        layer.endPoint = CGPointMake(0.5, 1.0);
         layer.colors = @[
-            (id)[[UIColor whiteColor] colorWithAlphaComponent:(0.12 + intensity * 0.18 + (selected ? 0.06 : 0.0))].CGColor,
-            (id)[[UIColor whiteColor] colorWithAlphaComponent:(0.025 + intensity * 0.055)].CGColor,
-            (id)[[UIColor blackColor] colorWithAlphaComponent:(0.035 + intensity * 0.055)].CGColor
+            (id)[[UIColor whiteColor] colorWithAlphaComponent:(0.22 + intensity * 0.18 + (selected ? 0.10 : 0.0))].CGColor,
+            (id)[[UIColor whiteColor] colorWithAlphaComponent:(0.04 + intensity * 0.06)].CGColor,
+            (id)[[UIColor blackColor] colorWithAlphaComponent:(0.04 + intensity * 0.06)].CGColor
         ];
-        layer.locations = @[@0.0, @0.52, @1.0];
+        layer.locations = @[@0.0, @0.40, @1.0];
     }
 }
 
@@ -1255,6 +1299,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 @property (nonatomic, strong) UIView *homeBarView;
 @property (nonatomic, strong) UIVisualEffectView *homeBarBlurView;
 @property (nonatomic, strong) CAGradientLayer *homeBarGlowLayer;
+@property (nonatomic, strong) UIView *homeBarPillIndicator;
 @property (nonatomic, assign) NSInteger homeBarPlacement;
 @property (nonatomic, assign) NSInteger homeBarResizeStartPlacement;
 @property (nonatomic, assign) CGPoint homeBarResizeAxis;
@@ -1439,6 +1484,17 @@ static void CV3PublishHostGeneration(void) {
     CGFloat widthDelta = MAX(0, hitArea - self.bounds.size.width);
     CGFloat heightDelta = MAX(0, hitArea - self.bounds.size.height);
     CGRect hitFrame = CGRectInset(self.bounds, -widthDelta/2.0, -heightDelta/2.0);
+    return CGRectContainsPoint(hitFrame, point);
+}
+@end
+
+// --- Custom Stash Grabber with Expanded Hit Area ---
+@interface CV3StashGrabberView : UIView
+@end
+@implementation CV3StashGrabberView
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    // 向外扩大 16pt 热区，确保靠近屏幕极边缘时容易捕抓 (满足 44pt 触控规范)
+    CGRect hitFrame = CGRectInset(self.bounds, -16.0, -16.0);
     return CGRectContainsPoint(hitFrame, point);
 }
 @end
@@ -2087,7 +2143,319 @@ static void CV3QueuePanelPresentationAfterSystemGesture(dispatch_block_t present
     });
 }
 
+static BOOL CV3ShouldSuppressWallpaperLongPress(void) {
+    CFPreferencesAppSynchronize(CFSTR("com.xu.chevronv3"));
+    CFPropertyListRef val = CFPreferencesCopyAppValue(CFSTR("CV3SuppressWallpaperLongPress"), CFSTR("com.xu.chevronv3"));
+    if (val) {
+        BOOL result = [(__bridge id)val boolValue];
+        CFRelease(val);
+        return result;
+    }
+    return YES; // 默认开启：禁止主屏幕空白处长按，仅长按 App 允许编辑
+}
+
+static BOOL CV3IsEditTriggerFromAppOrContextMenu(id reason) {
+    if (reason) {
+        NSString *reasonStr = [NSString stringWithFormat:@"%@", reason];
+        // 1. 优先判定壁纸/背景/空白处/ScrollView 长按 Reason
+        if ([reasonStr rangeOfString:@"Wallpaper" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [reasonStr rangeOfString:@"Background" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [reasonStr rangeOfString:@"Empty" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [reasonStr rangeOfString:@"ScrollView" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [reasonStr rangeOfString:@"RootFolder" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [reasonStr rangeOfString:@"HomeScreenLongPress" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            return NO;
+        }
+        
+        // 2. 判定 App 图标上下文菜单或图标手势 Reason
+        if ([reasonStr rangeOfString:@"ContextMenu" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [reasonStr rangeOfString:@"IconView" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [reasonStr rangeOfString:@"IconLongPress" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [reasonStr rangeOfString:@"Widget" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [reasonStr rangeOfString:@"Shortcut" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            return YES;
+        }
+    }
+    
+    // 3. 堆栈特征识别：检查是否由 App 图标 (SBIconView) 或上下文菜单 (ContextMenu / SBUIAction) 触发
+    NSArray<NSString *> *symbols = [NSThread callStackSymbols];
+    for (NSString *sym in symbols) {
+        if ([sym rangeOfString:@"SBIconView" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [sym rangeOfString:@"SBHIconView" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [sym rangeOfString:@"ContextMenu" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [sym rangeOfString:@"SBUIAction" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [sym rangeOfString:@"WidgetIcon" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [sym rangeOfString:@"handleIconView" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            return YES;
+        }
+    }
+    
+    return NO;
+}
+
+%hook SBHIconManager
+- (void)_handleWallpaperLongPress:(id)gesture {
+    CV3LogToFile(@"[EditTrace] SBHIconManager _handleWallpaperLongPress");
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        return;
+    }
+    %orig(gesture);
+}
+
+- (void)_handleWallpaperLongPressGestureRecognizer:(id)gesture {
+    CV3LogToFile(@"[EditTrace] SBHIconManager _handleWallpaperLongPressGestureRecognizer");
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        return;
+    }
+    %orig(gesture);
+}
+
+- (void)_handleWallpaperLongPressGesture:(id)gesture {
+    CV3LogToFile(@"[EditTrace] SBHIconManager _handleWallpaperLongPressGesture");
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        return;
+    }
+    %orig(gesture);
+}
+
+- (BOOL)_shouldAllowWallpaperLongPressAtPoint:(CGPoint)point {
+    CV3LogToFile(@"[EditTrace] SBHIconManager _shouldAllowWallpaperLongPressAtPoint: (%f, %f)", point.x, point.y);
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        return NO;
+    }
+    return %orig(point);
+}
+
+- (BOOL)shouldAllowWallpaperLongPress {
+    CV3LogToFile(@"[EditTrace] SBHIconManager shouldAllowWallpaperLongPress");
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        return NO;
+    }
+    return %orig;
+}
+
+- (BOOL)iconManager:(id)manager shouldAllowWallpaperLongPressAtPoint:(CGPoint)point {
+    CV3LogToFile(@"[EditTrace] SBHIconManager iconManager:shouldAllowWallpaperLongPressAtPoint:");
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        return NO;
+    }
+    return %orig(manager, point);
+}
+
+- (UILongPressGestureRecognizer *)wallpaperLongPressGestureRecognizer {
+    UILongPressGestureRecognizer *g = %orig;
+    CV3LogToFile(@"[EditTrace] SBHIconManager wallpaperLongPressGestureRecognizer: %@", g);
+    if (g && CV3ShouldSuppressWallpaperLongPress()) {
+        g.enabled = NO;
+    }
+    return g;
+}
+
+- (void)setIsEditing:(BOOL)editing {
+    CV3LogToFile(@"[EditTrace] SBHIconManager setIsEditing: %d", editing);
+    if (editing && CV3ShouldSuppressWallpaperLongPress()) {
+        if (!CV3IsEditTriggerFromAppOrContextMenu(nil)) {
+            CV3LogToFile(@"[Feature] 成功拦截壁纸/空白处长按编辑模式 (SBHIconManager setIsEditing:)");
+            return;
+        }
+    }
+    %orig(editing);
+}
+
+- (void)setIsEditing:(BOOL)editing withReason:(id)reason {
+    CV3LogToFile(@"[EditTrace] SBHIconManager setIsEditing: %d withReason: %@", editing, reason);
+    if (editing && CV3ShouldSuppressWallpaperLongPress()) {
+        if (!CV3IsEditTriggerFromAppOrContextMenu(reason)) {
+            CV3LogToFile(@"[Feature] 成功拦截壁纸/空白处长按编辑模式 (SBHIconManager setIsEditing:withReason: %@)", reason);
+            return;
+        }
+    }
+    %orig(editing, reason);
+}
+
+- (void)setIsEditing:(BOOL)editing location:(id)location {
+    CV3LogToFile(@"[EditTrace] SBHIconManager setIsEditing: %d location: %@", editing, location);
+    if (editing && CV3ShouldSuppressWallpaperLongPress()) {
+        if (!CV3IsEditTriggerFromAppOrContextMenu(location)) {
+            CV3LogToFile(@"[Feature] 成功拦截壁纸/空白处长按编辑模式 (SBHIconManager setIsEditing:location:)");
+            return;
+        }
+    }
+    %orig(editing, location);
+}
+
+- (void)setIsEditing:(BOOL)editing animated:(BOOL)animated {
+    CV3LogToFile(@"[EditTrace] SBHIconManager setIsEditing: %d animated: %d", editing, animated);
+    if (editing && CV3ShouldSuppressWallpaperLongPress()) {
+        if (!CV3IsEditTriggerFromAppOrContextMenu(nil)) {
+            CV3LogToFile(@"[Feature] 成功拦截壁纸/空白处长按编辑模式 (SBHIconManager setIsEditing:animated:)");
+            return;
+        }
+    }
+    %orig(editing, animated);
+}
+%end
+
+%hook SBHHomeScreenView
+- (void)addGestureRecognizer:(UIGestureRecognizer *)gestureRecognizer {
+    if ([gestureRecognizer isKindOfClass:[UILongPressGestureRecognizer class]] && CV3ShouldSuppressWallpaperLongPress()) {
+        CV3LogToFile(@"[Feature] 成功禁用了 SBHHomeScreenView 上的 UILongPressGestureRecognizer (%@)", gestureRecognizer);
+        gestureRecognizer.enabled = NO;
+    }
+    %orig(gestureRecognizer);
+}
+
+- (void)layoutSubviews {
+    %orig;
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        for (UIGestureRecognizer *g in self.gestureRecognizers) {
+            if ([g isKindOfClass:[UILongPressGestureRecognizer class]] && g.enabled) {
+                CV3LogToFile(@"[Feature] layoutSubviews 禁用了 SBHHomeScreenView 上的 UILongPressGestureRecognizer (%@)", g);
+                g.enabled = NO;
+            }
+        }
+    }
+}
+
+- (void)_handleWallpaperLongPress:(id)gesture {
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        CV3LogToFile(@"[Feature] 成功拦截 SBHHomeScreenView _handleWallpaperLongPress");
+        return;
+    }
+    %orig(gesture);
+}
+
+- (void)handleWallpaperLongPress:(id)gesture {
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        CV3LogToFile(@"[Feature] 成功拦截 SBHHomeScreenView handleWallpaperLongPress");
+        return;
+    }
+    %orig(gesture);
+}
+
+- (UILongPressGestureRecognizer *)wallpaperLongPressGestureRecognizer {
+    UILongPressGestureRecognizer *g = %orig;
+    if (g && CV3ShouldSuppressWallpaperLongPress()) {
+        g.enabled = NO;
+    }
+    return g;
+}
+%end
+
+%hook SBIconListView
+- (void)addGestureRecognizer:(UIGestureRecognizer *)gestureRecognizer {
+    if ([gestureRecognizer isKindOfClass:[UILongPressGestureRecognizer class]] && CV3ShouldSuppressWallpaperLongPress()) {
+        CV3LogToFile(@"[Feature] 成功禁用了 SBIconListView 上的 UILongPressGestureRecognizer (%@)", gestureRecognizer);
+        gestureRecognizer.enabled = NO;
+    }
+    %orig(gestureRecognizer);
+}
+
+- (void)layoutSubviews {
+    %orig;
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        for (UIGestureRecognizer *g in self.gestureRecognizers) {
+            if ([g isKindOfClass:[UILongPressGestureRecognizer class]] && g.enabled) {
+                CV3LogToFile(@"[Feature] layoutSubviews 禁用了 SBIconListView 上的 UILongPressGestureRecognizer (%@)", g);
+                g.enabled = NO;
+            }
+        }
+    }
+}
+
+- (void)_handleWallpaperLongPress:(id)gesture {
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        CV3LogToFile(@"[Feature] 成功拦截 SBIconListView _handleWallpaperLongPress");
+        return;
+    }
+    %orig(gesture);
+}
+
+- (void)handleWallpaperLongPress:(id)gesture {
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        CV3LogToFile(@"[Feature] 成功拦截 SBIconListView handleWallpaperLongPress");
+        return;
+    }
+    %orig(gesture);
+}
+%end
+
+%hook SBFWallpaperView
+- (void)addGestureRecognizer:(UIGestureRecognizer *)gestureRecognizer {
+    if ([gestureRecognizer isKindOfClass:[UILongPressGestureRecognizer class]] && CV3ShouldSuppressWallpaperLongPress()) {
+        CV3LogToFile(@"[Feature] 成功禁用了 SBFWallpaperView 上的 UILongPressGestureRecognizer (%@)", gestureRecognizer);
+        gestureRecognizer.enabled = NO;
+    }
+    %orig(gestureRecognizer);
+}
+
+- (void)layoutSubviews {
+    %orig;
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        for (UIGestureRecognizer *g in self.gestureRecognizers) {
+            if ([g isKindOfClass:[UILongPressGestureRecognizer class]] && g.enabled) {
+                CV3LogToFile(@"[Feature] layoutSubviews 禁用了 SBFWallpaperView 上的 UILongPressGestureRecognizer (%@)", g);
+                g.enabled = NO;
+            }
+        }
+    }
+}
+%end
+
 %hook SBIconController
+- (void)_handleWallpaperLongPress:(id)gesture {
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        CV3LogToFile(@"[Feature] 成功拦截主屏幕空白处长按编辑手势 (SBIconController)");
+        return;
+    }
+    %orig(gesture);
+}
+
+- (void)handleWallpaperLongPress:(id)gesture {
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        return;
+    }
+    %orig(gesture);
+}
+
+- (UILongPressGestureRecognizer *)wallpaperLongPressGestureRecognizer {
+    UILongPressGestureRecognizer *g = %orig;
+    if (g && CV3ShouldSuppressWallpaperLongPress()) {
+        g.enabled = NO;
+    }
+    return g;
+}
+
+- (void)setIsEditing:(BOOL)editing {
+    if (editing && CV3ShouldSuppressWallpaperLongPress()) {
+        if (!CV3IsEditTriggerFromAppOrContextMenu(nil)) {
+            CV3LogToFile(@"[Feature] 成功拦截壁纸/空白处长按编辑模式 (SBIconController setIsEditing:)");
+            return;
+        }
+    }
+    %orig(editing);
+}
+
+- (void)setIsEditing:(BOOL)editing withReason:(id)reason {
+    if (editing && CV3ShouldSuppressWallpaperLongPress()) {
+        if (!CV3IsEditTriggerFromAppOrContextMenu(reason)) {
+            CV3LogToFile(@"[Feature] 成功拦截壁纸/空白处长按编辑模式 (SBIconController setIsEditing:withReason:)");
+            return;
+        }
+    }
+    %orig(editing, reason);
+}
+
+- (void)setIsEditing:(BOOL)editing animated:(BOOL)animated {
+    if (editing && CV3ShouldSuppressWallpaperLongPress()) {
+        if (!CV3IsEditTriggerFromAppOrContextMenu(nil)) {
+            CV3LogToFile(@"[Feature] 成功拦截壁纸/空白处长按编辑模式 (SBIconController setIsEditing:animated:)");
+            return;
+        }
+    }
+    %orig(editing, animated);
+}
+
 - (void)presentSpotlightAnimated:(BOOL)animated completion:(id)completion {
     if (CV3HomeScreenPullDownSuppressed) {
         // Do not let the Home Screen pull-down transition start while the
@@ -2122,15 +2490,211 @@ static void CV3QueuePanelPresentationAfterSystemGesture(dispatch_block_t present
         return;
     }
 
-    if (CV3LauncherOwnsHomeSearchTransition()) {
-        CV3SystemHomeSearchTriggered = YES;
+    if (!CV3LauncherOwnsHomeSearchTransition()) {
+        %orig(animated);
+        return;
     }
-    %orig(animated);
-    if (CV3LauncherOwnsHomeSearchTransition()) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            CV3ReturnHomeThenPresentPendingPanel();
-        });
+
+    CV3SystemHomeSearchTriggered = YES;
+    dispatch_block_t wrappedCompletion = ^{
+        CV3ReturnHomeThenPresentPendingPanel();
+    };
+    [self presentSpotlightAnimated:animated completion:wrappedCompletion];
+}
+%end
+
+%hook SBHFolderController
+- (void)setIsEditing:(BOOL)editing {
+    if (editing && CV3ShouldSuppressWallpaperLongPress()) {
+        if (!CV3IsEditTriggerFromAppOrContextMenu(nil)) {
+            CV3LogToFile(@"[Feature] 成功拦截 SBHFolderController setIsEditing:");
+            return;
+        }
     }
+    %orig(editing);
+}
+- (void)setIsEditing:(BOOL)editing animated:(BOOL)animated {
+    if (editing && CV3ShouldSuppressWallpaperLongPress()) {
+        if (!CV3IsEditTriggerFromAppOrContextMenu(nil)) {
+            CV3LogToFile(@"[Feature] 成功拦截 SBHFolderController setIsEditing:animated:");
+            return;
+        }
+    }
+    %orig(editing, animated);
+}
+- (void)_handleWallpaperLongPress:(id)gesture {
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        CV3LogToFile(@"[Feature] 成功拦截 SBHFolderController _handleWallpaperLongPress");
+        return;
+    }
+    %orig(gesture);
+}
+%end
+
+%hook SBHFolderViewController
+- (void)setIsEditing:(BOOL)editing {
+    if (editing && CV3ShouldSuppressWallpaperLongPress()) {
+        if (!CV3IsEditTriggerFromAppOrContextMenu(nil)) {
+            CV3LogToFile(@"[Feature] 成功拦截 SBHFolderViewController setIsEditing:");
+            return;
+        }
+    }
+    %orig(editing);
+}
+- (void)setIsEditing:(BOOL)editing animated:(BOOL)animated {
+    if (editing && CV3ShouldSuppressWallpaperLongPress()) {
+        if (!CV3IsEditTriggerFromAppOrContextMenu(nil)) {
+            CV3LogToFile(@"[Feature] 成功拦截 SBHFolderViewController setIsEditing:animated:");
+            return;
+        }
+    }
+    %orig(editing, animated);
+}
+- (void)_handleWallpaperLongPress:(id)gesture {
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        CV3LogToFile(@"[Feature] 成功拦截 SBHFolderViewController _handleWallpaperLongPress");
+        return;
+    }
+    %orig(gesture);
+}
+%end
+
+%hook SBHRootFolderController
+- (void)setIsEditing:(BOOL)editing {
+    if (editing && CV3ShouldSuppressWallpaperLongPress()) {
+        if (!CV3IsEditTriggerFromAppOrContextMenu(nil)) {
+            CV3LogToFile(@"[Feature] 成功拦截 SBHRootFolderController setIsEditing:");
+            return;
+        }
+    }
+    %orig(editing);
+}
+- (void)setIsEditing:(BOOL)editing animated:(BOOL)animated {
+    if (editing && CV3ShouldSuppressWallpaperLongPress()) {
+        if (!CV3IsEditTriggerFromAppOrContextMenu(nil)) {
+            CV3LogToFile(@"[Feature] 成功拦截 SBHRootFolderController setIsEditing:animated:");
+            return;
+        }
+    }
+    %orig(editing, animated);
+}
+- (void)_handleWallpaperLongPress:(id)gesture {
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        CV3LogToFile(@"[Feature] 成功拦截 SBHRootFolderController _handleWallpaperLongPress");
+        return;
+    }
+    %orig(gesture);
+}
+%end
+
+%hook SBHRootFolderViewController
+- (void)setIsEditing:(BOOL)editing {
+    if (editing && CV3ShouldSuppressWallpaperLongPress()) {
+        if (!CV3IsEditTriggerFromAppOrContextMenu(nil)) {
+            CV3LogToFile(@"[Feature] 成功拦截 SBHRootFolderViewController setIsEditing:");
+            return;
+        }
+    }
+    %orig(editing);
+}
+- (void)setIsEditing:(BOOL)editing animated:(BOOL)animated {
+    if (editing && CV3ShouldSuppressWallpaperLongPress()) {
+        if (!CV3IsEditTriggerFromAppOrContextMenu(nil)) {
+            CV3LogToFile(@"[Feature] 成功拦截 SBHRootFolderViewController setIsEditing:animated:");
+            return;
+        }
+    }
+    %orig(editing, animated);
+}
+- (void)_handleWallpaperLongPress:(id)gesture {
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        CV3LogToFile(@"[Feature] 成功拦截 SBHRootFolderViewController _handleWallpaperLongPress");
+        return;
+    }
+    %orig(gesture);
+}
+%end
+
+%hook SBHFolderView
+- (void)_handleWallpaperLongPress:(id)gesture {
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        CV3LogToFile(@"[Feature] 成功拦截 SBHFolderView _handleWallpaperLongPress");
+        return;
+    }
+    %orig(gesture);
+}
+- (void)handleWallpaperLongPress:(id)gesture {
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        CV3LogToFile(@"[Feature] 成功拦截 SBHFolderView handleWallpaperLongPress");
+        return;
+    }
+    %orig(gesture);
+}
+- (UILongPressGestureRecognizer *)wallpaperLongPressGestureRecognizer {
+    UILongPressGestureRecognizer *g = %orig;
+    if (g && CV3ShouldSuppressWallpaperLongPress()) {
+        g.enabled = NO;
+    }
+    return g;
+}
+%end
+
+%hook SBHRootFolderView
+- (void)_handleWallpaperLongPress:(id)gesture {
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        CV3LogToFile(@"[Feature] 成功拦截 SBHRootFolderView _handleWallpaperLongPress");
+        return;
+    }
+    %orig(gesture);
+}
+- (void)handleWallpaperLongPress:(id)gesture {
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        CV3LogToFile(@"[Feature] 成功拦截 SBHRootFolderView handleWallpaperLongPress");
+        return;
+    }
+    %orig(gesture);
+}
+- (UILongPressGestureRecognizer *)wallpaperLongPressGestureRecognizer {
+    UILongPressGestureRecognizer *g = %orig;
+    if (g && CV3ShouldSuppressWallpaperLongPress()) {
+        g.enabled = NO;
+    }
+    return g;
+}
+%end
+
+%hook SBHHomeScreenViewController
+- (void)_handleWallpaperLongPress:(id)gesture {
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        CV3LogToFile(@"[Feature] 成功拦截 SBHHomeScreenViewController _handleWallpaperLongPress");
+        return;
+    }
+    %orig(gesture);
+}
+- (void)handleWallpaperLongPress:(id)gesture {
+    if (CV3ShouldSuppressWallpaperLongPress()) {
+        CV3LogToFile(@"[Feature] 成功拦截 SBHHomeScreenViewController handleWallpaperLongPress");
+        return;
+    }
+    %orig(gesture);
+}
+- (void)setIsEditing:(BOOL)editing {
+    if (editing && CV3ShouldSuppressWallpaperLongPress()) {
+        if (!CV3IsEditTriggerFromAppOrContextMenu(nil)) {
+            CV3LogToFile(@"[Feature] 成功拦截 SBHHomeScreenViewController setIsEditing:");
+            return;
+        }
+    }
+    %orig(editing);
+}
+- (void)setIsEditing:(BOOL)editing animated:(BOOL)animated {
+    if (editing && CV3ShouldSuppressWallpaperLongPress()) {
+        if (!CV3IsEditTriggerFromAppOrContextMenu(nil)) {
+            CV3LogToFile(@"[Feature] 成功拦截 SBHHomeScreenViewController setIsEditing:animated:");
+            return;
+        }
+    }
+    %orig(editing, animated);
 }
 %end
 
@@ -2307,14 +2871,24 @@ static void CV3SetKeyboardSuppressedByPanel(BOOL suppressed);
 @end
 
 @implementation CV3QuickAccessView
+
+- (CGSize)intrinsicContentSize {
+    return CGSizeMake(UIViewNoIntrinsicMetric, 54.0);
+}
+
+- (CGSize)sizeThatFits:(CGSize)size {
+    return CGSizeMake(size.width, 54.0);
+}
+
 - (instancetype)initWithApps:(NSArray *)apps selectionHandler:(void (^)(CV3AppInfo *))handler {
-    self = [super initWithFrame:CGRectMake(0, 0, [UIScreen mainScreen].bounds.size.width, 60)];
+    self = [super initWithFrame:CGRectMake(0, 0, [UIScreen mainScreen].bounds.size.width, 54.0)];
     if (self) {
         self.apps = apps;
         self.selectionHandler = handler;
         self.clipsToBounds = YES;
+        self.autoresizingMask = UIViewAutoresizingFlexibleWidth;
         
-        UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
+        UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial]];
         blur.frame = self.bounds;
         blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         blur.clipsToBounds = YES;
@@ -2332,11 +2906,14 @@ static void CV3SetKeyboardSuppressedByPanel(BOOL suppressed);
         scroll.showsHorizontalScrollIndicator = NO;
         [self addSubview:scroll];
         
-        CGFloat x = 10;
+        CGFloat x = 12.0;
         for (CV3AppInfo *info in apps) {
             UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-            btn.frame = CGRectMake(x, 10, 40, 40);
-            btn.layer.cornerRadius = 10;
+            btn.frame = CGRectMake(x, 7.0, 40.0, 40.0);
+            btn.layer.cornerRadius = 10.0;
+            if (@available(iOS 13.0, *)) {
+                btn.layer.cornerCurve = kCACornerCurveContinuous;
+            }
             btn.clipsToBounds = YES;
             CV3ApplyGlassAccentStyle(btn,
                                      btn,
@@ -2345,18 +2922,25 @@ static void CV3SetKeyboardSuppressedByPanel(BOOL suppressed);
                                      10.0,
                                      0.34,
                                      NO);
-            [btn setImage:info.icon forState:UIControlStateNormal];
+            
+            UIImage *iconImage = info.icon ?: (info.bundleId ? [cv3IconCache objectForKey:info.bundleId] : nil);
+            [btn setImage:iconImage forState:UIControlStateNormal];
+            btn.imageView.contentMode = UIViewContentModeScaleAspectFit;
+            
             btn.tag = [apps indexOfObject:info];
             [btn addTarget:self action:@selector(appTapped:) forControlEvents:UIControlEventTouchUpInside];
             [scroll addSubview:btn];
-            x += 50;
+            x += 50.0;
         }
-        scroll.contentSize = CGSizeMake(x, 60);
+        scroll.contentSize = CGSizeMake(x + 6.0, 54.0);
     }
     return self;
 }
+
 - (void)appTapped:(UIButton *)sender {
-    if (self.selectionHandler) self.selectionHandler(self.apps[sender.tag]);
+    if (self.selectionHandler && sender.tag < self.apps.count) {
+        self.selectionHandler(self.apps[sender.tag]);
+    }
 }
 @end
 
