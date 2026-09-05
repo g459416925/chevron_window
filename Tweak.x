@@ -1545,6 +1545,7 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 - (void)handleHomeBarTap:(UITapGestureRecognizer *)gesture;
 - (void)handleHomeBarResizePan:(UIPanGestureRecognizer *)gesture;
 - (void)activateHostedAppFullscreenAndClose;
+- (void)handleCopyHostedContentAction:(id)sender;
 - (void)dismissMultitaskingMenu;
 - (void)ensureLaunchSplashVisible;
 - (void)loadAppScene;
