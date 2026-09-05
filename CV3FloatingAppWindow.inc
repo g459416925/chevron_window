@@ -53,6 +53,50 @@ static CGRect CV3DisplayBoundsForWindow(UIWindow *window) {
     return [UIScreen mainScreen].bounds;
 }
 
+static CGRect CV3CanonicalApplicationSceneFrame(id settings) {
+    id displayConfiguration = nil;
+    SEL displaySelector = NSSelectorFromString(@"displayConfiguration");
+    if (settings && [settings respondsToSelector:displaySelector]) {
+        @try {
+            displayConfiguration = ((id (*)(id, SEL))objc_msgSend)(settings, displaySelector);
+        } @catch (NSException *e) {}
+    }
+    if (!displayConfiguration && [[UIScreen mainScreen] respondsToSelector:displaySelector]) {
+        @try {
+            displayConfiguration = ((id (*)(id, SEL))objc_msgSend)([UIScreen mainScreen], displaySelector);
+        } @catch (NSException *e) {}
+    }
+
+    SEL boundsSelector = NSSelectorFromString(@"bounds");
+    if (displayConfiguration && [displayConfiguration respondsToSelector:boundsSelector]) {
+        @try {
+            CGRect bounds = ((CGRect (*)(id, SEL))objc_msgSend)(displayConfiguration, boundsSelector);
+            if (CGRectGetWidth(bounds) > 0.0 && CGRectGetHeight(bounds) > 0.0) {
+                return CGRectMake(0, 0, CGRectGetWidth(bounds), CGRectGetHeight(bounds));
+            }
+        } @catch (NSException *e) {}
+    }
+
+    CGSize screenSize = [UIScreen mainScreen].bounds.size;
+    return CGRectMake(0, 0,
+                      MIN(screenSize.width, screenSize.height),
+                      MAX(screenSize.width, screenSize.height));
+}
+
+static CGSize CV3HostedCanvasSizeForOrientation(UIInterfaceOrientation orientation, id settings) {
+    CGRect canonicalFrame = CV3CanonicalApplicationSceneFrame(settings);
+    CGFloat shortSide = MIN(CGRectGetWidth(canonicalFrame), CGRectGetHeight(canonicalFrame));
+    CGFloat longSide = MAX(CGRectGetWidth(canonicalFrame), CGRectGetHeight(canonicalFrame));
+    if (shortSide <= 0.0 || longSide <= 0.0) {
+        CGSize screenSize = [UIScreen mainScreen].bounds.size;
+        shortSide = MIN(screenSize.width, screenSize.height);
+        longSide = MAX(screenSize.width, screenSize.height);
+    }
+    return UIInterfaceOrientationIsLandscape(orientation)
+        ? CGSizeMake(longSide, shortSide)
+        : CGSizeMake(shortSide, longSide);
+}
+
 static BOOL isGlobalExposeActive = NO;
 static UIWindow *globalExposeBackdrop = nil;
 static UIView *globalExposeContentView = nil;
@@ -1140,24 +1184,28 @@ void CV3ToggleExposeMode(void) {
 }
 
 - (CGRect)currentHostedSceneBounds {
-    CGRect rawScreenBounds = [UIScreen mainScreen].bounds;
-    CGFloat portraitW = MIN(rawScreenBounds.size.width, rawScreenBounds.size.height);
-    CGFloat portraitH = MAX(rawScreenBounds.size.width, rawScreenBounds.size.height);
-    return CGRectMake(0, 0, portraitW, portraitH);
+    // This proxy lives inside rootTransformContainer's upright logical coordinate
+    // space. The root container applies the physical device rotation, while the
+    // hosted Scene settings below describe the app's own content orientation.
+    // Keep the proxy portrait-canonical to avoid applying the width/height swap
+    // twice when both the device and hosted content are landscape.
+    id sceneSettings = self.targetScene
+        ? CV3InvokeObject(self.targetScene, @selector(settings))
+        : nil;
+    CGSize canvasSize = CV3HostedCanvasSizeForOrientation(UIInterfaceOrientationPortrait,
+                                                          sceneSettings);
+    return CGRectMake(0, 0, canvasSize.width, canvasSize.height);
 }
 
 - (BOOL)applyHostedSceneLayoutToSettings:(id)settings force:(BOOL)force {
     if (!settings) return NO;
 
     BOOL modified = NO;
-    CGRect targetFrame = [self currentHostedSceneBounds];
     UIInterfaceOrientation targetOrientation = CV3IsValidInterfaceOrientation(self.hostedContentOrientation)
         ? self.hostedContentOrientation
         : UIInterfaceOrientationPortrait;
-    if (UIInterfaceOrientationIsLandscape(targetOrientation)) {
-        targetFrame.size = CGSizeMake(MAX(targetFrame.size.width, targetFrame.size.height),
-                                      MIN(targetFrame.size.width, targetFrame.size.height));
-    }
+    CGSize canvasSize = CV3HostedCanvasSizeForOrientation(targetOrientation, settings);
+    CGRect targetFrame = CGRectMake(0, 0, canvasSize.width, canvasSize.height);
 
     @try {
         if (force ||
@@ -1189,6 +1237,54 @@ void CV3ToggleExposeMode(void) {
     }
 
     modified |= CV3ApplyLockedOrientationTraitsToSettings(settings, targetOrientation, force);
+
+    UIInterfaceOrientation presentationOrientation = CV3IsValidInterfaceOrientation(self.targetOrientation)
+        ? self.targetOrientation
+        : CV3TrustedInterfaceOrientation(self.windowScene);
+    BOOL needsCrossOrientationMap =
+        UIInterfaceOrientationIsLandscape(presentationOrientation) !=
+        UIInterfaceOrientationIsLandscape(targetOrientation);
+    if (needsCrossOrientationMap) {
+        if (!self.hasCapturedOrientationMapBaseline) {
+            self.originalOrientationMapResolver = CV3OrientationMapResolverFromSettings(settings);
+            SEL modeGetter = NSSelectorFromString(@"interfaceOrientationMode");
+            if ([settings respondsToSelector:modeGetter]) {
+                @try {
+                    self.originalInterfaceOrientationMode =
+                        ((NSInteger (*)(id, SEL))objc_msgSend)(settings, modeGetter);
+                    self.hasOriginalInterfaceOrientationMode = YES;
+                } @catch (NSException *exception) {}
+            }
+            self.hasCapturedOrientationMapBaseline = YES;
+        }
+
+        id currentResolver = CV3OrientationMapResolverFromSettings(settings);
+        BOOL resolverDrifted = self.crossOrientationMapApplied &&
+            self.activeOrientationMapResolver &&
+            currentResolver != self.activeOrientationMapResolver;
+        BOOL mapModified = CV3ApplyCrossOrientationMapToSettings(
+            settings,
+            presentationOrientation,
+            targetOrientation,
+            force || !self.crossOrientationMapApplied || resolverDrifted);
+        modified |= mapModified;
+        if (mapModified) {
+            self.crossOrientationMapApplied = YES;
+            self.activeOrientationMapResolver = CV3OrientationMapResolverFromSettings(settings);
+        }
+    } else if (self.hasCapturedOrientationMapBaseline) {
+        if (self.crossOrientationMapApplied) {
+            modified |= CV3RestoreCrossOrientationMapOnSettings(settings,
+                                                                 self.originalOrientationMapResolver,
+                                                                 self.originalInterfaceOrientationMode,
+                                                                 self.hasOriginalInterfaceOrientationMode);
+        }
+        self.originalOrientationMapResolver = nil;
+        self.activeOrientationMapResolver = nil;
+        self.hasOriginalInterfaceOrientationMode = NO;
+        self.hasCapturedOrientationMapBaseline = NO;
+        self.crossOrientationMapApplied = NO;
+    }
 
     return modified;
 }
@@ -1233,7 +1329,9 @@ void CV3ToggleExposeMode(void) {
     modified |= CV3SetBoolSettingIfNeeded(settings, @selector(setBackgrounded:), @"backgrounded", NO);
     modified |= CV3SetBoolSettingIfNeeded(settings, NSSelectorFromString(@"setOccluded:"), @"occluded", NO);
     modified |= CV3SetIntegerSettingIfNeeded(settings, NSSelectorFromString(@"setVisibility:"), @"visibility", 2);
-    modified |= CV3SetBoolSettingIfNeeded(settings, NSSelectorFromString(@"setIdleTimerDisabled:"), @"idleTimerDisabled", YES);
+    // Preserve the hosted app's idle-timer policy. Forcing this scene setting to
+    // YES can outlive the floating window and prevent system events that wait
+    // for a normal backlight-dim transition, including automatic appearance.
     modified |= CV3SetIntegerSettingIfNeeded(settings,
                                              @selector(setInterruptionPolicy:),
                                              @"interruptionPolicy",
@@ -2851,18 +2949,39 @@ void CV3ToggleExposeMode(void) {
 
 - (void)disableHostingForCurrentScene {
     NSString *requester = self.sceneHostingRequester;
-    if (!self.targetScene || !requester) return;
+    if (!requester) return;
 
-    @try {
-        id hostManager = CV3InvokeObject(self.targetScene, @selector(hostManager));
-        SEL selector = @selector(disableHostingForRequester:);
-        if (CV3TargetRespondsToSelector(hostManager, selector)) {
-            ((void (*)(id, SEL, id))objc_msgSend)(hostManager, selector, requester);
+    FBScene *scene = self.targetScene;
+    if (scene) {
+        @try {
+            id hostManager = CV3InvokeObject(scene, @selector(hostManager));
+            SEL selector = @selector(disableHostingForRequester:);
+            if (CV3TargetRespondsToSelector(hostManager, selector)) {
+                ((void (*)(id, SEL, id))objc_msgSend)(hostManager, selector, requester);
+            }
+        } @catch (NSException *exception) {
+            CV3LogToFile(@"[Error] 关闭 Scene 托管失败 %@: %@", self.bundleID, exception);
         }
-    } @catch (NSException *exception) {
-        CV3LogToFile(@"[Error] 关闭 Scene 托管失败 %@: %@", self.bundleID, exception);
     }
     self.sceneHostingRequester = nil;
+}
+
+- (void)detachHostedSceneForReason:(NSString *)reason clearScene:(BOOL)clearScene {
+    CV3ReleaseKeyboardHostingForWindow(self);
+    [self disableHostingForCurrentScene];
+    UIView *hostView = self.hostView;
+    self.hostView = nil;
+    if ([hostView respondsToSelector:@selector(invalidate)]) {
+        @try {
+            CV3InvokeObject(hostView, @selector(invalidate));
+        } @catch (NSException *exception) {
+            CV3LogToFile(@"[Error] HostView invalidate 失败 %@ reason=%@: %@", self.bundleID, reason, exception);
+        }
+    }
+    [hostView removeFromSuperview];
+    if (clearScene) self.targetScene = nil;
+    CV3LogToFile(@"[SceneHost] 已同步解绑托管场景 %@ reason=%@ clearScene=%d",
+                 self.bundleID, reason ?: @"Unknown", clearScene);
 }
 
 - (BOOL)hostViewHasRenderableContent {
@@ -2974,13 +3093,8 @@ void CV3ToggleExposeMode(void) {
         BOOL sceneValid = CV3InvokeBool(self.targetScene, @selector(isValid), YES);
         
         if (!sceneValid) {
-            CV3LogToFile(@"[Recovery] 场景失效，触发重连机制: %@", self.bundleID);
-            [self ensureLaunchSplashVisible];
-            if (self.hostView) {
-                [self.hostView removeFromSuperview];
-                self.hostView = nil;
-            }
-            [self loadAppScene];
+            CV3LogToFile(@"[Recovery] 场景失效，停止自动重连并关闭分屏: %@", self.bundleID);
+            [self closeWindow];
             return;
         }
 
@@ -2991,7 +3105,7 @@ void CV3ToggleExposeMode(void) {
                 !CV3InvokeObject(self.hostView, @selector(presentationContext))) {
                 CV3LogToFile(@"[Recovery] 检测到 HostView 渲染层断连，强制修复: %@", self.bundleID);
                 [self ensureLaunchSplashVisible];
-                [self.hostView removeFromSuperview];
+                [self detachHostedSceneForReason:@"PresentationContextDisconnected" clearScene:NO];
                 [self attemptToHostSceneWithRetries:1 delay:0]; // 快速尝试重建
                 return;
             }
@@ -3286,6 +3400,7 @@ void CV3ToggleExposeMode(void) {
     self.preStashFrame = self.frame;
     self.isStashed = YES;
     [self.hostedSession setActive:NO];
+    CV3ReleaseKeyboardHostingForWindow(self);
     self.stashedSide = isNearLeft ? 1 : 2;
     [self promoteFloatingWindowInZOrder];
     CV3CascadeUpdateSovereigntyAssertions(); // 级联刷新所有窗口前台优先级断言
@@ -3705,7 +3820,17 @@ void CV3ToggleExposeMode(void) {
 }
 
 - (void)attemptToHostSceneWithRetries:(int)retries delay:(double)delay {
+    [self attemptToHostSceneWithRetries:retries delay:delay generation:self.sceneHostGeneration];
+}
+
+- (void)attemptToHostSceneWithRetries:(int)retries delay:(double)delay generation:(NSUInteger)generation {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (self.isClosing || generation != self.sceneHostGeneration) {
+            CV3LogToFile(@"[SceneHost] 忽略过期挂载任务 %@ generation=%lu current=%lu closing=%d",
+                         self.bundleID, (unsigned long)generation,
+                         (unsigned long)self.sceneHostGeneration, self.isClosing);
+            return;
+        }
         @try {
             FBScene *targetScene = [self getSceneForBundleID:self.bundleID];
             
@@ -3770,7 +3895,7 @@ void CV3ToggleExposeMode(void) {
             } else {
                 CV3LogToFile(@"[Debug] 未找到场景: %@", self.bundleID);
                 if (retries > 0) {
-                    [self attemptToHostSceneWithRetries:retries - 1 delay:delay * 1.2];
+                    [self attemptToHostSceneWithRetries:retries - 1 delay:delay * 1.2 generation:generation];
                 } else {
                     CV3LogToFile(@"[Error] targetScene not found after launch for %@", self.bundleID);
                 }
@@ -3782,7 +3907,9 @@ void CV3ToggleExposeMode(void) {
 }
 
 - (void)loadAppScene {
+    NSUInteger generation = ++self.sceneHostGeneration;
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.isClosing || generation != self.sceneHostGeneration) return;
         @try {
             [self ensureLaunchSplashVisible];
             [[UIApplication sharedApplication] launchApplicationWithIdentifier:self.bundleID suspended:YES];
@@ -3790,13 +3917,13 @@ void CV3ToggleExposeMode(void) {
             [self updateSovereigntyAssertion];
 
             // Start polling with initial delay of 0.3s, up to 10 retries (more resilient for cold starts)
-            [self attemptToHostSceneWithRetries:10 delay:0.3];
+            [self attemptToHostSceneWithRetries:10 delay:0.3 generation:generation];
             
             // Keep the loading surface visible until the hosted Scene supplies a render layer.
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (self.splashView) {
+                if (!self.isClosing && generation == self.sceneHostGeneration && self.splashView) {
                     CV3LogToFile(@"[Recovery] 启动超时，重新请求 Scene 渲染层: %@", self.bundleID);
-                    [self attemptToHostSceneWithRetries:3 delay:0.0];
+                    [self attemptToHostSceneWithRetries:3 delay:0.0 generation:generation];
                 }
             });
         } @catch (NSException *e) {
@@ -3947,9 +4074,34 @@ void CV3ToggleExposeMode(void) {
             self.moveSceneSyncSuppressedUntil = CACurrentMediaTime() + 0.8;
             self.isMovingWindow = NO;
             [self layoutFloatingHomeBarForBounds:self.appContentWrapper.bounds];
+            // The drag phase applies a velocity-dependent peak shadow. UIKit's
+            // position spring can interrupt the separate shadow animation, so
+            // normalize the model layer only after movement has fully settled.
+            [self syncWindowShadowForCurrentState];
         }];
         
-        [self animateFocusShadow:self.isFocused];
+        // Settle directly from the velocity-dependent drag shadow to the
+        // steady focus shadow. animateFocusShadow: deliberately contains a
+        // dark peak keyframe, which reads as a black flash when the user lets
+        // go after moving the window.
+        CALayer *shadowLayer = [self visualShadowLayer];
+        [self clearOuterWindowShadow];
+        [shadowLayer removeAnimationForKey:@"shadowRadius"];
+        [shadowLayer removeAnimationForKey:@"shadowOpacity"];
+        [shadowLayer removeAnimationForKey:@"shadowOffset"];
+        CGFloat settledRadius = self.isFocused ? CV3Style.shadowRadiusFocused : CV3Style.shadowRadiusUnfocused;
+        CGFloat settledOpacity = self.isFocused ? CV3Style.shadowOpacityFocused : CV3Style.shadowOpacityUnfocused;
+        CGFloat settledOffsetY = self.isFocused ? CV3Style.shadowOffsetFocusedY : CV3Style.shadowOffsetUnfocusedY;
+        [UIView animateWithDuration:0.24
+                              delay:0
+                            options:UIViewAnimationOptionBeginFromCurrentState |
+                                    UIViewAnimationOptionCurveEaseOut |
+                                    UIViewAnimationOptionAllowUserInteraction
+                         animations:^{
+            shadowLayer.shadowRadius = settledRadius;
+            shadowLayer.shadowOpacity = settledOpacity;
+            shadowLayer.shadowOffset = CGSizeMake(0, settledOffsetY);
+        } completion:nil];
     }
 }
 
@@ -4669,6 +4821,7 @@ void CV3ToggleExposeMode(void) {
     if (self.isClosing) return;
     CV3ExitExposeModeIfNeeded(self, NO);
     self.isClosing = YES;
+    self.sceneHostGeneration += 1;
     [self.hostedSession invalidate];
     
     if (self.assertionWatchdogTimer) {
@@ -4686,31 +4839,35 @@ void CV3ToggleExposeMode(void) {
         CV3LogToFile(@"[Immortality] 已释放 %@ 的前台优先级断连", self.bundleID);
     }
 
-    if (self.hostView) {
-        [self disableHostingForCurrentScene];
-
+    if (self.hostView || self.crossOrientationMapApplied) {
         // [New] Reset Scene Settings to Background before destroying
-        if (self.targetScene) {
+        BOOL sceneValid = self.targetScene && CV3InvokeBool(self.targetScene, @selector(isValid), YES);
+        if (sceneValid) {
             @try {
                 FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
                 if ([settings respondsToSelector:@selector(setForeground:)]) [settings setForeground:NO];
                 if ([settings respondsToSelector:@selector(setBackgrounded:)]) [settings setBackgrounded:YES];
+                if (self.crossOrientationMapApplied) {
+                    CV3RestoreCrossOrientationMapOnSettings(settings,
+                                                            self.originalOrientationMapResolver,
+                                                            self.originalInterfaceOrientationMode,
+                                                            self.hasOriginalInterfaceOrientationMode);
+                    self.originalOrientationMapResolver = nil;
+                    self.activeOrientationMapResolver = nil;
+                    self.hasOriginalInterfaceOrientationMode = NO;
+                    self.hasCapturedOrientationMapBaseline = NO;
+                    self.crossOrientationMapApplied = NO;
+                }
                 [self.targetScene updateSettings:settings withTransitionContext:nil];
                 CV3LogToFile(@"[Aggressive] 已将 Scene 设置为后台状态: %@", self.bundleID);
             } @catch (NSException *e) {
                 CV3LogToFile(@"[Error] Reset scene settings failed: %@", e);
             }
+        } else if (self.targetScene) {
+            CV3LogToFile(@"[Lifecycle] 跳过失效 Scene 的后台设置更新: %@", self.bundleID);
         }
-
-        // [Geek Advice] Use explicit invalidate to release backboardd resources
-        if ([self.hostView respondsToSelector:@selector(invalidate)]) {
-            CV3InvokeObject(self.hostView, @selector(invalidate));
-        }
-        [self.hostView removeFromSuperview];
-        self.hostView = nil;
     }
-
-    self.targetScene = nil;
+    [self detachHostedSceneForReason:@"WindowClosing" clearScene:YES];
     if (self.allowProcessTerminationOnClose) {
         CV3LogToFile(@"[Warning] allowProcessTerminationOnClose 已启用，但当前默认关闭路径不执行 kill: %@", self.bundleID);
     }
