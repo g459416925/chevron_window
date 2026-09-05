@@ -2518,12 +2518,15 @@ void CV3ToggleExposeMode(void) {
 
         UIButton *fullscreen = [self multitaskingMenuButtonWithTitle:@"全屏" symbol:@"rectangle.fill" action:@selector(handleFullscreenMenuAction:)];
         UIButton *expose = [self multitaskingMenuButtonWithTitle:@"所有浮窗" symbol:@"square.grid.2x2" action:@selector(handleExposeMenuAction:)];
+        UIButton *copy = [self multitaskingMenuButtonWithTitle:@"复制" symbol:@"doc.on.doc" action:@selector(handleCopyHostedContentAction:)];
         UIButton *close = [self multitaskingMenuButtonWithTitle:@"关闭" symbol:@"xmark" action:@selector(handleCloseMenuAction:)];
         fullscreen.tag = 101;
         expose.tag = 102;
-        close.tag = 103;
+        copy.tag = 103;
+        close.tag = 104;
         [self.multitaskingMenuView.contentView addSubview:fullscreen];
         [self.multitaskingMenuView.contentView addSubview:expose];
+        [self.multitaskingMenuView.contentView addSubview:copy];
         [self.multitaskingMenuView.contentView addSubview:close];
         [self.rootTransformContainer addSubview:self.multitaskingMenuView];
     }
@@ -2546,7 +2549,7 @@ void CV3ToggleExposeMode(void) {
         }
     }
     
-    CGFloat itemW = menuW / 3.0;
+    CGFloat itemW = menuW / 4.0;
     for (UIButton *button in self.multitaskingMenuView.contentView.subviews) {
         if (![button isKindOfClass:[UIButton class]]) continue;
         NSInteger idx = button.tag - 101;
@@ -2698,6 +2701,38 @@ void CV3ToggleExposeMode(void) {
     [self dismissMultitaskingMenu];
     CV3ExitExposeModeIfNeeded(self, NO);
     [self closeWindow];
+}
+
+- (void)handleCopyHostedContentAction:(id)sender {
+    [self dismissMultitaskingMenu];
+    if (self.isClosing || !self.hostView) return;
+
+    UIImage *image = nil;
+    @autoreleasepool {
+        CGSize size = self.hostView.bounds.size;
+        if (size.width > 1.0 && size.height > 1.0) {
+            UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+            format.scale = [UIScreen mainScreen].scale;
+            UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:size format:format];
+            image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+                if (![self.hostView drawViewHierarchyInRect:self.hostView.bounds afterScreenUpdates:NO]) {
+                    [self.hostView.layer renderInContext:context.CGContext];
+                }
+            }];
+        }
+    }
+
+    if (!image) {
+        CV3LogToFile(@"[Clipboard] 无法生成托管内容快照: %@", self.bundleID);
+        return;
+    }
+
+    UIPasteboard *pasteboard = [UIPasteboard generalPasteboard];
+    pasteboard.items = @[@{
+        @"public.png": UIImagePNGRepresentation(image)
+    }];
+    CV3LogToFile(@"[Clipboard] 已复制分屏画面 %@ size=%@", self.bundleID, NSStringFromCGSize(image.size));
+    [self triggerCollisionImpulse];
 }
 
 - (void)handleExposeMenuAction:(id)sender {

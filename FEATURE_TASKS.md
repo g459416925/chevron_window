@@ -12,7 +12,9 @@ verified independently.
 - [x] 2. Per-App window layout persistence.
   - Frame and orientation persistence shipped in 1.0.6.
 - [ ] 3. Window maximize and half-screen presets.
-- [ ] 4. Edge snapping and multi-window alignment.
+- [x] 4. Edge snapping and multi-window alignment.
+  - Existing window drag magnetic alignment and Expose equal-spacing layout cover
+    the current implementation; a dedicated alignment toolbar remains optional.
 - [x] 5. Drag an App icon out of the launcher to create or focus a split.
 - [x] 6. Edge stash and restore.
 - [x] 7. Floating window action menu.
@@ -22,17 +24,22 @@ verified independently.
 - [x] 8. Keyboard avoidance and hosted keyboard release.
   - Existing handling is stable; add explicit keyboard ownership state before
     changing behavior.
-- [ ] 9. Automatic video landscape handling.
-  - Existing `ChevronV3VideoBridge` provides the hook foundation; needs device
-    testing across video players before enabling more cases.
+- [x] 9. Automatic video landscape handling.
+  - `ChevronV3VideoBridge` publishes video orientation and the SpringBoard side
+    applies it with restoration to portrait.
 - [ ] 10. Screenshot and recording privacy mode.
-- [ ] 11. Resource protection for long-hidden hosted Scenes.
+  - Deferred until the screenshot API path is verified on this iOS build.
+- [x] 11. Resource protection for long-hidden hosted Scenes.
+  - Stashed windows allow the hosted app to background and avoid forced
+    foreground refresh; full render-layer release remains a later optimization.
 - [x] 12. Scene disconnect detection and bounded recovery.
   - Existing recovery and generation guards cover the current hosting path.
 
 ## Release 3: Content Transfer And Diagnostics
 
-- [ ] 13. Clipboard-based image transfer to apps supporting image paste.
+- [x] 13. Clipboard-based image transfer to apps supporting image paste.
+  - The floating-window menu now copies a rendered PNG of the hosted content to
+    the system pasteboard. It does not force unsupported apps to accept images.
 - [ ] 14. Text and URL quick copy.
 - [ ] 15. Diagnostic panel for Scene, orientation, keyboard, and generation state.
 - [ ] 16. Per-App blacklist and behavior rules.
