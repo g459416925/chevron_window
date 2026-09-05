@@ -97,6 +97,27 @@ static CGSize CV3HostedCanvasSizeForOrientation(UIInterfaceOrientation orientati
         : CGSizeMake(shortSide, longSide);
 }
 
+static UIInterfaceOrientation CV3HostedPresentationOrientation(CV3FloatingAppWindow *window) {
+    if (!window) return UIInterfaceOrientationUnknown;
+
+    // Prefer the orientation committed by the actual hosted Scene. During a
+    // rotation transaction the window and Scene can briefly disagree; using
+    // the Scene value avoids applying a map against a stale presentation side.
+    id scene = window.targetScene;
+    id settings = scene ? CV3InvokeObject(scene, @selector(settings)) : nil;
+    SEL getter = @selector(interfaceOrientation);
+    if (settings && [settings respondsToSelector:getter]) {
+        @try {
+            UIInterfaceOrientation sceneOrientation =
+                ((UIInterfaceOrientation (*)(id, SEL))objc_msgSend)(settings, getter);
+            if (CV3IsValidInterfaceOrientation(sceneOrientation)) return sceneOrientation;
+        } @catch (NSException *exception) {}
+    }
+
+    if (CV3IsValidInterfaceOrientation(window.targetOrientation)) return window.targetOrientation;
+    return CV3TrustedInterfaceOrientation(window.windowScene);
+}
+
 static BOOL isGlobalExposeActive = NO;
 static UIWindow *globalExposeBackdrop = nil;
 static UIView *globalExposeContentView = nil;
@@ -1238,9 +1259,7 @@ void CV3ToggleExposeMode(void) {
 
     modified |= CV3ApplyLockedOrientationTraitsToSettings(settings, targetOrientation, force);
 
-    UIInterfaceOrientation presentationOrientation = CV3IsValidInterfaceOrientation(self.targetOrientation)
-        ? self.targetOrientation
-        : CV3TrustedInterfaceOrientation(self.windowScene);
+    UIInterfaceOrientation presentationOrientation = CV3HostedPresentationOrientation(self);
     BOOL needsCrossOrientationMap =
         UIInterfaceOrientationIsLandscape(presentationOrientation) !=
         UIInterfaceOrientationIsLandscape(targetOrientation);
@@ -2966,7 +2985,20 @@ void CV3ToggleExposeMode(void) {
     self.sceneHostingRequester = nil;
 }
 
+- (void)setHostLifecycleState:(CV3HostLifecycleState)state reason:(NSString *)reason {
+    if (self.hostLifecycleState == state) return;
+    CV3HostLifecycleState previous = self.hostLifecycleState;
+    self.hostLifecycleState = state;
+    CV3LogToFile(@"[HostState] %@ %@ -> %@ generation=%lu reason=%@",
+                 self.bundleID,
+                 CV3HostLifecycleStateName(previous),
+                 CV3HostLifecycleStateName(state),
+                 (unsigned long)self.sceneHostGeneration,
+                 reason ?: @"Unknown");
+}
+
 - (void)detachHostedSceneForReason:(NSString *)reason clearScene:(BOOL)clearScene {
+    [self setHostLifecycleState:CV3HostLifecycleStateReleasing reason:reason];
     CV3ReleaseKeyboardHostingForWindow(self);
     [self disableHostingForCurrentScene];
     UIView *hostView = self.hostView;
@@ -2980,6 +3012,8 @@ void CV3ToggleExposeMode(void) {
     }
     [hostView removeFromSuperview];
     if (clearScene) self.targetScene = nil;
+    [self setHostLifecycleState:clearScene ? CV3HostLifecycleStateIdle : CV3HostLifecycleStateWaitingForScene
+                         reason:clearScene ? @"Detached" : @"DetachedForRetry"];
     CV3LogToFile(@"[SceneHost] 已同步解绑托管场景 %@ reason=%@ clearScene=%d",
                  self.bundleID, reason ?: @"Unknown", clearScene);
 }
@@ -2993,8 +3027,13 @@ void CV3ToggleExposeMode(void) {
 }
 
 - (void)finishHostingWhenRenderableWithRetries:(NSInteger)retries {
-    if (self.isClosing || !self.hostView) return;
+    [self finishHostingWhenRenderableWithRetries:retries generation:self.sceneHostGeneration];
+}
+
+- (void)finishHostingWhenRenderableWithRetries:(NSInteger)retries generation:(NSUInteger)generation {
+    if (self.isClosing || !self.hostView || generation != self.sceneHostGeneration) return;
     if ([self hostViewHasRenderableContent]) {
+        [self setHostLifecycleState:CV3HostLifecycleStateLive reason:@"Renderable"];
         [self syncWindowBoundsToClient];
         [self dismissLaunchSplashAnimated];
         CV3LogToFile(@"[SceneHost] 渲染层已就绪: %@", self.bundleID);
@@ -3008,7 +3047,9 @@ void CV3ToggleExposeMode(void) {
 
     [self refreshHostViewPresentation];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self finishHostingWhenRenderableWithRetries:retries - 1];
+        if (self.isClosing || self.hostLifecycleState == CV3HostLifecycleStateReleasing ||
+            generation != self.sceneHostGeneration) return;
+        [self finishHostingWhenRenderableWithRetries:retries - 1 generation:generation];
     });
 }
 
@@ -3831,11 +3872,13 @@ void CV3ToggleExposeMode(void) {
                          (unsigned long)self.sceneHostGeneration, self.isClosing);
             return;
         }
+        [self setHostLifecycleState:CV3HostLifecycleStateWaitingForScene reason:@"RetryAttempt"];
         @try {
             FBScene *targetScene = [self getSceneForBundleID:self.bundleID];
             
             if (targetScene) {
                 self.targetScene = targetScene;
+                [self setHostLifecycleState:CV3HostLifecycleStatePrepared reason:@"SceneFound"];
                 CV3LogToFile(@"[Debug] 找到场景: %@ (retries left: %d)", self.bundleID, retries);
                 
                 // Step 1: 确保 Scene 已准备好被托管
@@ -3885,7 +3928,7 @@ void CV3ToggleExposeMode(void) {
                         
                         CV3LogToFile(isReused ? @"[Debug] 成功重用已有的 _UISceneLayerHostContainerView" : @"[Debug] 成功通过 _UISceneLayerHostContainerView 创建渲染视图");
                         
-                        [self finishHostingWhenRenderableWithRetries:20];
+                        [self finishHostingWhenRenderableWithRetries:20 generation:generation];
                     } else {
                         CV3LogToFile(@"[Error] _UISceneLayerHostContainerView 创建/重用失败");
                     }
@@ -3893,6 +3936,7 @@ void CV3ToggleExposeMode(void) {
                     CV3LogToFile(@"[Error] 获取 SceneContainerView 失败: %@", e);
                 }
             } else {
+                [self setHostLifecycleState:CV3HostLifecycleStateWaitingForScene reason:@"SceneUnavailable"];
                 CV3LogToFile(@"[Debug] 未找到场景: %@", self.bundleID);
                 if (retries > 0) {
                     [self attemptToHostSceneWithRetries:retries - 1 delay:delay * 1.2 generation:generation];
@@ -3908,6 +3952,7 @@ void CV3ToggleExposeMode(void) {
 
 - (void)loadAppScene {
     NSUInteger generation = ++self.sceneHostGeneration;
+    [self setHostLifecycleState:CV3HostLifecycleStatePreparing reason:@"LoadAppScene"];
     dispatch_async(dispatch_get_main_queue(), ^{
         if (self.isClosing || generation != self.sceneHostGeneration) return;
         @try {
@@ -4822,6 +4867,7 @@ void CV3ToggleExposeMode(void) {
     CV3ExitExposeModeIfNeeded(self, NO);
     self.isClosing = YES;
     self.sceneHostGeneration += 1;
+    [self setHostLifecycleState:CV3HostLifecycleStateReleasing reason:@"WindowClosing"];
     [self.hostedSession invalidate];
     
     if (self.assertionWatchdogTimer) {
