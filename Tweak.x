@@ -1361,7 +1361,29 @@ static BOOL CV3ApplyCrossOrientationMapToSettings(id settings,
     }
 }
 
+typedef NS_ENUM(NSInteger, CV3HostLifecycleState) {
+    CV3HostLifecycleStateIdle = 0,
+    CV3HostLifecycleStatePreparing,
+    CV3HostLifecycleStateWaitingForScene,
+    CV3HostLifecycleStatePrepared,
+    CV3HostLifecycleStateLive,
+    CV3HostLifecycleStateReleasing,
+};
+
+static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
+    switch (state) {
+        case CV3HostLifecycleStatePreparing: return @"Preparing";
+        case CV3HostLifecycleStateWaitingForScene: return @"WaitingForScene";
+        case CV3HostLifecycleStatePrepared: return @"Prepared";
+        case CV3HostLifecycleStateLive: return @"Live";
+        case CV3HostLifecycleStateReleasing: return @"Releasing";
+        case CV3HostLifecycleStateIdle:
+        default: return @"Idle";
+    }
+}
+
 @interface CV3FloatingAppWindow : UIWindow <UIGestureRecognizerDelegate>
+
 @property (nonatomic, copy) NSString *bundleID;
 @property (nonatomic, strong) UIVisualEffectView *glassBackdrop; // New: Fluid background
 @property (nonatomic, strong) UIView *appContentWrapper;
@@ -1456,6 +1478,7 @@ static BOOL CV3ApplyCrossOrientationMapToSettings(id settings,
 @property (nonatomic, assign) BOOL exposeContentOriginalUserInteractionEnabled;
 @property (nonatomic, strong) NSTimer *assertionWatchdogTimer;
 @property (nonatomic, assign) NSUInteger sceneHostGeneration;
+@property (nonatomic, assign) CV3HostLifecycleState hostLifecycleState;
 @property (nonatomic, assign) BOOL isLiveResizing;
 @property (nonatomic, strong) CAGradientLayer *specularHighlight;
 @property (nonatomic, strong) CADisplayLink *liquidDisplayLink;
@@ -1486,6 +1509,7 @@ static BOOL CV3ApplyCrossOrientationMapToSettings(id settings,
 - (void)attemptToHostSceneWithRetries:(int)retries delay:(double)delay;
 - (void)attemptToHostSceneWithRetries:(int)retries delay:(double)delay generation:(NSUInteger)generation;
 - (void)detachHostedSceneForReason:(NSString *)reason clearScene:(BOOL)clearScene;
+- (void)setHostLifecycleState:(CV3HostLifecycleState)state reason:(NSString *)reason;
 - (void)setTargetOrientation:(UIInterfaceOrientation)orientation;
 - (void)applyCurrentTransformWithScale:(CGFloat)scale;
 - (void)handleTransitionGhosting;
@@ -1494,6 +1518,7 @@ static BOOL CV3ApplyCrossOrientationMapToSettings(id settings,
 - (void)disableHostingForCurrentScene;
 - (BOOL)hostViewHasRenderableContent;
 - (void)finishHostingWhenRenderableWithRetries:(NSInteger)retries;
+- (void)finishHostingWhenRenderableWithRetries:(NSInteger)retries generation:(NSUInteger)generation;
 - (void)applyStashedGrabberOrientation;
 - (void)normalizeStashedGrabberLayout;
 - (void)updateStashIconAppearance;
