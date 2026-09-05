@@ -53,6 +53,60 @@ static CGRect CV3DisplayBoundsForWindow(UIWindow *window) {
     return [UIScreen mainScreen].bounds;
 }
 
+static NSString *CV3WindowLayoutKey(NSString *bundleID) {
+    if (bundleID.length == 0) return nil;
+    return [NSString stringWithFormat:@"CV3WindowLayout.%@", bundleID];
+}
+
+static NSDictionary *CV3SavedWindowLayout(NSString *bundleID) {
+    NSString *key = CV3WindowLayoutKey(bundleID);
+    if (!key) return nil;
+    NSDictionary *layout = [[[NSUserDefaults alloc] initWithSuiteName:@"com.xu.chevronv3"] dictionaryForKey:key];
+    return [layout isKindOfClass:[NSDictionary class]] ? layout : nil;
+}
+
+static void CV3SaveWindowLayout(CV3FloatingAppWindow *window) {
+    if (!window || window.bundleID.length == 0 || window.isClosing || window.isStashed) return;
+    NSString *key = CV3WindowLayoutKey(window.bundleID);
+    if (!key) return;
+
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.xu.chevronv3"];
+    NSDictionary *layout = @{
+        @"frame": NSStringFromCGRect(window.frame),
+        @"orientation": @(window.targetOrientation),
+        @"updatedAt": @([[NSDate date] timeIntervalSince1970])
+    };
+    [defaults setObject:layout forKey:key];
+    [defaults synchronize];
+    CV3LogToFile(@"[LayoutStore] 保存 %@ frame=%@ orientation=%ld",
+                 window.bundleID, NSStringFromCGRect(window.frame), (long)window.targetOrientation);
+}
+
+static BOOL CV3RestoreSavedWindowLayout(CV3FloatingAppWindow *window) {
+    if (!window || window.bundleID.length == 0) return NO;
+    NSDictionary *layout = CV3SavedWindowLayout(window.bundleID);
+    NSString *frameString = layout[@"frame"];
+    NSNumber *orientationNumber = layout[@"orientation"];
+    if (![frameString isKindOfClass:[NSString class]] ||
+        ![orientationNumber isKindOfClass:[NSNumber class]]) return NO;
+
+    UIInterfaceOrientation savedOrientation = (UIInterfaceOrientation)orientationNumber.integerValue;
+    if (!CV3IsValidInterfaceOrientation(savedOrientation) ||
+        UIInterfaceOrientationIsLandscape(savedOrientation) != UIInterfaceOrientationIsLandscape(window.targetOrientation)) {
+        return NO;
+    }
+
+    CGRect savedFrame = CGRectFromString(frameString);
+    if (CGRectIsNull(savedFrame) || CGRectIsEmpty(savedFrame) ||
+        savedFrame.size.width < 1.0 || savedFrame.size.height < 1.0) return NO;
+
+    window.frame = [window constrainedFloatingFrameForSize:savedFrame.size
+                                             preferredCenter:CGPointMake(CGRectGetMidX(savedFrame), CGRectGetMidY(savedFrame))];
+    CV3LogToFile(@"[LayoutStore] 恢复 %@ frame=%@ orientation=%ld",
+                 window.bundleID, NSStringFromCGRect(window.frame), (long)savedOrientation);
+    return YES;
+}
+
 static CGRect CV3CanonicalApplicationSceneFrame(id settings) {
     id displayConfiguration = nil;
     SEL displaySelector = NSSelectorFromString(@"displayConfiguration");
@@ -2338,6 +2392,7 @@ void CV3ToggleExposeMode(void) {
                 } completion:nil];
                 [self syncWindowBoundsToClientAndNotify:YES];
                 [self syncWindowShadowForCurrentState];
+                CV3SaveWindowLayout(self);
             }];
 
             [self animateFocusShadow:self.isFocused];
@@ -2671,6 +2726,7 @@ void CV3ToggleExposeMode(void) {
         self.hostedContentOrientation = UIInterfaceOrientationPortrait;
         self.allowProcessTerminationOnClose = NO;
         self.center = center;
+        CV3RestoreSavedWindowLayout(self);
         [self enforcePortraitWindowGeometry];
         self.windowLevel = CV3Style.floatingApp; // 高于普通 App，但低于通知栏/控制中心
         self.backgroundColor = [UIColor clearColor];
@@ -4123,6 +4179,7 @@ void CV3ToggleExposeMode(void) {
             // position spring can interrupt the separate shadow animation, so
             // normalize the model layer only after movement has fully settled.
             [self syncWindowShadowForCurrentState];
+            CV3SaveWindowLayout(self);
         }];
         
         // Settle directly from the velocity-dependent drag shadow to the
@@ -4835,6 +4892,7 @@ void CV3ToggleExposeMode(void) {
 
                 // 动画静止后，发出一次最终的 Darwin 通知，通知客户端刷新其 UI
                 [self syncWindowBoundsToClientAndNotify:YES];
+                CV3SaveWindowLayout(self);
             }];
             
             [self animateFocusShadow:self.isFocused];
