@@ -1,7 +1,7 @@
 Package: com.xu.chevronv3
 Name: ChevronV3
 Depends: mobilesubstrate, preferenceloader
-Version: 1.0.0
+Version: 1.0.4
 Architecture: iphoneos-arm64
 Description: New generation for testing.
 Maintainer: xu

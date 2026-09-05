@@ -358,7 +358,7 @@ struct {
     // 布局参数
     .panelW = 370.0,
     .panelH = 520.0,
-    .triggerHotzoneWidth = 50.0,
+    .triggerHotzoneWidth = 30.0,
     .triggerVisualWidth = 20.0,
     .triggerBottomOffset = 100.0,
     .safeAreaBreath = 10.0,
@@ -1278,6 +1278,89 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
     return modified;
 }
 
+static id CV3OrientationMapResolverFromSettings(id settings) {
+    SEL getter = NSSelectorFromString(@"interfaceOrientationMapResolver");
+    if (!settings || ![settings respondsToSelector:getter]) return nil;
+    @try {
+        return ((id (*)(id, SEL))objc_msgSend)(settings, getter);
+    } @catch (NSException *exception) {
+        return nil;
+    }
+}
+
+static BOOL CV3RestoreCrossOrientationMapOnSettings(id settings,
+                                                     id resolver,
+                                                     NSInteger mode,
+                                                     BOOL hasMode) {
+    if (!settings) return NO;
+
+    BOOL modified = NO;
+    SEL resolverSetter = NSSelectorFromString(@"setInterfaceOrientationMapResolver:");
+    SEL modeSetter = NSSelectorFromString(@"setInterfaceOrientationMode:");
+    @try {
+        if ([settings respondsToSelector:resolverSetter]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(settings, resolverSetter, resolver);
+            modified = YES;
+        }
+        if (hasMode && [settings respondsToSelector:modeSetter]) {
+            ((void (*)(id, SEL, NSInteger))objc_msgSend)(settings, modeSetter, mode);
+            modified = YES;
+        }
+    } @catch (NSException *exception) {}
+    return modified;
+}
+
+static BOOL CV3ApplyCrossOrientationMapToSettings(id settings,
+                                                   UIInterfaceOrientation presentationOrientation,
+                                                   UIInterfaceOrientation hostedOrientation,
+                                                   BOOL force) {
+    if (!settings ||
+        !CV3IsValidInterfaceOrientation(presentationOrientation) ||
+        !CV3IsValidInterfaceOrientation(hostedOrientation)) {
+        return NO;
+    }
+
+    BOOL presentationLandscape = UIInterfaceOrientationIsLandscape(presentationOrientation);
+    BOOL hostedLandscape = UIInterfaceOrientationIsLandscape(hostedOrientation);
+    if (presentationLandscape == hostedLandscape) {
+        return NO;
+    }
+
+    Class resolverClass = NSClassFromString(@"BSCanonicalOrientationMapResolver");
+    SEL initSelector = NSSelectorFromString(@"initWithTargetOrientation:currentOrientation:");
+    SEL resolverGetter = NSSelectorFromString(@"interfaceOrientationMapResolver");
+    SEL resolverSetter = NSSelectorFromString(@"setInterfaceOrientationMapResolver:");
+    SEL modeSetter = NSSelectorFromString(@"setInterfaceOrientationMode:");
+    if (!resolverClass ||
+        ![resolverClass instancesRespondToSelector:initSelector] ||
+        ![settings respondsToSelector:resolverSetter] ||
+        ![settings respondsToSelector:modeSetter]) {
+        return NO;
+    }
+
+    if (!force && [settings respondsToSelector:resolverGetter]) {
+        @try {
+            id currentResolver = ((id (*)(id, SEL))objc_msgSend)(settings, resolverGetter);
+            if (currentResolver) return NO;
+        } @catch (NSException *exception) {}
+    }
+
+    @try {
+        id resolver = ((id (*)(id, SEL, NSInteger, NSInteger))objc_msgSend)(
+            [resolverClass alloc],
+            initSelector,
+            (NSInteger)presentationOrientation,
+            (NSInteger)hostedOrientation);
+        if (!resolver) return NO;
+
+        ((void (*)(id, SEL, NSInteger))objc_msgSend)(settings, modeSetter, 1);
+        ((void (*)(id, SEL, id))objc_msgSend)(settings, resolverSetter, resolver);
+        return YES;
+    } @catch (NSException *exception) {
+        return NO;
+    }
+}
+
 @interface CV3FloatingAppWindow : UIWindow <UIGestureRecognizerDelegate>
 @property (nonatomic, copy) NSString *bundleID;
 @property (nonatomic, strong) UIVisualEffectView *glassBackdrop; // New: Fluid background
@@ -1341,6 +1424,12 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 @property (nonatomic, strong) UIImageView *largeSplashIcon;
 @property (nonatomic, assign) UIInterfaceOrientation targetOrientation;
 @property (nonatomic, assign) UIInterfaceOrientation hostedContentOrientation;
+@property (nonatomic, strong) id originalOrientationMapResolver;
+@property (nonatomic, strong) id activeOrientationMapResolver;
+@property (nonatomic, assign) NSInteger originalInterfaceOrientationMode;
+@property (nonatomic, assign) BOOL hasOriginalInterfaceOrientationMode;
+@property (nonatomic, assign) BOOL hasCapturedOrientationMapBaseline;
+@property (nonatomic, assign) BOOL crossOrientationMapApplied;
 @property (nonatomic, assign) UIInterfaceOrientation lastLayoutOrientation;
 @property (nonatomic, assign) CGAffineTransform baseRotationTransform;
 @property (nonatomic, assign) CGRect preFullscreenFrame;
@@ -1366,6 +1455,7 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 @property (nonatomic, assign) UIViewAutoresizing exposeContentOriginalAutoresizingMask;
 @property (nonatomic, assign) BOOL exposeContentOriginalUserInteractionEnabled;
 @property (nonatomic, strong) NSTimer *assertionWatchdogTimer;
+@property (nonatomic, assign) NSUInteger sceneHostGeneration;
 @property (nonatomic, assign) BOOL isLiveResizing;
 @property (nonatomic, strong) CAGradientLayer *specularHighlight;
 @property (nonatomic, strong) CADisplayLink *liquidDisplayLink;
@@ -1394,6 +1484,8 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (void)handleHideAction;
 - (void)enforceSceneForegroundState;
 - (void)attemptToHostSceneWithRetries:(int)retries delay:(double)delay;
+- (void)attemptToHostSceneWithRetries:(int)retries delay:(double)delay generation:(NSUInteger)generation;
+- (void)detachHostedSceneForReason:(NSString *)reason clearScene:(BOOL)clearScene;
 - (void)setTargetOrientation:(UIInterfaceOrientation)orientation;
 - (void)applyCurrentTransformWithScale:(CGFloat)scale;
 - (void)handleTransitionGhosting;
@@ -1445,6 +1537,8 @@ static BOOL CV3ApplyLockedOrientationTraitsToSettings(id settings, UIInterfaceOr
 - (BOOL)applyForegroundSovereigntyToSettings:(id)settings clearDeactivation:(BOOL)clearDeactivation forceLayout:(BOOL)forceLayout;
 - (void)stabilizeForegroundForWorkspaceTransition:(NSString *)reason;
 @end
+
+static void CV3ReleaseKeyboardHostingForWindow(CV3FloatingAppWindow *window);
 
 static void CV3PostHostedStateValue(NSString *bundleID, uint64_t state) {
     if (bundleID.length == 0) return;
@@ -1884,23 +1978,37 @@ static BOOL CV3InterceptHostedIconObject(id icon, NSString *source) {
 
 %hook SBIconView
 - (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event {
+    CV3LogToFile(@"[EditProbe] SBIconView touchesBegan self=%@ gestures=%@", self, self.gestureRecognizers);
     if (CV3InterceptHostedIconObject(CV3IconFromIconViewObject(self), @"SBIconView.touch")) return;
     %orig(touches, event);
 }
 
 - (void)touchesMoved:(NSSet *)touches withEvent:(UIEvent *)event {
+    CV3LogToFile(@"[EditProbe] SBIconView touchesMoved self=%@", self);
     if (CV3HostedFloatingWindowForBundleID(CV3BundleIdentifierFromIconObject(CV3IconFromIconViewObject(self)))) return;
     %orig(touches, event);
 }
 
 - (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event {
+    CV3LogToFile(@"[EditProbe] SBIconView touchesEnded self=%@", self);
     if (CV3HostedFloatingWindowForBundleID(CV3BundleIdentifierFromIconObject(CV3IconFromIconViewObject(self)))) return;
     %orig(touches, event);
 }
 
 - (void)touchesCancelled:(NSSet *)touches withEvent:(UIEvent *)event {
+    CV3LogToFile(@"[EditProbe] SBIconView touchesCancelled self=%@", self);
     if (CV3HostedFloatingWindowForBundleID(CV3BundleIdentifierFromIconObject(CV3IconFromIconViewObject(self)))) return;
     %orig(touches, event);
+}
+%end
+
+// iOS 16.5.1 may route the edit gesture through a private recognizer action
+// instead of the wallpaper handlers above.  Probe every long-press state
+// transition, including the owning view and private target/action description.
+%hook UILongPressGestureRecognizer
+- (void)setState:(UIGestureRecognizerState)state {
+    CV3LogToFile(@"[EditProbe] UILongPress state=%ld recognizer=%@ view=%@", (long)state, self, self.view);
+    %orig(state);
 }
 %end
 
@@ -2193,6 +2301,49 @@ static BOOL CV3IsEditTriggerFromAppOrContextMenu(id reason) {
     return NO;
 }
 
+// Do not disable every long-press recognizer on a Home Screen container.
+// SBIconListView can also host the recognizer that forwards a press from an
+// SBIconView; disabling that recognizer makes the iOS 10-style "long-press an
+// app icon" path impossible.  Only return YES when UIKit/SpringBoard gives us
+// a recognizable wallpaper/background action.  The dedicated
+// *_handleWallpaperLongPress hooks below remain the fallback when Apple changes
+// the private recognizer's description on a future point release.
+static BOOL CV3IsWallpaperLongPressGesture(UIGestureRecognizer *gesture) {
+    if (!gesture || ![gesture isKindOfClass:[UILongPressGestureRecognizer class]]) return NO;
+
+    NSString *description = [[gesture description] lowercaseString];
+    if ([description rangeOfString:@"wallpaper"].location != NSNotFound ||
+        [description rangeOfString:@"background"].location != NSNotFound) {
+        return YES;
+    }
+
+    // UIGestureRecognizer keeps target/action pairs in the private _targets
+    // array.  Reading it is intentionally best-effort and guarded because the
+    // exact target wrapper differs between iOS releases.
+    @try {
+        NSArray *targets = [gesture valueForKey:@"_targets"];
+        for (id targetAction in targets) {
+            NSString *targetDescription = [[targetAction description] lowercaseString];
+            if ([targetDescription rangeOfString:@"wallpaper"].location != NSNotFound ||
+                [targetDescription rangeOfString:@"background"].location != NSNotFound) {
+                return YES;
+            }
+            id action = nil;
+            if ([targetAction respondsToSelector:@selector(action)]) {
+                action = [targetAction valueForKey:@"action"];
+            }
+            NSString *actionString = [[action description] lowercaseString];
+            if ([actionString rangeOfString:@"wallpaper"].location != NSNotFound ||
+                [actionString rangeOfString:@"background"].location != NSNotFound) {
+                return YES;
+            }
+        }
+    } @catch (__unused NSException *exception) {
+        // Unknown private target representation: leave the recognizer alone.
+    }
+    return NO;
+}
+
 %hook SBHIconManager
 - (void)_handleWallpaperLongPress:(id)gesture {
     CV3LogToFile(@"[EditTrace] SBHIconManager _handleWallpaperLongPress");
@@ -2245,7 +2396,7 @@ static BOOL CV3IsEditTriggerFromAppOrContextMenu(id reason) {
 - (UILongPressGestureRecognizer *)wallpaperLongPressGestureRecognizer {
     UILongPressGestureRecognizer *g = %orig;
     CV3LogToFile(@"[EditTrace] SBHIconManager wallpaperLongPressGestureRecognizer: %@", g);
-    if (g && CV3ShouldSuppressWallpaperLongPress()) {
+    if (g && CV3ShouldSuppressWallpaperLongPress() && CV3IsWallpaperLongPressGesture(g)) {
         g.enabled = NO;
     }
     return g;
@@ -2298,7 +2449,8 @@ static BOOL CV3IsEditTriggerFromAppOrContextMenu(id reason) {
 
 %hook SBHHomeScreenView
 - (void)addGestureRecognizer:(UIGestureRecognizer *)gestureRecognizer {
-    if ([gestureRecognizer isKindOfClass:[UILongPressGestureRecognizer class]] && CV3ShouldSuppressWallpaperLongPress()) {
+    CV3LogToFile(@"[EditProbe] SBHHomeScreenView addGesture class=%@ desc=%@", NSStringFromClass([gestureRecognizer class]), gestureRecognizer);
+    if (CV3ShouldSuppressWallpaperLongPress() && CV3IsWallpaperLongPressGesture(gestureRecognizer)) {
         CV3LogToFile(@"[Feature] 成功禁用了 SBHHomeScreenView 上的 UILongPressGestureRecognizer (%@)", gestureRecognizer);
         gestureRecognizer.enabled = NO;
     }
@@ -2309,7 +2461,7 @@ static BOOL CV3IsEditTriggerFromAppOrContextMenu(id reason) {
     %orig;
     if (CV3ShouldSuppressWallpaperLongPress()) {
         for (UIGestureRecognizer *g in self.gestureRecognizers) {
-            if ([g isKindOfClass:[UILongPressGestureRecognizer class]] && g.enabled) {
+            if (g.enabled && CV3IsWallpaperLongPressGesture(g)) {
                 CV3LogToFile(@"[Feature] layoutSubviews 禁用了 SBHHomeScreenView 上的 UILongPressGestureRecognizer (%@)", g);
                 g.enabled = NO;
             }
@@ -2335,7 +2487,7 @@ static BOOL CV3IsEditTriggerFromAppOrContextMenu(id reason) {
 
 - (UILongPressGestureRecognizer *)wallpaperLongPressGestureRecognizer {
     UILongPressGestureRecognizer *g = %orig;
-    if (g && CV3ShouldSuppressWallpaperLongPress()) {
+    if (g && CV3ShouldSuppressWallpaperLongPress() && CV3IsWallpaperLongPressGesture(g)) {
         g.enabled = NO;
     }
     return g;
@@ -2344,7 +2496,8 @@ static BOOL CV3IsEditTriggerFromAppOrContextMenu(id reason) {
 
 %hook SBIconListView
 - (void)addGestureRecognizer:(UIGestureRecognizer *)gestureRecognizer {
-    if ([gestureRecognizer isKindOfClass:[UILongPressGestureRecognizer class]] && CV3ShouldSuppressWallpaperLongPress()) {
+    CV3LogToFile(@"[EditProbe] SBIconListView addGesture class=%@ desc=%@", NSStringFromClass([gestureRecognizer class]), gestureRecognizer);
+    if (CV3ShouldSuppressWallpaperLongPress() && CV3IsWallpaperLongPressGesture(gestureRecognizer)) {
         CV3LogToFile(@"[Feature] 成功禁用了 SBIconListView 上的 UILongPressGestureRecognizer (%@)", gestureRecognizer);
         gestureRecognizer.enabled = NO;
     }
@@ -2355,7 +2508,7 @@ static BOOL CV3IsEditTriggerFromAppOrContextMenu(id reason) {
     %orig;
     if (CV3ShouldSuppressWallpaperLongPress()) {
         for (UIGestureRecognizer *g in self.gestureRecognizers) {
-            if ([g isKindOfClass:[UILongPressGestureRecognizer class]] && g.enabled) {
+            if (g.enabled && CV3IsWallpaperLongPressGesture(g)) {
                 CV3LogToFile(@"[Feature] layoutSubviews 禁用了 SBIconListView 上的 UILongPressGestureRecognizer (%@)", g);
                 g.enabled = NO;
             }
@@ -2382,7 +2535,7 @@ static BOOL CV3IsEditTriggerFromAppOrContextMenu(id reason) {
 
 %hook SBFWallpaperView
 - (void)addGestureRecognizer:(UIGestureRecognizer *)gestureRecognizer {
-    if ([gestureRecognizer isKindOfClass:[UILongPressGestureRecognizer class]] && CV3ShouldSuppressWallpaperLongPress()) {
+    if (CV3ShouldSuppressWallpaperLongPress() && CV3IsWallpaperLongPressGesture(gestureRecognizer)) {
         CV3LogToFile(@"[Feature] 成功禁用了 SBFWallpaperView 上的 UILongPressGestureRecognizer (%@)", gestureRecognizer);
         gestureRecognizer.enabled = NO;
     }
@@ -2393,7 +2546,7 @@ static BOOL CV3IsEditTriggerFromAppOrContextMenu(id reason) {
     %orig;
     if (CV3ShouldSuppressWallpaperLongPress()) {
         for (UIGestureRecognizer *g in self.gestureRecognizers) {
-            if ([g isKindOfClass:[UILongPressGestureRecognizer class]] && g.enabled) {
+            if (g.enabled && CV3IsWallpaperLongPressGesture(g)) {
                 CV3LogToFile(@"[Feature] layoutSubviews 禁用了 SBFWallpaperView 上的 UILongPressGestureRecognizer (%@)", g);
                 g.enabled = NO;
             }
@@ -2420,7 +2573,7 @@ static BOOL CV3IsEditTriggerFromAppOrContextMenu(id reason) {
 
 - (UILongPressGestureRecognizer *)wallpaperLongPressGestureRecognizer {
     UILongPressGestureRecognizer *g = %orig;
-    if (g && CV3ShouldSuppressWallpaperLongPress()) {
+    if (g && CV3ShouldSuppressWallpaperLongPress() && CV3IsWallpaperLongPressGesture(g)) {
         g.enabled = NO;
     }
     return g;
@@ -2632,7 +2785,7 @@ static BOOL CV3IsEditTriggerFromAppOrContextMenu(id reason) {
 }
 - (UILongPressGestureRecognizer *)wallpaperLongPressGestureRecognizer {
     UILongPressGestureRecognizer *g = %orig;
-    if (g && CV3ShouldSuppressWallpaperLongPress()) {
+    if (g && CV3ShouldSuppressWallpaperLongPress() && CV3IsWallpaperLongPressGesture(g)) {
         g.enabled = NO;
     }
     return g;
@@ -3977,24 +4130,25 @@ static BOOL CV3SwitcherIndexMatchesHostedFloatingWindow(id modifier, NSUInteger 
 
 %hook FBSceneManager
 - (void)destroyScene:(id)arg1 withTransitionContext:(id)arg2 {
+    CV3FloatingAppWindow *windowToClose = nil;
     if (floatingWindows && floatingWindows.count > 0) {
         FBScene *scene = (FBScene *)arg1;
-        for (CV3FloatingAppWindow *win in floatingWindows) {
+        for (CV3FloatingAppWindow *win in [floatingWindows copy]) {
             if (CV3IdentifierContainsExactBundleID(scene.identifier, win.bundleID) && !win.isClosing) {
-                CV3LogToFile(@"[Lifecycle] 系统尝试销毁托管场景 (%@)，清理渲染并准备恢复", win.bundleID);
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    if (win.hostView) {
-                        [win.hostView removeFromSuperview];
-                        win.hostView = nil;
-                    }
-                    win.targetScene = nil;
-                    if (!win.isStashed) {
-                        [win ensureLaunchSplashVisible];
-                        [win loadAppScene];
-                    }
-                });
+                windowToClose = win;
                 break;
             }
+        }
+    }
+    if (windowToClose) {
+        CV3LogToFile(@"[Lifecycle] 系统正在销毁托管场景 (%@)，在 FrontBoard 销毁前同步关闭分屏", windowToClose.bundleID);
+        if ([NSThread isMainThread]) {
+            [windowToClose closeWindow];
+        } else {
+            CV3LogToFile(@"[Lifecycle] destroyScene 从非主线程进入，切回主线程同步清理: %@", windowToClose.bundleID);
+            dispatch_sync(dispatch_get_main_queue(), ^{
+                [windowToClose closeWindow];
+            });
         }
     }
     %orig;
@@ -4220,6 +4374,28 @@ static BOOL CV3FocusHostedLaunchTargetFromObject(id request, NSString *source) {
 %end
 
 %hook SBIconController
+- (void)_handleEditingGesture:(UILongPressGestureRecognizer *)gesture {
+    UIView *gestureView = gesture.view;
+    CGPoint point = gestureView ? [gesture locationInView:gestureView] : CGPointZero;
+    UIView *hitView = gestureView ? [gestureView hitTest:point withEvent:nil] : nil;
+    BOOL onIcon = NO;
+    for (UIView *view = hitView; view; view = view.superview) {
+        NSString *className = NSStringFromClass([view class]);
+        if ([className rangeOfString:@"IconView" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            onIcon = YES;
+            break;
+        }
+    }
+    CV3LogToFile(@"[EditProbe] SBIconController _handleEditingGesture state=%ld point=(%.1f,%.1f) hit=%@ onIcon=%d gestureView=%@",
+                 (long)gesture.state, point.x, point.y, hitView, onIcon, gestureView);
+    if (gesture.state == UIGestureRecognizerStateBegan &&
+        CV3ShouldSuppressWallpaperLongPress() && !onIcon) {
+        CV3LogToFile(@"[Feature] 拦截 SBIconContentView 空白处 _handleEditingGesture");
+        return;
+    }
+    %orig(gesture);
+}
+
 - (void)launchIcon:(id)icon fromLocation:(id)location {
     if (CV3InterceptHostedIconObject(icon, @"SBIconController.launchIcon:fromLocation:")) return;
     %orig(icon, location);
@@ -4274,6 +4450,33 @@ static BOOL CV3ShouldSuppressKeyboardWindow(void);
 @end
 
 static CV3PassthroughWindow *cv3_keyboardWindow = nil;
+static __weak CV3FloatingAppWindow *cv3_keyboardOwnerWindow = nil;
+static NSHashTable<UIView *> *cv3_keyboardHostedViews = nil;
+
+static CV3FloatingAppWindow *CV3FloatingWindowOwningHostContainer(UIView *container) {
+    if (!container || !floatingWindows) return nil;
+    for (CV3FloatingAppWindow *window in [floatingWindows copy]) {
+        if (![window isKindOfClass:[CV3FloatingAppWindow class]] || window.isClosing) continue;
+        if (window.hostView == container) return window;
+    }
+    return nil;
+}
+
+static void CV3ReleaseKeyboardHostingForWindow(CV3FloatingAppWindow *window) {
+    if (window && cv3_keyboardOwnerWindow != window) return;
+
+    for (UIView *hostedView in cv3_keyboardHostedViews.allObjects) {
+        [hostedView removeFromSuperview];
+    }
+    [cv3_keyboardHostedViews removeAllObjects];
+    cv3_keyboardOwnerWindow = nil;
+
+    if (cv3_keyboardWindow) {
+        cv3_keyboardWindow.userInteractionEnabled = NO;
+        cv3_keyboardWindow.alpha = 0.0;
+        cv3_keyboardWindow.hidden = YES;
+    }
+}
 
 static BOOL CV3ShouldSuppressKeyboardWindow(void) {
     if (!CV3KeyboardSuppressedByPanel) return NO;
@@ -4329,9 +4532,18 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
 %hook _UISceneLayerHostContainerView
 - (void)layoutSubviews {
     %orig;
+    BOOL isChevronHost = [self.accessibilityIdentifier isEqualToString:@"ChevronV3Host"];
+    if (!isChevronHost) return;
+
+    CV3FloatingAppWindow *ownerWindow = CV3FloatingWindowOwningHostContainer(self);
+    if (!ownerWindow) return;
+
     for (UIView *subview in self.subviews) {
-        BOOL isKeyboardLayer = [NSStringFromClass([subview class]) containsString:@"Keyboard"];
-        if ([self.accessibilityIdentifier isEqualToString:@"ChevronV3Host"] && !isKeyboardLayer) {
+        Class keyboardHostClass = NSClassFromString(@"_UIKeyboardLayerHostView");
+        BOOL isKeyboardLayer =
+            (keyboardHostClass && [subview isKindOfClass:keyboardHostClass]) ||
+            [NSStringFromClass([subview class]) containsString:@"Keyboard"];
+        if (!isKeyboardLayer) {
             if (CGAffineTransformIsIdentity(subview.transform)) {
                 subview.frame = self.bounds;
             } else {
@@ -4342,6 +4554,14 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
         }
 
         if (isKeyboardLayer) {
+            if (cv3_keyboardHostedViews.count > 0 && cv3_keyboardOwnerWindow != ownerWindow) {
+                CV3ReleaseKeyboardHostingForWindow(nil);
+            }
+            cv3_keyboardOwnerWindow = ownerWindow;
+            if (!cv3_keyboardHostedViews) {
+                cv3_keyboardHostedViews = [NSHashTable weakObjectsHashTable];
+            }
+
             UIWindowScene *keyboardScene = nil;
             if (@available(iOS 13.0, *)) {
                 keyboardScene = CV3KeyboardHostScene();
@@ -4376,6 +4596,13 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
                     cv3_keyboardWindow.hidden = shouldSuppressKeyboardWindow;
                     cv3_keyboardWindow.alpha = shouldSuppressKeyboardWindow ? 0.0 : 1.0;
                     cv3_keyboardWindow.userInteractionEnabled = !shouldSuppressKeyboardWindow;
+
+                    for (UIView *hostedView in cv3_keyboardHostedViews.allObjects) {
+                        if (hostedView != subview) {
+                            [hostedView removeFromSuperview];
+                            [cv3_keyboardWindow addSubview:hostedView];
+                        }
+                    }
                 }
             }
 
@@ -4423,6 +4650,7 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
                 [subview removeFromSuperview];
                 [cv3_keyboardWindow addSubview:subview];
             }
+            [cv3_keyboardHostedViews addObject:subview];
 
             // In landscape the keyboard host view already carries UIKit's rotation
             // geometry. Resetting it to identity moves the keyboard off-screen.
