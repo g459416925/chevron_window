@@ -19,7 +19,8 @@ static int CV3HostGenerationNotificationToken = -1;
 static BOOL CV3ApplicationIsChevronHosted = NO;
 static BOOL CV3WorkspaceTransitionShieldActive = NO;
 static NSTimeInterval CV3PlaybackTransitionGraceDeadline = 0;
-static const uint64_t CV3ClientBridgeProtocolVersion = 0x2026090602ULL;
+static const uint64_t CV3ClientBridgeProtocolVersion = 0x2026090603ULL;
+static const uint64_t CV3CanvasReadyFlag = (1ULL << 63);
 static NSTimer *CV3CanvasTimer = nil;
 static int CV3CanvasNotificationToken = -1;
 static NSString *CV3CanvasNotificationName = nil;
@@ -112,7 +113,7 @@ static void CV3DumpCanvasTrace(NSString *tag) {
     CV3AppendCanvasTrace([NSString stringWithFormat:@"[DEBUG-canvas-sample] END %@", tag]);
 }
 
-static BOOL CV3RepairHostedVideoLayerTree(CALayer *root, CGSize canvasSize) {
+static BOOL CV3RepairHostedVideoLayerTreeRecursive(CALayer *root, CGSize canvasSize) {
     if (!root || canvasSize.width <= canvasSize.height) return NO;
 
     __block BOOL repaired = NO;
@@ -124,20 +125,42 @@ static BOOL CV3RepairHostedVideoLayerTree(CALayer *root, CGSize canvasSize) {
         BOOL childIsTransposedCanvas = fabs(childSize.width - canvasSize.height) <= 1.0 &&
             fabs(childSize.height - canvasSize.width) <= 1.0;
         if ([child isKindOfClass:AVPlayerLayer.class] && parentMatchesCanvas && childIsTransposedCanvas) {
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
             child.frame = child.superlayer.bounds;
             [child setNeedsLayout];
             [child layoutIfNeeded];
-            [CATransaction commit];
             CV3AppendCanvasTrace([NSString stringWithFormat:
                 @"[DEBUG-canvas-repair] AVPlayerLayer %@ -> %@ parent=%@ videoGravity=%@",
                 NSStringFromCGSize(childSize), NSStringFromCGSize(child.bounds.size),
                 NSStringFromCGSize(parentSize), ((AVPlayerLayer *)child).videoGravity]);
             repaired = YES;
         }
-        repaired |= CV3RepairHostedVideoLayerTree(child, canvasSize);
+        repaired |= CV3RepairHostedVideoLayerTreeRecursive(child, canvasSize);
     }
+    return repaired;
+}
+
+static BOOL CV3RepairHostedVideoLayerTree(CALayer *root, CGSize canvasSize) {
+    if (!root || canvasSize.width <= canvasSize.height) return NO;
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    BOOL repaired = CV3RepairHostedVideoLayerTreeRecursive(root, canvasSize);
+    if (repaired) {
+        uint64_t committedGeometry = ((uint64_t)llround(canvasSize.width) << 16) |
+            (uint64_t)llround(canvasSize.height) | CV3CanvasReadyFlag;
+        [CATransaction setCompletionBlock:^{
+            // Publish readiness only after the corrected AVPlayerLayer frame
+            // has reached Core Animation. This lets the host reveal the first
+            // real frame without an arbitrary safety delay.
+            if (CV3ApplicationIsChevronHosted && CV3CanvasNotificationToken >= 0) {
+                notify_set_state(CV3CanvasNotificationToken, committedGeometry);
+                if (CV3CanvasNotificationName.length > 0) {
+                    notify_post(CV3CanvasNotificationName.UTF8String);
+                }
+            }
+        }];
+    }
+    [CATransaction commit];
     return repaired;
 }
 
@@ -313,9 +336,14 @@ static void CV3RefreshHostedState(int token) {
                             if (window.windowLevel != UIWindowLevelNormal) continue;
                             CGSize size = window.bounds.size;
                             CGSize rootSize = window.rootViewController.viewIfLoaded.bounds.size;
-                            CV3RepairHostedVideoLayerTree(window.layer, size);
+                            BOOL repairedVideoLayer = CV3RepairHostedVideoLayerTree(window.layer, size);
                             if (fabs(size.width - rootSize.width) > 1 || fabs(size.height - rootSize.height) > 1) continue;
                             geometry = ((uint64_t)llround(size.width) << 16) | (uint64_t)llround(size.height);
+                            // If no transposed video layer needed repair, the
+                            // current layer tree is already safe to reveal. A
+                            // repaired tree publishes the ready bit from the CA
+                            // transaction completion block above instead.
+                            if (!repairedVideoLayer) geometry |= CV3CanvasReadyFlag;
                             break;
                         }
                         if (geometry) break;

@@ -2948,6 +2948,13 @@ void CV3ToggleExposeMode(void) {
     }
     
     if (self) {
+        self.bundleID = bundleID;
+        self.coldLaunchStartTime = CACurrentMediaTime();
+        self.coldLaunchTraceID = [NSString stringWithFormat:@"%@-%.0f",
+                                  bundleID ?: @"unknown",
+                                  [[NSDate date] timeIntervalSince1970] * 1000.0];
+        [self recordColdLaunchMilestone:@"WINDOW_INIT_BEGIN" details:nil];
+
         UIInterfaceOrientation currentOrientation = CV3TrustedInterfaceOrientation(windowScene);
         UIInterfaceOrientation initialOrientation = CV3InitialHostedOrientationForBundleID(bundleID, currentOrientation);
         CGSize physicalSize = [self defaultPhysicalFloatingSizeForOrientation:currentOrientation
@@ -2961,7 +2968,6 @@ void CV3ToggleExposeMode(void) {
         self.lastLayoutOrientation = initialOrientation;
         self.targetOrientation = initialOrientation;
         
-        self.bundleID = bundleID;
         self.hostedSession = [[CV3HostedSceneSession alloc] initWithWindow:self];
         self.requiresLandscapeContent = CV3BundleDeclaresLandscapeOnly(bundleID);
         self.prefersLandscapePresentation = UIInterfaceOrientationIsLandscape(initialOrientation) &&
@@ -3349,31 +3355,32 @@ void CV3ToggleExposeMode(void) {
         CGSize expected = [self currentHostedSceneBounds].size;
         CGFloat width = (geometry >> 16) & 0xFFFF;
         CGFloat height = geometry & 0xFFFF;
-        NSTimeInterval now = CACurrentMediaTime();
         BOOL canvasLandscape = fabs(width - expected.width) <= 1.0 &&
             fabs(height - expected.height) <= 1.0;
-        if (!canvasLandscape) {
+        BOOL canvasLayerCommitReady = (geometry & CV3CanvasReadyFlag) != 0;
+        if (!canvasLandscape || !canvasLayerCommitReady) {
+            NSTimeInterval now = CACurrentMediaTime();
             if (now - self.lastCanvasMismatchLoggedAt > 1.0) {
                 self.lastCanvasMismatchLoggedAt = now;
-                CV3LogToFile(@"[CanvasGate] %@ client=%.0fx%.0f expected=%.0fx%.0f proxy=%@ host=%@ children=%@ settings=%@ initial=1 waiting…",
+                CV3LogToFile(@"[CanvasGate] %@ client=%.0fx%.0f expected=%.0fx%.0f layerCommitReady=%d proxy=%@ host=%@ children=%@ settings=%@ initial=1 waiting…",
                              self.bundleID, width, height, expected.width, expected.height,
+                             canvasLayerCommitReady,
                              NSStringFromCGRect(self.hostContainerProxy.bounds),
                              NSStringFromCGRect(self.hostView.frame), self.hostView.subviews,
                              CV3InvokeObject(self.targetScene, @selector(settings)));
             }
-            self.hostedCanvasLandscapeSince = 0;
             return NO;
         }
-        if (self.hostedCanvasLandscapeSince <= 0) {
-            self.hostedCanvasLandscapeSince = now;
-            CV3LogToFile(@"[CanvasGate] %@ client=%.0fx%.0f landscape confirmed",
-                         self.bundleID, width, height);
-            return NO;
+        if (!self.coldLaunchCanvasMatchedRecorded) {
+            self.coldLaunchCanvasMatchedRecorded = YES;
+            [self recordColdLaunchMilestone:@"CANVAS_GEOMETRY_AND_LAYER_COMMIT_READY"
+                                    details:[NSString stringWithFormat:@"client=%.0fx%.0f expected=%.0fx%.0f",
+                                             width, height, expected.width, expected.height]];
         }
-        // One polling interval is enough for FrontBoard to commit the matching
-        // surface. Keep the window transparent during that interval instead of
-        // covering it with a blur or revealing a portrait strip on the left.
-        if (now - self.hostedCanvasLandscapeSince < 0.15) return NO;
+        // The client reports this flag only after its Core Animation repair
+        // transaction has committed, so no fixed post-geometry delay is needed.
+        CV3LogToFile(@"[CanvasGate] %@ client=%.0fx%.0f geometry and layer commit ready",
+                     self.bundleID, width, height);
     }
     return self.hostView.layer.sublayers.count > 0 || self.hostView.subviews.count > 0;
 }
@@ -3426,6 +3433,10 @@ void CV3ToggleExposeMode(void) {
     [self setNeedsLayout];
     [self layoutIfNeeded];
     if ([self hostViewHasRenderableContent]) {
+        [self recordColdLaunchMilestone:@"RENDERABLE_CONFIRMED"
+                                details:[NSString stringWithFormat:@"host=%@ canvas=%@",
+                                         NSStringFromCGRect(self.hostView.frame),
+                                         NSStringFromCGRect(self.hostContainerProxy.bounds)]];
         self.hostContentFailureCount = 0;
         self.hostContentRecoveryInFlight = NO;
         [self setHostLifecycleState:CV3HostLifecycleStateLive reason:@"Renderable"];
@@ -3436,11 +3447,18 @@ void CV3ToggleExposeMode(void) {
             [UIView performWithoutAnimation:^{
                 [CATransaction begin];
                 [CATransaction setDisableActions:YES];
+                [CATransaction setCompletionBlock:^{
+                    if (!self.coldLaunchCompletedRecorded) {
+                        self.coldLaunchCompletedRecorded = YES;
+                        [self recordColdLaunchMilestone:@"FIRST_FRAME_COMMITTED" details:nil];
+                    }
+                }];
                 self.rootTransformContainer.hidden = NO;
                 [self setNeedsLayout];
                 [self layoutIfNeeded];
                 [CATransaction commit];
             }];
+            [self recordColdLaunchMilestone:@"FIRST_FRAME_REVEAL_REQUESTED" details:nil];
         }
         CV3LogToFile(@"[SceneHost] 渲染层已就绪: %@", self.bundleID);
         CV3LogToFile(@"[HostGeometry] bundle=%@ shell=%@ canvas=%@ host=%@ children=%@ displayOrientation=%ld contentOrientation=%ld mapped=%d",
@@ -3476,8 +3494,17 @@ void CV3ToggleExposeMode(void) {
         return;
     }
 
-    [self refreshHostViewPresentation];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    CFTimeInterval now = CACurrentMediaTime();
+    if (!self.awaitingInitialRenderableContent ||
+        now - self.lastInitialHostPresentationRefreshTime >= 0.15) {
+        self.lastInitialHostPresentationRefreshTime = now;
+        [self refreshHostViewPresentation];
+    }
+    // While waiting for the first frame, check the client's transaction-ready
+    // flag once per display frame. Presentation-context refresh remains
+    // throttled above so this faster readiness polling does not churn hosting.
+    NSTimeInterval nextCheckDelay = self.awaitingInitialRenderableContent ? (1.0 / 60.0) : 0.15;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(nextCheckDelay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (self.isClosing || self.hostLifecycleState == CV3HostLifecycleStateReleasing ||
             generation != self.sceneHostGeneration) return;
         [self finishHostingWhenRenderableWithRetries:retries - 1 generation:generation];
@@ -3491,6 +3518,41 @@ void CV3ToggleExposeMode(void) {
     [self.splashView removeFromSuperview];
     self.splashView = nil;
     self.largeSplashIcon = nil;
+}
+
+- (void)recordColdLaunchMilestone:(NSString *)milestone details:(NSString *)details {
+    if (milestone.length == 0 || self.coldLaunchStartTime <= 0) return;
+
+    CFTimeInterval elapsedMs = (CACurrentMediaTime() - self.coldLaunchStartTime) * 1000.0;
+    NSString *safeDetails = [[details ?: @"" stringByReplacingOccurrencesOfString:@"\n" withString:@" "]
+                             stringByReplacingOccurrencesOfString:@"\t" withString:@" "];
+    NSString *line = [NSString stringWithFormat:@"epoch=%.3f\tsession=%@\tbundle=%@\telapsed_ms=%.1f\tmilestone=%@\tdetails=%@\n",
+                      [[NSDate date] timeIntervalSince1970],
+                      self.coldLaunchTraceID ?: @"unknown",
+                      self.bundleID ?: @"unknown",
+                      elapsedMs,
+                      milestone,
+                      safeDetails];
+    NSLog(@"[ChevronV3][ColdLaunch] %@", [line stringByTrimmingCharactersInSet:[NSCharacterSet newlineCharacterSet]]);
+
+    dispatch_async(CV3LogQueue(), ^{
+        @autoreleasepool {
+            NSString *directory = @"/var/mobile/Library/Caches/ChevronV3";
+            NSString *path = [directory stringByAppendingPathComponent:@"ColdLaunchTiming.log"];
+            NSFileManager *fm = [NSFileManager defaultManager];
+            [fm createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
+            unsigned long long size = [[fm attributesOfItemAtPath:path error:nil] fileSize];
+            if (size > 2 * 1024 * 1024) {
+                [fm createFileAtPath:path contents:nil attributes:nil];
+            } else if (![fm fileExistsAtPath:path]) {
+                [fm createFileAtPath:path contents:nil attributes:nil];
+            }
+            NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+            [handle seekToEndOfFile];
+            [handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+            [handle closeFile];
+        }
+    });
 }
 
 - (void)dismissLaunchSplashAnimated {
@@ -4333,6 +4395,10 @@ void CV3ToggleExposeMode(void) {
             
             if (targetScene) {
                 self.targetScene = targetScene;
+                if (!self.coldLaunchSceneFoundRecorded) {
+                    self.coldLaunchSceneFoundRecorded = YES;
+                    [self recordColdLaunchMilestone:@"SCENE_FOUND" details:nil];
+                }
                 [self setHostLifecycleState:CV3HostLifecycleStatePrepared reason:@"SceneFound"];
                 CV3LogToFile(@"[Debug] 找到场景: %@ (retries left: %d)", self.bundleID, retries);
 
@@ -4386,6 +4452,11 @@ void CV3ToggleExposeMode(void) {
                                 [self.hostContainerProxy addSubview:hostedView];
                             }
                         }
+                        if (!self.coldLaunchHostAttachedRecorded) {
+                            self.coldLaunchHostAttachedRecorded = YES;
+                            [self recordColdLaunchMilestone:@"HOST_VIEW_ATTACHED"
+                                                    details:NSStringFromClass([hostedView class])];
+                        }
                         
                         CV3LogToFile(isReused ? @"[Debug] 成功重用已有的 _UISceneLayerHostContainerView" : @"[Debug] 成功通过 _UISceneLayerHostContainerView 创建渲染视图");
                         
@@ -4422,7 +4493,9 @@ void CV3ToggleExposeMode(void) {
         if (self.isClosing || generation != self.sceneHostGeneration) return;
         @try {
             [self ensureLaunchSplashVisible];
+            [self recordColdLaunchMilestone:@"LAUNCH_APPLICATION_BEGIN" details:nil];
             [[UIApplication sharedApplication] launchApplicationWithIdentifier:self.bundleID suspended:YES];
+            [self recordColdLaunchMilestone:@"LAUNCH_APPLICATION_RETURNED" details:nil];
             
             [self updateSovereigntyAssertion];
 
