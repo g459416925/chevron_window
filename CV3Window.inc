@@ -1600,7 +1600,8 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     CGRect screen = self.windowScene ? self.windowScene.coordinateSpace.bounds : self.bounds;
     if (CGRectIsEmpty(screen)) screen = [UIScreen mainScreen].bounds;
 
-    UIInterfaceOrientation orientation = CV3TrustedInterfaceOrientation(self.windowScene);
+    UIInterfaceOrientation orientation = CV3InitialHostedOrientationForBundleID(self.draggedAppInfo.bundleId,
+        CV3TrustedInterfaceOrientation(self.windowScene));
     BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
     CGFloat portraitW = MIN(screen.size.width, screen.size.height);
     CGFloat portraitH = MAX(screen.size.width, screen.size.height);
