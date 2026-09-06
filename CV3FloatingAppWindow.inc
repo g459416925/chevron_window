@@ -1088,6 +1088,15 @@ void CV3ToggleExposeMode(void) {
         return;
     }
 
+    NSString *direction = presenting ? @"restore" : @"minimize";
+    NSString *traceID = self.stashAnimationTraceID ?: @"unknown";
+    CFTimeInterval surfaceStartTime = CACurrentMediaTime();
+    CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=%@ phase=surface.begin source=%@ icon=%@ duration_ms=340",
+                 traceID,
+                 direction,
+                 NSStringFromCGRect(sourceFrame),
+                 NSStringFromCGRect(iconFrame));
+
     BOOL towardLeft = CGRectGetMidX(iconFrame) < CGRectGetMidX(sourceFrame);
     CGRect stageFrame = [self interpolatedRectFrom:sourceFrame to:iconFrame progress:0.64];
     CGFloat stageInset = MAX(0.0, MIN(stageFrame.size.width * 0.16, fabs(sourceFrame.size.width - iconFrame.size.width) * 0.18));
@@ -1164,6 +1173,11 @@ void CV3ToggleExposeMode(void) {
         }
     } completion:^(BOOL finished) {
         [shadowSurface removeFromSuperview];
+        CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=%@ phase=surface.completion finished=%d elapsed_ms=%.1f",
+                     traceID,
+                     direction,
+                     finished,
+                     (CACurrentMediaTime() - surfaceStartTime) * 1000.0);
         if (completion) completion();
     }];
 }
@@ -3766,38 +3780,8 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 }
 
 - (void)recordColdLaunchMilestone:(NSString *)milestone details:(NSString *)details {
-    if (milestone.length == 0 || self.coldLaunchStartTime <= 0) return;
-
-    CFTimeInterval elapsedMs = (CACurrentMediaTime() - self.coldLaunchStartTime) * 1000.0;
-    NSString *safeDetails = [[details ?: @"" stringByReplacingOccurrencesOfString:@"\n" withString:@" "]
-                             stringByReplacingOccurrencesOfString:@"\t" withString:@" "];
-    NSString *line = [NSString stringWithFormat:@"epoch=%.3f\tsession=%@\tbundle=%@\telapsed_ms=%.1f\tmilestone=%@\tdetails=%@\n",
-                      [[NSDate date] timeIntervalSince1970],
-                      self.coldLaunchTraceID ?: @"unknown",
-                      self.bundleID ?: @"unknown",
-                      elapsedMs,
-                      milestone,
-                      safeDetails];
-    NSLog(@"[ChevronV3][ColdLaunch] %@", [line stringByTrimmingCharactersInSet:[NSCharacterSet newlineCharacterSet]]);
-
-    dispatch_async(CV3LogQueue(), ^{
-        @autoreleasepool {
-            NSString *directory = @"/var/mobile/Library/Caches/ChevronV3";
-            NSString *path = [directory stringByAppendingPathComponent:@"ColdLaunchTiming.log"];
-            NSFileManager *fm = [NSFileManager defaultManager];
-            [fm createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
-            unsigned long long size = [[fm attributesOfItemAtPath:path error:nil] fileSize];
-            if (size > 2 * 1024 * 1024) {
-                [fm createFileAtPath:path contents:nil attributes:nil];
-            } else if (![fm fileExistsAtPath:path]) {
-                [fm createFileAtPath:path contents:nil attributes:nil];
-            }
-            NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
-            [handle seekToEndOfFile];
-            [handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-            [handle closeFile];
-        }
-    });
+    (void)milestone;
+    (void)details;
 }
 
 - (void)dismissLaunchSplashAnimated {
@@ -4124,6 +4108,17 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     self.stashedRestoreSnapshotOrientation = self.targetOrientation;
     UIImage *genieImage = self.stashedRestoreSnapshotImage;
 
+    self.stashAnimationTraceID = NSUUID.UUID.UUIDString;
+    self.stashAnimationTraceStartTime = CACurrentMediaTime();
+    CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=minimize phase=begin bundle=%@ source=%@ target=%@ device_orientation=%ld content_orientation=%ld snapshot=%d",
+                 self.stashAnimationTraceID,
+                 self.bundleID ?: @"unknown",
+                 NSStringFromCGRect(initialFrame),
+                 NSStringFromCGRect(targetFrame),
+                 (long)CV3TrustedInterfaceOrientation(self.windowScene),
+                 (long)self.targetOrientation,
+                 genieImage != nil);
+
     self.preStashFrame = self.frame;
     self.isStashed = YES;
     [self.hostedSession setActive:NO];
@@ -4142,6 +4137,12 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         for (CV3FloatingAppWindow *win in [floatingWindows copy]) {
             if ([win isKindOfClass:[CV3FloatingAppWindow class]] && win.isStashed) [win updateGrabberStack];
         }
+        CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=minimize phase=completion mode=fallback final=%@ elapsed_ms=%.1f",
+                     self.stashAnimationTraceID,
+                     NSStringFromCGRect(self.frame),
+                     (CACurrentMediaTime() - self.stashAnimationTraceStartTime) * 1000.0);
+        self.stashAnimationTraceID = nil;
+        self.stashAnimationTraceStartTime = 0;
         return;
     }
 
@@ -4177,6 +4178,13 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         for (CV3FloatingAppWindow *win in [floatingWindows copy]) {
             if ([win isKindOfClass:[CV3FloatingAppWindow class]] && win.isStashed) [win updateGrabberStack];
         }
+        CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=minimize phase=completion mode=genie final=%@ icon_alpha=%.2f elapsed_ms=%.1f",
+                     self.stashAnimationTraceID,
+                     NSStringFromCGRect(self.frame),
+                     self.stashGrabber.alpha,
+                     (CACurrentMediaTime() - self.stashAnimationTraceStartTime) * 1000.0);
+        self.stashAnimationTraceID = nil;
+        self.stashAnimationTraceStartTime = 0;
     }];
 
     // Keep this animation inside the genie's 0.34 s lifetime and animate only
@@ -4235,11 +4243,37 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     if (CV3IsValidInterfaceOrientation(current)) {
         CV3LastPhysicalDeviceInterfaceOrientation = current;
     }
-    if (!self.isStashed || self.isClosing) return;
-    [UIView performWithoutAnimation:^{
-        [self updateStashIconAppearance];
-        [self applyStashedGrabberOrientation];
-    }];
+    if (self.isClosing || !CV3IsValidInterfaceOrientation(current)) return;
+
+    if (self.isStashed) {
+        [UIView performWithoutAnimation:^{
+            [self updateStashIconAppearance];
+            [self applyStashedGrabberOrientation];
+        }];
+        return;
+    }
+
+    // A landscape-only game's target/content orientation is already landscape
+    // while the device is portrait. Comparing orientation values alone therefore
+    // reports "no change" when the display later rotates to landscape, even
+    // though the SpringBoard Scene/display axes have changed and the shell must
+    // be transposed. Force a geometry re-evaluation for this one presentation
+    // mode; ordinary floating apps continue through the shared Scene path.
+    if (self.prefersLandscapePresentation && self.requiresLandscapeContent) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self.isClosing || self.isStashed) return;
+            [self applyInterfaceOrientation:current force:YES];
+        });
+
+        // UIKit can publish the physical orientation before the display Scene's
+        // coordinate space settles. Re-evaluate once after that transaction so
+        // hosted content and chrome use the same final axes.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (self.isClosing || self.isStashed) return;
+            [self applyInterfaceOrientation:current force:YES];
+        });
+    }
 }
 
 - (void)normalizeStashedGrabberLayout {
@@ -5082,6 +5116,17 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         UIView *iconProxy = [self.stashGrabber snapshotViewAfterScreenUpdates:NO];
         CGPoint preferredCenter = CGRectIsEmpty(self.preStashFrame) ? self.center : CGPointMake(CGRectGetMidX(self.preStashFrame), CGRectGetMidY(self.preStashFrame));
         CGRect targetFrame = [self restorableFramePreservingStashedSizeForOrientation:self.targetOrientation preferredCenter:preferredCenter];
+        self.stashAnimationTraceID = NSUUID.UUID.UUIDString;
+        self.stashAnimationTraceStartTime = CACurrentMediaTime();
+        CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=restore phase=begin bundle=%@ source=%@ target=%@ device_orientation=%ld content_orientation=%ld cached_snapshot=%d icon_proxy=%d",
+                     self.stashAnimationTraceID,
+                     self.bundleID ?: @"unknown",
+                     NSStringFromCGRect(iconFrame),
+                     NSStringFromCGRect(targetFrame),
+                     (long)CV3TrustedInterfaceOrientation(self.windowScene),
+                     (long)self.targetOrientation,
+                     self.stashedRestoreSnapshotImage != nil,
+                     iconProxy != nil);
         self.stashGrabber.alpha = 0.0;
 
         self.isStashed = NO; // 先解除 Stash 标志，以便下面 updateSettings 时能被识别为前台
@@ -5141,6 +5186,12 @@ static void CV3CollectReceptionLayers(CALayer *layer,
             for (CV3FloatingAppWindow *win in floatingWindows) {
                 if (win.isStashed) [win updateGrabberStack];
             }
+            CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=restore phase=completion mode=fallback final=%@ elapsed_ms=%.1f",
+                         self.stashAnimationTraceID,
+                         NSStringFromCGRect(self.frame),
+                         (CACurrentMediaTime() - self.stashAnimationTraceStartTime) * 1000.0);
+            self.stashAnimationTraceID = nil;
+            self.stashAnimationTraceStartTime = 0;
             return;
         }
 
@@ -5172,6 +5223,14 @@ static void CV3CollectReceptionLayers(CALayer *layer,
             for (CV3FloatingAppWindow *win in floatingWindows) {
                 if (win.isStashed) [win updateGrabberStack];
             }
+            CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=restore phase=completion mode=genie final=%@ content_alpha=%.2f host_attached=%d elapsed_ms=%.1f",
+                         self.stashAnimationTraceID,
+                         NSStringFromCGRect(self.frame),
+                         self.appContentWrapper.alpha,
+                         self.hostView.superview != nil,
+                         (CACurrentMediaTime() - self.stashAnimationTraceStartTime) * 1000.0);
+            self.stashAnimationTraceID = nil;
+            self.stashAnimationTraceStartTime = 0;
         }];
 
         [UIView animateKeyframesWithDuration:0.18 delay:0 options:UIViewKeyframeAnimationOptionCalculationModeCubic | UIViewAnimationOptionBeginFromCurrentState animations:^{

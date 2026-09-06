@@ -707,7 +707,13 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
 
 static NSFileHandle *CV3LogFileHandle = nil;
 static unsigned long long CV3LogFileBytes = 0;
-static void CV3LogToFile(NSString *format, ...);
+static void CV3LogStashAnimation(NSString *format, ...);
+
+// Preserve existing call-site structure without emitting system or file logs.
+// The stash animation uses its own dedicated writer below.
+static void CV3LogToFile(NSString *format, ...) {
+    (void)format;
+}
 
 // Scene updates can arrive in bursts while SpringBoard reconciles a hosted
 // window. Rewriting the same effective settings in every callback makes the
@@ -783,19 +789,22 @@ static BOOL CV3ShouldForceSceneContentState(FBScene *scene, NSString *bundleID) 
     return YES;
 }
 
-static void CV3LogToFile(NSString *format, ...) {
+static void CV3LogStashAnimation(NSString *format, ...) {
     va_list args;
     va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
 
-    // 立即输出到系统日志，作为第一层保障
+    // All historical diagnostics are silent. Only the minimize/restore
+    // transition is allowed through this global logging surface.
+    if (![message hasPrefix:@"[StashAnimation]"]) return;
+
     NSLog(@"[ChevronV3] %@", message);
 
     dispatch_async(CV3LogQueue(), ^{
         @try {
             NSFileManager *fm = [NSFileManager defaultManager];
-            NSString *logPath = @"/var/mobile/Documents/ChevronV3_Logs.txt";
+            NSString *logPath = @"/var/mobile/Library/Caches/ChevronV3/StashAnimation.log";
             NSString *parentDir = [logPath stringByDeletingLastPathComponent];
             if (![fm fileExistsAtPath:parentDir]) {
                 [fm createDirectoryAtPath:parentDir withIntermediateDirectories:YES attributes:nil error:nil];
@@ -1598,6 +1607,8 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, assign) NSInteger collisionReleaseAxis;
 @property (nonatomic, strong) UIImage *stashedRestoreSnapshotImage;
 @property (nonatomic, assign) UIInterfaceOrientation stashedRestoreSnapshotOrientation;
+@property (nonatomic, copy) NSString *stashAnimationTraceID;
+@property (nonatomic, assign) CFTimeInterval stashAnimationTraceStartTime;
 @property (nonatomic, copy) NSString *lastOrientationTraceSignature;
 
 + (CMMotionManager *)sharedMotionManager;
@@ -5086,8 +5097,6 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
 
 %ctor {
     @autoreleasepool {
-        NSLog(@"[ChevronV3] SpringBoard host bridge loaded (protocol=%llx)",
-              CV3RequiredClientBridgeProtocolVersion);
         CV3PublishHostGeneration();
         CV3RegisterVideoOrientationBridge();
         CV3RegisterPlaybackTraceBridge();
