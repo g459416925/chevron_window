@@ -2990,6 +2990,11 @@ void CV3ToggleExposeMode(void) {
         // 该容器用于隔离系统 UIWindow 的 Transform 问题，承载全方位的视觉旋转
         self.rootTransformContainer = [[UIView alloc] initWithFrame:self.bounds];
         self.rootTransformContainer.backgroundColor = [UIColor clearColor];
+        // Do not expose an empty floating shell while FrontBoard is still
+        // attaching the remote canvas. The container is revealed atomically
+        // by finishHostingWhenRenderableWithRetries: once the real first frame
+        // and its final geometry are both available.
+        self.rootTransformContainer.hidden = YES;
         [self addSubview:self.rootTransformContainer];
 
         // 核心修复：引入内容包装层 (App Content Wrapper)
@@ -3428,9 +3433,14 @@ void CV3ToggleExposeMode(void) {
         [self dismissLaunchSplashAnimated];
         if (self.awaitingInitialRenderableContent) {
             self.awaitingInitialRenderableContent = NO;
-            self.rootTransformContainer.hidden = NO;
-            [self setNeedsLayout];
-            [self layoutIfNeeded];
+            [UIView performWithoutAnimation:^{
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                self.rootTransformContainer.hidden = NO;
+                [self setNeedsLayout];
+                [self layoutIfNeeded];
+                [CATransaction commit];
+            }];
         }
         CV3LogToFile(@"[SceneHost] 渲染层已就绪: %@", self.bundleID);
         CV3LogToFile(@"[HostGeometry] bundle=%@ shell=%@ canvas=%@ host=%@ children=%@ displayOrientation=%ld contentOrientation=%ld mapped=%d",
@@ -4390,7 +4400,11 @@ void CV3ToggleExposeMode(void) {
                 [self setHostLifecycleState:CV3HostLifecycleStateWaitingForScene reason:@"SceneUnavailable"];
                 CV3LogToFile(@"[Debug] 未找到场景: %@", self.bundleID);
                 if (retries > 0) {
-                    [self attemptToHostSceneWithRetries:retries - 1 delay:delay * 1.2 generation:generation];
+                    // The first lookup is immediate. Back off gently after a
+                    // miss so cold-launched apps are discovered quickly without
+                    // exhausting all retries in the same run-loop turn.
+                    double nextDelay = MIN(MAX(delay * 1.25, 0.025), 0.15);
+                    [self attemptToHostSceneWithRetries:retries - 1 delay:nextDelay generation:generation];
                 } else {
                     CV3LogToFile(@"[Error] targetScene not found after launch for %@", self.bundleID);
                 }
@@ -4412,8 +4426,9 @@ void CV3ToggleExposeMode(void) {
             
             [self updateSovereigntyAssertion];
 
-            // Start polling with initial delay of 0.3s, up to 10 retries (more resilient for cold starts)
-            [self attemptToHostSceneWithRetries:10 delay:0.3 generation:generation];
+            // Probe immediately, then use short bounded backoff for cold starts.
+            // This removes the unconditional 300 ms before Scene acquisition.
+            [self attemptToHostSceneWithRetries:40 delay:0.0 generation:generation];
             
             // Keep the loading surface visible until the hosted Scene supplies a render layer.
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
