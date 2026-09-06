@@ -3012,6 +3012,83 @@ static NSString *CV3DirectionTraceView(UIView *view) {
         presentation ? CV3DirectionTraceTransform3D(presentation.transform) : @"nil"];
 }
 
+static NSString *CV3ReceptionKVCValue(id object, NSString *key) {
+    if (!object || key.length == 0) return @"nil";
+    @try {
+        id value = [object valueForKey:key];
+        return value ? [value description] : @"nil";
+    } @catch (__unused NSException *exception) {
+        return @"n/a";
+    }
+}
+
+static void CV3CollectReceptionLayers(CALayer *layer,
+                                      NSString *path,
+                                      NSUInteger depth,
+                                      NSMutableArray<NSString *> *entries) {
+    if (!layer || depth > 10 || entries.count >= 48) return;
+    CALayer *presentation = layer.presentationLayer;
+    id contents = nil;
+    @try { contents = layer.contents; } @catch (__unused NSException *exception) {}
+    NSString *contextID = CV3ReceptionKVCValue(layer, @"contextId");
+    BOOL interesting = depth == 0 || contents != nil ||
+        (![contextID isEqualToString:@"nil"] && ![contextID isEqualToString:@"n/a"] && ![contextID isEqualToString:@"0"]);
+    if (interesting) {
+        [entries addObject:[NSString stringWithFormat:
+            @"%@:%@ frame=%@ hidden=%d opacity=%.2f context=%@ contents=%@:%p pres=%@",
+            path, NSStringFromClass(layer.class), NSStringFromCGRect(layer.frame), layer.hidden,
+            layer.opacity, contextID, contents ? NSStringFromClass([contents class]) : @"nil", contents,
+            presentation ? NSStringFromCGRect(presentation.frame) : @"nil"]];
+    }
+    NSUInteger index = 0;
+    for (CALayer *child in layer.sublayers ?: @[]) {
+        CV3CollectReceptionLayers(child, [path stringByAppendingFormat:@".%lu", (unsigned long)index++],
+                                  depth + 1, entries);
+    }
+}
+
+- (void)recordReceptionTrace:(NSString *)phase force:(BOOL)force {
+    if (self.isClosing) return;
+    NSMutableArray<NSString *> *layers = [NSMutableArray array];
+    CV3CollectReceptionLayers(self.hostView.layer, @"host", 0, layers);
+    id settings = CV3InvokeObject(self.targetScene, @selector(settings));
+    NSInteger contentState = CV3InvokeInteger(self.targetScene, NSSelectorFromString(@"contentState"), NSIntegerMin);
+    if (contentState == NSIntegerMin) {
+        contentState = CV3InvokeInteger(self.targetScene, NSSelectorFromString(@"_contentState"), NSIntegerMin);
+    }
+    BOOL sceneValid = self.targetScene ? CV3InvokeBool(self.targetScene, @selector(isValid), YES) : NO;
+    BOOL hostAttached = self.hostView && self.hostView.superview == self.hostContainerProxy;
+    BOOL hostHasTree = self.hostView && (self.hostView.subviews.count > 0 || self.hostView.layer.sublayers.count > 0);
+    NSString *signature = [NSString stringWithFormat:
+        @"bundle=%@ appState=%ld workspace=%d switcher=%d/%d lifecycle=%@ generation=%lu "
+         "stashed=%d focused=%d windowHidden=%d windowAlpha=%.2f sceneValid=%d contentState=%ld "
+         "foreground=%@ backgrounded=%@ deactivation=%@ hostAttached=%d hostWindow=%d hostHidden=%d "
+         "hostAlpha=%.2f hostTree=%d hostFrame=%@ proxyBounds=%@ presentationContext=%d rbs=%d layers=%@",
+        self.bundleID ?: @"nil", (long)UIApplication.sharedApplication.applicationState,
+        CV3WorkspaceTransitionActive, CV3SwitcherWindowVisible, CV3MainSwitcherVisible,
+        CV3HostLifecycleStateName(self.hostLifecycleState), (unsigned long)self.sceneHostGeneration,
+        self.isStashed, self.isFocused, self.hidden, self.alpha, sceneValid, (long)contentState,
+        CV3ReceptionKVCValue(settings, @"foreground"), CV3ReceptionKVCValue(settings, @"backgrounded"),
+        CV3ReceptionKVCValue(settings, @"deactivationReasons"), hostAttached, self.hostView.window != nil,
+        self.hostView.hidden, self.hostView.alpha, hostHasTree, NSStringFromCGRect(self.hostView.frame),
+        NSStringFromCGRect(self.hostContainerProxy.bounds),
+        CV3InvokeObject(self.hostView, @selector(presentationContext)) != nil, self.rbsAssertion != nil,
+        [layers componentsJoinedByString:@" | "]];
+    NSTimeInterval now = CACurrentMediaTime();
+    BOOL changed = ![signature isEqualToString:self.lastReceptionTraceSignature];
+    BOOL heartbeatDue = now - self.lastReceptionTraceHeartbeatTime >= 2.0;
+    if (!force && !changed && !heartbeatDue) return;
+    self.lastReceptionTraceSignature = signature;
+    self.lastReceptionTraceHeartbeatTime = now;
+    CV3LogToFile(@"[ReceptionTrace][Host] event=%@ phase=%@ %@",
+                 changed ? @"change" : @"heartbeat", phase ?: @"unknown", signature);
+}
+
+- (void)receptionTraceTimerFired:(NSTimer *)timer {
+    (void)timer;
+    [self recordReceptionTrace:@"timer" force:NO];
+}
+
 + (CGRect)initialFrameForBundleID:(NSString *)bundleID
                            center:(CGPoint)center
                       windowScene:(UIWindowScene *)windowScene {
@@ -3301,6 +3378,13 @@ static NSString *CV3DirectionTraceView(UIView *view) {
         // [SHM Lazy Unmapping] 持有共享内存引用计数
         CV3RetainSharedGeometry(self.bundleID);
         [self.hostedSession setActive:YES];
+        self.receptionTraceTimer = [NSTimer timerWithTimeInterval:0.25
+                                                           target:self
+                                                         selector:@selector(receptionTraceTimerFired:)
+                                                         userInfo:nil
+                                                          repeats:YES];
+        [[NSRunLoop mainRunLoop] addTimer:self.receptionTraceTimer forMode:NSRunLoopCommonModes];
+        [self recordReceptionTrace:@"window.init" force:YES];
         [self recordOrientationTrace:@"init.complete" force:YES];
     }
     return self;
@@ -3321,6 +3405,7 @@ static NSString *CV3DirectionTraceView(UIView *view) {
     }
     CV3LogToFile(@"[Visibility] 窗口 Hidden 状态变更 -> %d: %@", hidden, self.bundleID);
     [super setHidden:hidden];
+    [self recordReceptionTrace:hidden ? @"window.hidden" : @"window.visible" force:YES];
 }
 
 - (void)attachToCurrentActiveScene {
@@ -3599,11 +3684,13 @@ static NSString *CV3DirectionTraceView(UIView *view) {
         [self dismissLaunchSplashAnimated];
         if (self.awaitingInitialRenderableContent) {
             self.awaitingInitialRenderableContent = NO;
+            [self recordReceptionTrace:@"firstFrame.beforeReveal" force:YES];
             [self recordOrientationTrace:@"firstFrame.beforeReveal" force:YES];
             [UIView performWithoutAnimation:^{
                 [CATransaction begin];
                 [CATransaction setDisableActions:YES];
                 [CATransaction setCompletionBlock:^{
+                    [self recordReceptionTrace:@"firstFrame.transactionCommitted" force:YES];
                     [self recordOrientationTrace:@"firstFrame.transactionCommitted" force:YES];
                     if (!self.coldLaunchCompletedRecorded) {
                         self.coldLaunchCompletedRecorded = YES;
@@ -3776,7 +3863,13 @@ static NSString *CV3DirectionTraceView(UIView *view) {
 - (void)updateSovereigntyAssertion {
     if (!self.bundleID || self.isClosing || self.rbsAssertionUnsupported) return;
 
-    NSString *attributeName = self.isStashed ? @"UserInitiated" : @"UserInteractive";
+    // AssertionServices exposes this public private-header contract on iOS 16:
+    // BackgroundUI reason=7, flags PreventSuspend=1,
+    // PreventThrottleDownCPU=2, AllowIdleSleep=4 and
+    // WantsForegroundResourcePriority=8.
+    NSUInteger assertionFlags = self.isStashed ? (1 | 4) : (1 | 2 | 8);
+    NSUInteger assertionReason = 7;
+    NSString *attributeName = self.isStashed ? @"BKS.BackgroundUI.Stashed" : @"BKS.BackgroundUI.Foreground";
     if (self.rbsAssertion && [self.rbsAssertionAttributeName isEqualToString:attributeName]) return;
 
     if (![self.rbsAssertionLastAttemptedAttributeName isEqualToString:attributeName]) {
@@ -3790,68 +3883,47 @@ static NSString *CV3DirectionTraceView(UIView *view) {
     if (now < self.rbsAssertionRetryAfter) return;
 
     @try {
-        RBSProcessIdentity *identity = [CV3ClassNamed(@"RBSProcessIdentity") identityForEmbeddedApplicationIdentifier:self.bundleID];
-        RBSTarget *target = [CV3ClassNamed(@"RBSTarget") targetWithProcessIdentity:identity];
-        RBSDomainAttribute *attr = [CV3ClassNamed(@"RBSDomainAttribute") attributeWithDomain:@"com.apple.common" name:attributeName];
-        if (!identity || !target || !attr) {
+        Class assertionClass = CV3ClassNamed(@"BKSProcessAssertion");
+        if (!assertionClass) {
             @throw [NSException exceptionWithName:@"CV3RBSConfigurationException"
-                                           reason:[NSString stringWithFormat:@"Unavailable RBS target or attribute %@", attributeName]
+                                           reason:@"BKSProcessAssertion is unavailable"
                                          userInfo:nil];
         }
 
-        RBSAssertion *replacement = [[CV3ClassNamed(@"RBSAssertion") alloc]
-            initWithExplanation:[NSString stringWithFormat:@"ChevronV3 Sovereignty (%@) for %@", attributeName, self.bundleID]
-            target:target
-            attributes:@[attr]];
-        if (!replacement) {
-            @throw [NSException exceptionWithName:@"CV3RBSConfigurationException"
-                                           reason:@"Unable to construct RBS assertion"
-                                         userInfo:nil];
-        }
-
-        NSError *error = nil;
-        if ([replacement acquireWithError:&error]) {
-            RBSAssertion *previous = self.rbsAssertion;
-            self.rbsAssertion = replacement;
-            self.rbsAssertionAttributeName = attributeName;
-            self.rbsAssertionFailureCount = 0;
-            self.rbsAssertionRetryAfter = 0;
-            [previous invalidate];
-            CV3LogToFile(@"[Immortality] 已动态更新 %@ 优先级断言 -> %@", self.bundleID, attributeName);
-            CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=RBSAssertionAcquired bundle=%@ attribute=%@",
-                         self.bundleID, attributeName);
-        } else {
+        BKSProcessAssertion *replacement = [[assertionClass alloc]
+            initWithBundleIdentifier:self.bundleID
+            flags:assertionFlags
+            reason:assertionReason
+            name:[NSString stringWithFormat:@"ChevronV3 hosted scene (%@)", self.bundleID]
+            withHandler:nil];
+        if (!replacement || !replacement.valid) {
             [replacement invalidate];
-            // RBS domain attributes are OS-version dependent. A missing
-            // attribute is a capability mismatch, not a transient retryable
-            // failure; continuing to force Scene state makes hosting less
-            // stable on systems without these attributes.
-            NSString *failure = error.localizedDescription.lowercaseString ?: @"";
-            if ([failure containsString:@"attribute name"] ||
-                [failure containsString:@"domain plist"] ||
-                [failure containsString:@"unknown attribute"]) {
-                self.rbsAssertionUnsupported = YES;
-            }
-            self.rbsAssertionFailureCount++;
-            NSUInteger exponent = MIN(self.rbsAssertionFailureCount, (NSUInteger)5);
-            self.rbsAssertionRetryAfter = self.rbsAssertionFailureCount >= 5
-                ? DBL_MAX
-                : now + MIN(60.0, (NSTimeInterval)(1ULL << exponent));
-            CV3LogToFile(@"[Error] RBSAssertion (%@) 更新失败: %@", attributeName, error);
-            if (self.rbsAssertionFailureCount >= 5) {
-                CV3LogToFile(@"[Warning] RBSAssertion (%@) 连续失败，已停止定时重试: %@", attributeName, self.bundleID);
-            }
+            @throw [NSException exceptionWithName:@"CV3RBSConfigurationException"
+                                           reason:[NSString stringWithFormat:@"BKS BackgroundUI assertion is invalid flags=%lu",
+                                                   (unsigned long)assertionFlags]
+                                         userInfo:nil];
         }
+
+        id previous = self.rbsAssertion;
+        self.rbsAssertion = replacement;
+        self.rbsAssertionAttributeName = attributeName;
+        self.rbsAssertionFailureCount = 0;
+        self.rbsAssertionRetryAfter = 0;
+        [previous invalidate];
+        CV3LogToFile(@"[Immortality] 已更新 %@ 后台 UI 断言 -> %@ flags=%lu",
+                     self.bundleID, attributeName, (unsigned long)assertionFlags);
+        CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=BKSAssertionAcquired bundle=%@ attribute=%@ flags=%lu",
+                     self.bundleID, attributeName, (unsigned long)assertionFlags);
     } @catch (NSException *e) {
-        self.rbsAssertionUnsupported = YES;
         self.rbsAssertionFailureCount++;
         NSUInteger exponent = MIN(self.rbsAssertionFailureCount, (NSUInteger)5);
         self.rbsAssertionRetryAfter = self.rbsAssertionFailureCount >= 5
             ? DBL_MAX
             : now + MIN(60.0, (NSTimeInterval)(1ULL << exponent));
-        CV3LogToFile(@"[Error] updateSovereigntyAssertion 异常: %@", e);
+        CV3LogToFile(@"[Error] BKS BackgroundUI assertion 异常: %@", e);
         if (self.rbsAssertionFailureCount >= 5) {
-            CV3LogToFile(@"[Warning] RBSAssertion (%@) 连续异常，已停止定时重试: %@", attributeName, self.bundleID);
+            self.rbsAssertionUnsupported = YES;
+            CV3LogToFile(@"[Warning] BKS assertion (%@) 连续异常，已停止定时重试: %@", attributeName, self.bundleID);
         }
     }
 }
@@ -4672,6 +4744,7 @@ static NSString *CV3DirectionTraceView(UIView *view) {
                             }
                         }
                         [self recordOrientationTrace:@"hostView.attached" force:YES];
+                        [self recordReceptionTrace:@"hostView.attached" force:YES];
                         if (!self.coldLaunchHostAttachedRecorded) {
                             self.coldLaunchHostAttachedRecorded = YES;
                             [self recordColdLaunchMilestone:@"HOST_VIEW_ATTACHED"
@@ -5635,6 +5708,8 @@ static NSString *CV3DirectionTraceView(UIView *view) {
         [self.assertionWatchdogTimer invalidate];
         self.assertionWatchdogTimer = nil;
     }
+    [self.receptionTraceTimer invalidate];
+    self.receptionTraceTimer = nil;
     
     CV3LogToFile(@"[Lifecycle] 正在关闭窗口(默认仅分离宿主，不强杀应用): %@", self.bundleID);
     [[NSNotificationCenter defaultCenter] removeObserver:self];
@@ -5730,6 +5805,8 @@ static NSString *CV3DirectionTraceView(UIView *view) {
     CV3LogToFile(@"[Lifecycle] CV3FloatingAppWindow Dealloc: %@", self.bundleID);
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [[UIDevice currentDevice] endGeneratingDeviceOrientationNotifications];
+    [self.receptionTraceTimer invalidate];
+    self.receptionTraceTimer = nil;
     
     [self stopLiquidMotion];
     
