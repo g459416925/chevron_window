@@ -106,7 +106,6 @@ static CV3SharedGeometry *CV3SharedGeometryForBundleID(NSString *bundleID) {
             @"path": path
         } mutableCopy];
 
-        NSLog(@"[ChevronV3] [SHM] %@ geometry initialized at %p", bundleID, geometry);
         pthread_mutex_unlock(lock);
         return geometry;
     } @catch (NSException *e) {
@@ -152,7 +151,6 @@ static inline void CV3ReleaseSharedGeometry(NSString *bundleID) {
                 close(fd);
             }
             [registry removeObjectForKey:bundleID];
-            NSLog(@"[ChevronV3] [SHM] Released geometry for %@", bundleID);
         } else {
             entry[@"refCount"] = @(ref);
         }
@@ -196,4 +194,3 @@ static dispatch_queue_t CV3AppLoadQueue(void) {
 static inline CGFloat CV3ConcentricCornerRadius(CGFloat outerRadius, CGFloat padding) {
     return MAX(4.0, outerRadius - padding);
 }
-

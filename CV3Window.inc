@@ -1283,27 +1283,17 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
             return NO;
         }
 
-        // 使用与 handleEdgeInteraction 一致的安全绝对坐标系
-        CGPoint location = [gesture locationInView:nil];
-        
-        UIWindow *keyWindow = nil;
-        if (@available(iOS 15.0, *)) {
-            keyWindow = self.windowScene.keyWindow;
-        } else {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            keyWindow = [UIApplication sharedApplication].keyWindow;
-#pragma clang diagnostic pop
-        }
-        
-        // 动态获取准确的安全区域和边界
-        UIEdgeInsets safeArea = keyWindow ? keyWindow.safeAreaInsets : self.safeAreaInsets;
+        // Keep hit filtering in the launcher's Scene coordinate space. Global
+        // screen coordinates can retain portrait dimensions while the active
+        // application is already landscape, rejecting a valid right-edge pan.
+        CGPoint location = [gesture locationInView:self];
+        UIEdgeInsets safeArea = self.safeAreaInsets;
         // 如果系统返回的 safeArea 全是 0，提供硬编码的兜底防线
         if (safeArea.top == 0 && safeArea.bottom == 0) {
             safeArea = UIEdgeInsetsMake(47, 0, 34, 0); // iPhone 14 Pro Max 典型值兜底
         }
 
-        CGSize screenSize = [UIScreen mainScreen].bounds.size;
+        CGSize screenSize = self.bounds.size;
         
         // 根据当前的 edges 动态拦截
         if (self.systemEdgePan.edges == UIRectEdgeLeft || self.systemEdgePan.edges == UIRectEdgeRight) {
@@ -2494,24 +2484,44 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     rotationContext.isLandscape = UIInterfaceOrientationIsLandscape(orientation);
     rotationContext.transform = CV3RotationTransformForInterfaceOrientation(orientation);
 
+    UIRectEdge desiredSystemEdge = UIRectEdgeRight;
     switch (orientation) {
         case UIInterfaceOrientationLandscapeLeft:
-            self.systemEdgePan.edges = UIRectEdgeTop;
+            desiredSystemEdge = UIRectEdgeTop;
             self.edgeTriggerView.frame = CGRectMake(0, 0, w, CV3Style.triggerHotzoneWidth);
             break;
         case UIInterfaceOrientationLandscapeRight:
-            self.systemEdgePan.edges = UIRectEdgeBottom;
+            desiredSystemEdge = UIRectEdgeBottom;
             self.edgeTriggerView.frame = CGRectMake(0, h - CV3Style.triggerHotzoneWidth, w, CV3Style.triggerHotzoneWidth);
             break;
         case UIInterfaceOrientationPortraitUpsideDown:
-            self.systemEdgePan.edges = UIRectEdgeLeft;
+            desiredSystemEdge = UIRectEdgeLeft;
             self.edgeTriggerView.frame = CGRectMake(0, safe.top, CV3Style.triggerHotzoneWidth, h - safe.top - CV3Style.triggerBottomOffset);
             break;
         case UIInterfaceOrientationPortrait:
         default:
-            self.systemEdgePan.edges = UIRectEdgeRight;
+            desiredSystemEdge = UIRectEdgeRight;
             self.edgeTriggerView.frame = CGRectMake(w - CV3Style.triggerHotzoneWidth, safe.top, CV3Style.triggerHotzoneWidth, h - safe.top - CV3Style.triggerBottomOffset);
             break;
+    }
+
+    if (self.systemEdgePan.edges != desiredSystemEdge) {
+        self.systemEdgePan.enabled = NO;
+        self.systemEdgePan.edges = desiredSystemEdge;
+        self.systemEdgePan.enabled = YES;
+
+        // SBSystemGestureManager caches edge routing at registration time.
+        // Re-register after rotation so type 112 follows the new physical
+        // right edge instead of remaining attached to the previous axis.
+        UIScreenEdgePanGestureRecognizer *edgePan = self.systemEdgePan;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self.systemEdgePan != edgePan || edgePan.edges != desiredSystemEdge) return;
+            @try {
+                SBSystemGestureManager *manager = [CV3ClassNamed(@"SBSystemGestureManager") mainDisplayManager];
+                [manager removeGestureRecognizer:edgePan];
+                [manager addGestureRecognizer:edgePan withType:112];
+            } @catch (__unused NSException *exception) {}
+        });
     }
 
     [self.rootViewController.view bringSubviewToFront:self.edgeTriggerView];
@@ -2638,10 +2648,9 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
 
 - (void)handleEdgeInteraction:(UIPanGestureRecognizer *)gesture {
-    // 使用 locationInView:nil 获取绝对屏幕坐标，规避旋转后的坐标系偏移风险
-    CGPoint location = [gesture locationInView:nil];
-    CGPoint translation = [gesture translationInView:nil];
-    CGPoint velocity = [gesture velocityInView:nil];
+    CGPoint location = [gesture locationInView:self];
+    CGPoint translation = [gesture translationInView:self];
+    CGPoint velocity = [gesture velocityInView:self];
 
 #pragma mark - 动态方向感知拉伸计算
     UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
