@@ -697,6 +697,93 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
 
 static NSFileHandle *CV3LogFileHandle = nil;
 static unsigned long long CV3LogFileBytes = 0;
+static void CV3LogToFile(NSString *format, ...);
+
+// Scene updates can arrive in bursts while SpringBoard reconciles a hosted
+// window. Rewriting the same effective settings in every callback makes the
+// client app spend its main-thread budget handling scene/accessibility work.
+static NSMutableDictionary *CV3SceneRewriteGate = nil;
+static NSMutableDictionary *CV3SceneContentGate = nil;
+
+static id CV3SafeSettingValue(id settings, NSString *key) {
+    if (!settings || key.length == 0) return nil;
+    @try {
+        return [settings valueForKey:key];
+    } @catch (__unused NSException *exception) {
+        return nil;
+    }
+}
+
+static NSString *CV3SceneSettingsFingerprint(id settings) {
+    if (!settings) return @"<nil>";
+
+    NSArray *keys = @[
+        @"foreground", @"backgrounded", @"occluded", @"visibility",
+        @"deactivationReasons", @"interfaceOrientation", @"deviceOrientation",
+        @"interruptionPolicy", @"frame"
+    ];
+    NSMutableArray *parts = [NSMutableArray arrayWithCapacity:keys.count];
+    for (NSString *key in keys) {
+        id value = CV3SafeSettingValue(settings, key);
+        [parts addObject:[NSString stringWithFormat:@"%@=%@", key, value ?: @"<missing>"]];
+    }
+    return [parts componentsJoinedByString:@";"];
+}
+
+static NSString *CV3SceneGateKey(FBScene *scene, NSString *bundleID) {
+    NSString *identifier = scene.identifier;
+    if (identifier.length == 0) identifier = [NSString stringWithFormat:@"%p", scene];
+    return [NSString stringWithFormat:@"%@|%@", identifier, bundleID ?: @"<unknown>"];
+}
+
+static BOOL CV3ShouldRewriteSceneSettings(FBScene *scene, NSString *bundleID, id settings) {
+    NSString *key = CV3SceneGateKey(scene, bundleID);
+    NSString *fingerprint = CV3SceneSettingsFingerprint(settings);
+    NSTimeInterval now = CACurrentMediaTime();
+
+    @synchronized ([NSObject class]) {
+        if (!CV3SceneRewriteGate) CV3SceneRewriteGate = [NSMutableDictionary dictionary];
+        NSDictionary *previous = CV3SceneRewriteGate[key];
+        NSTimeInterval lastTime = [previous[@"time"] doubleValue];
+        NSString *lastFingerprint = previous[@"fingerprint"];
+
+        // A repeated effective state is redundant. A changed state is allowed
+        // through, but still gets a short floor to avoid update storms.
+        NSTimeInterval minimumInterval = [lastFingerprint isEqualToString:fingerprint] ? 0.90 : 0.20;
+        if (previous && now - lastTime < minimumInterval) {
+            CV3LogToFile(@"[Throttled][Scene] 跳过重复 Settings 提交 bundle=%@ age=%.3f fingerprintSame=%@",
+                         bundleID, now - lastTime, [lastFingerprint isEqualToString:fingerprint] ? @"YES" : @"NO");
+            return NO;
+        }
+
+        CV3SceneRewriteGate[key] = @{@"time": @(now), @"fingerprint": fingerprint};
+    }
+    return YES;
+}
+
+static BOOL CV3SceneIsForegroundForContentState(FBScene *scene) {
+    id settings = scene.settings;
+    id foreground = CV3SafeSettingValue(settings, @"foreground");
+    id backgrounded = CV3SafeSettingValue(settings, @"backgrounded");
+    id occluded = CV3SafeSettingValue(settings, @"occluded");
+    return foreground && [foreground boolValue] &&
+           (!backgrounded || ![backgrounded boolValue]) &&
+           (!occluded || ![occluded boolValue]);
+}
+
+static BOOL CV3ShouldForceSceneContentState(FBScene *scene, NSString *bundleID) {
+    if (!CV3SceneIsForegroundForContentState(scene)) return NO;
+
+    NSString *key = CV3SceneGateKey(scene, bundleID);
+    NSTimeInterval now = CACurrentMediaTime();
+    @synchronized ([NSObject class]) {
+        if (!CV3SceneContentGate) CV3SceneContentGate = [NSMutableDictionary dictionary];
+        NSTimeInterval lastTime = [CV3SceneContentGate[key] doubleValue];
+        if (lastTime > 0 && now - lastTime < 1.50) return NO;
+        CV3SceneContentGate[key] = @(now);
+    }
+    return YES;
+}
 
 static void CV3LogToFile(NSString *format, ...) {
     va_list args;
@@ -898,7 +985,7 @@ static uint64_t CV3StableBundleHash(NSString *bundleID) {
     return hash & 0x00FFFFFFFFFFFFFFULL;
 }
 
-static const uint64_t CV3RequiredClientBridgeProtocolVersion = 0x2026072001ULL;
+static const uint64_t CV3RequiredClientBridgeProtocolVersion = 0x2026090602ULL;
 static NSMutableSet<NSString *> *CV3ClientBridgeRelaunchPendingBundleIDs = nil;
 static NSMutableSet<NSString *> *CV3ClientBridgeRelaunchAuthorizedBundleIDs = nil;
 
@@ -1446,6 +1533,13 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, strong) UIImageView *largeSplashIcon;
 @property (nonatomic, assign) UIInterfaceOrientation targetOrientation;
 @property (nonatomic, assign) UIInterfaceOrientation hostedContentOrientation;
+@property (nonatomic, assign) BOOL prefersLandscapePresentation;
+@property (nonatomic, assign) BOOL requiresLandscapeContent;
+@property (nonatomic, assign) BOOL awaitingInitialRenderableContent;
+@property (nonatomic, assign) UIInterfaceOrientation mappedPresentationOrientation;
+@property (nonatomic, assign) UIInterfaceOrientation mappedHostedOrientation;
+@property (nonatomic, assign) NSTimeInterval hostedCanvasLandscapeSince;
+@property (nonatomic, assign) NSTimeInterval lastCanvasMismatchLoggedAt;
 @property (nonatomic, strong) id originalOrientationMapResolver;
 @property (nonatomic, strong) id activeOrientationMapResolver;
 @property (nonatomic, assign) NSInteger originalInterfaceOrientationMode;
@@ -1464,6 +1558,7 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, copy) NSString *rbsAssertionLastAttemptedAttributeName;
 @property (nonatomic, assign) NSUInteger rbsAssertionFailureCount;
 @property (nonatomic, assign) NSTimeInterval rbsAssertionRetryAfter;
+@property (nonatomic, assign) BOOL rbsAssertionUnsupported;
 @property (nonatomic, assign) BOOL allowProcessTerminationOnClose;
 @property (nonatomic, assign) CGRect preExposeFrame;
 @property (nonatomic, assign) CGAffineTransform preExposeTransform;
@@ -1479,6 +1574,10 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, strong) NSTimer *assertionWatchdogTimer;
 @property (nonatomic, assign) NSUInteger sceneHostGeneration;
 @property (nonatomic, assign) CV3HostLifecycleState hostLifecycleState;
+@property (nonatomic, assign) NSUInteger hostContentFailureCount;
+@property (nonatomic, assign) NSTimeInterval lastHostContentRecoveryAt;
+@property (nonatomic, assign) BOOL hostContentRecoveryInFlight;
+@property (nonatomic, assign) NSTimeInterval lastForegroundSceneRepairAt;
 @property (nonatomic, assign) BOOL isLiveResizing;
 @property (nonatomic, strong) CAGradientLayer *specularHighlight;
 @property (nonatomic, strong) CADisplayLink *liquidDisplayLink;
@@ -1517,6 +1616,7 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 - (UIView *)hostViewForScene:(FBScene *)scene;
 - (void)disableHostingForCurrentScene;
 - (BOOL)hostViewHasRenderableContent;
+- (void)recoverHostedPresentationIfNeeded:(NSString *)reason;
 - (void)finishHostingWhenRenderableWithRetries:(NSInteger)retries;
 - (void)finishHostingWhenRenderableWithRetries:(NSInteger)retries generation:(NSUInteger)generation;
 - (void)applyStashedGrabberOrientation;
@@ -4825,7 +4925,7 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
                                                          clearDeactivation:YES
                                                                forceLayout:NO];
 
-                if (modified) {
+                if (modified && CV3ShouldRewriteSceneSettings((FBScene *)self, win.bundleID, mutableSettings)) {
                     CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=FBSceneSettingsRewritten bundle=%@ transition=%@",
                                  win.bundleID, arg2 ? @"YES" : @"NO");
                     CV3LogToFile(@"[FBScene] 捕捉到 Settings 更新请求: %@", win.bundleID);
@@ -4864,7 +4964,7 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
                                                          clearDeactivation:YES
                                                                forceLayout:NO];
 
-                if (modified) {
+                if (modified && CV3ShouldRewriteSceneSettings((FBScene *)self, win.bundleID, mutableSettings)) {
                     CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=FBSceneSettingsRewrittenWithCompletion bundle=%@ transition=%@",
                                  win.bundleID, arg2 ? @"YES" : @"NO");
                     CV3LogToFile(@"[FBScene] 捕捉到 Settings 更新请求 (带 completion): %@", win.bundleID);
@@ -4896,7 +4996,7 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
                     %orig(arg1);
                     return;
                 }
-                if (arg1 != 2) {
+                if (arg1 != 2 && CV3ShouldForceSceneContentState((FBScene *)self, win.bundleID)) {
                     CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=FBSceneContentStateDowngrade bundle=%@ requested=%ld forced=2",
                                  win.bundleID, (long)arg1);
                     CV3LogToFile(@"[FBScene] 拦截到 contentState 降级 -> %ld，强制恢复为 2: %@", (long)arg1, win.bundleID);

@@ -7,6 +7,52 @@ static void CV3CascadeUpdateSovereigntyAssertions(void) {
         }
     }
 }
+
+// A host UIView can survive after FrontBoard drops the Scene's real content
+// layer. Match PullOver-X's stronger readiness check instead of treating any
+// sublayer as proof that the client is still drawable.
+static BOOL CV3SceneHasRenderableMainLayer(FBScene *scene) {
+    if (!scene) return NO;
+
+    id layerManager = nil;
+    @try {
+        if ([scene respondsToSelector:@selector(layerManager)]) {
+            layerManager = ((id (*)(id, SEL))objc_msgSend)(scene, @selector(layerManager));
+        } else {
+            layerManager = [scene valueForKey:@"_layerManager"];
+        }
+    } @catch (__unused NSException *exception) {
+        return NO;
+    }
+    if (!layerManager) return NO;
+
+    id rawLayers = nil;
+    @try {
+        if ([layerManager respondsToSelector:@selector(layers)]) {
+            rawLayers = ((id (*)(id, SEL))objc_msgSend)(layerManager, @selector(layers));
+        }
+    } @catch (__unused NSException *exception) {
+        return NO;
+    }
+
+    NSArray *layers = [rawLayers isKindOfClass:[NSArray class]]
+        ? rawLayers
+        : ([rawLayers respondsToSelector:@selector(array)] ? [rawLayers array] : nil);
+    if (![layers isKindOfClass:[NSArray class]]) return NO;
+
+    for (id layer in layers) {
+        @try {
+            BOOL keyboardLayer = [layer respondsToSelector:@selector(isKeyboardLayer)] &&
+                ((BOOL (*)(id, SEL))objc_msgSend)(layer, @selector(isKeyboardLayer));
+            id externalSceneID = [layer respondsToSelector:@selector(externalSceneID)]
+                ? ((id (*)(id, SEL))objc_msgSend)(layer, @selector(externalSceneID))
+                : nil;
+            if (!keyboardLayer && !externalSceneID) return YES;
+        } @catch (__unused NSException *exception) {}
+    }
+    return NO;
+}
+
 static void CV3StashPeerWindowsForFullscreen(CV3FloatingAppWindow *activeWindow) {
     if (!activeWindow || !floatingWindows || floatingWindows.count <= 1) return;
 
@@ -153,23 +199,95 @@ static CGSize CV3HostedCanvasSizeForOrientation(UIInterfaceOrientation orientati
 
 static UIInterfaceOrientation CV3HostedPresentationOrientation(CV3FloatingAppWindow *window) {
     if (!window) return UIInterfaceOrientationUnknown;
-
-    // Prefer the orientation committed by the actual hosted Scene. During a
-    // rotation transaction the window and Scene can briefly disagree; using
-    // the Scene value avoids applying a map against a stale presentation side.
-    id scene = window.targetScene;
-    id settings = scene ? CV3InvokeObject(scene, @selector(settings)) : nil;
-    SEL getter = @selector(interfaceOrientation);
-    if (settings && [settings respondsToSelector:getter]) {
-        @try {
-            UIInterfaceOrientation sceneOrientation =
-                ((UIInterfaceOrientation (*)(id, SEL))objc_msgSend)(settings, getter);
-            if (CV3IsValidInterfaceOrientation(sceneOrientation)) return sceneOrientation;
-        } @catch (NSException *exception) {}
-    }
-
-    if (CV3IsValidInterfaceOrientation(window.targetOrientation)) return window.targetOrientation;
+    // The destination is SpringBoard's display scene, not the hosted app.
+    // Reading the app's own orientation here removes the cross-orientation map
+    // as soon as that app commits its first landscape scene update.
     return CV3TrustedInterfaceOrientation(window.windowScene);
+}
+
+// PullOver chooses the initial hosted orientation from the client's declared
+// orientations instead of assuming portrait. This matters before the first
+// Scene transaction, when the device Scene still reports its own orientation.
+static BOOL CV3BundleDeclaresLandscapeOnly(NSString *bundleID) {
+    if (bundleID.length == 0) return NO;
+
+    @try {
+        Class proxyClass = CV3ClassNamed(@"LSApplicationProxy");
+        SEL selector = NSSelectorFromString(@"applicationProxyForIdentifier:");
+        id proxy = proxyClass && [proxyClass respondsToSelector:selector]
+            ? ((id (*)(id, SEL, id))objc_msgSend)(proxyClass, selector, bundleID)
+            : nil;
+        NSURL *bundleURL = proxy && [proxy respondsToSelector:@selector(bundleURL)]
+            ? ((id (*)(id, SEL))objc_msgSend)(proxy, @selector(bundleURL))
+            : nil;
+        NSDictionary *info = bundleURL ? [NSDictionary dictionaryWithContentsOfFile:[[bundleURL path] stringByAppendingPathComponent:@"Info.plist"]] : nil;
+        id runtimeApp = nil;
+        if (!info) {
+            Class appController = CV3ClassNamed(@"SBApplicationController");
+            id app = appController && [appController respondsToSelector:@selector(sharedInstance)]
+                ? ((id (*)(id, SEL))objc_msgSend)(appController, @selector(sharedInstance))
+                : nil;
+            app = app && [app respondsToSelector:@selector(applicationWithBundleIdentifier:)]
+                ? ((id (*)(id, SEL, id))objc_msgSend)(app, @selector(applicationWithBundleIdentifier:), bundleID)
+                : nil;
+            runtimeApp = app;
+            NSURL *fallbackURL = app && [app respondsToSelector:@selector(bundleURL)]
+                ? ((id (*)(id, SEL))objc_msgSend)(app, @selector(bundleURL))
+                : nil;
+            if (fallbackURL) {
+                info = [NSDictionary dictionaryWithContentsOfFile:[[fallbackURL path] stringByAppendingPathComponent:@"Info.plist"]];
+            }
+        }
+        if (!runtimeApp) {
+            Class appController = CV3ClassNamed(@"SBApplicationController");
+            id controller = appController && [appController respondsToSelector:@selector(sharedInstance)]
+                ? ((id (*)(id, SEL))objc_msgSend)(appController, @selector(sharedInstance))
+                : nil;
+            runtimeApp = controller && [controller respondsToSelector:@selector(applicationWithBundleIdentifier:)]
+                ? ((id (*)(id, SEL, id))objc_msgSend)(controller, @selector(applicationWithBundleIdentifier:), bundleID)
+                : nil;
+        }
+        if (runtimeApp) {
+            @try {
+                id maskValue = [runtimeApp valueForKey:@"supportedInterfaceOrientations"];
+                UIInterfaceOrientationMask mask = [maskValue unsignedIntegerValue];
+                BOOL hasLandscape = (mask & UIInterfaceOrientationMaskLandscape) != 0;
+                BOOL hasPortrait = (mask & (UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskPortraitUpsideDown)) != 0;
+                if (hasLandscape && !hasPortrait) return YES;
+            } @catch (__unused NSException *exception) {}
+        }
+        NSString *declaredDefault = [info[@"UIInterfaceOrientation"] isKindOfClass:[NSString class]]
+            ? info[@"UIInterfaceOrientation"]
+            : nil;
+        if (declaredDefault.length && [declaredDefault rangeOfString:@"Landscape" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            return YES;
+        }
+        NSArray *orientations = info[@"UISupportedInterfaceOrientations"];
+        if (![orientations isKindOfClass:[NSArray class]]) {
+            orientations = info[@"UISupportedInterfaceOrientations~ipad"];
+        }
+        if (![orientations isKindOfClass:[NSArray class]] || orientations.count == 0) return NO;
+
+        BOOL hasLandscape = NO;
+        BOOL hasPortrait = NO;
+        for (NSString *value in orientations) {
+            NSString *name = [value isKindOfClass:[NSString class]] ? value : @"";
+            hasLandscape |= [name rangeOfString:@"Landscape" options:NSCaseInsensitiveSearch].location != NSNotFound;
+            hasPortrait |= [name rangeOfString:@"Portrait" options:NSCaseInsensitiveSearch].location != NSNotFound;
+        }
+        return hasLandscape && !hasPortrait;
+    } @catch (__unused NSException *exception) {
+        return NO;
+    }
+}
+
+static UIInterfaceOrientation CV3InitialHostedOrientationForBundleID(NSString *bundleID,
+                                                                       UIInterfaceOrientation fallback) {
+    if (!CV3BundleDeclaresLandscapeOnly(bundleID)) return fallback;
+    if (fallback == UIInterfaceOrientationLandscapeLeft || fallback == UIInterfaceOrientationLandscapeRight) {
+        return fallback;
+    }
+    return UIInterfaceOrientationLandscapeRight;
 }
 
 static BOOL isGlobalExposeActive = NO;
@@ -474,7 +592,10 @@ static void CV3LayoutExposeWindowsAnimated(BOOL animated) {
 
     if (active) {
         [self validateNow:@"HostedSessionActivated"];
-        self.continuityTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
+        // Scene updates are expensive for clients with complex accessibility
+        // trees. A slower lease heartbeat avoids feeding the scene-update
+        // watchdog while still recovering a genuinely lost host layer.
+        self.continuityTimer = [NSTimer scheduledTimerWithTimeInterval:3.0
                                                                target:self
                                                              selector:@selector(continuityTimerFired:)
                                                              userInfo:nil
@@ -489,6 +610,12 @@ static void CV3LayoutExposeWindowsAnimated(BOOL animated) {
 - (void)validateNow:(NSString *)reason {
     CV3FloatingAppWindow *window = self.window;
     if (!self.active || !window || window.isClosing || window.isStashed) return;
+    NSUInteger generationBeforeRecovery = window.sceneHostGeneration;
+    [window recoverHostedPresentationIfNeeded:reason];
+    // A recovery invalidates the old host generation. Do not mutate the
+    // detached Scene again in the same heartbeat.
+    if (window.sceneHostGeneration != generationBeforeRecovery ||
+        window.hostLifecycleState != CV3HostLifecycleStateLive) return;
     [window stabilizeForegroundForWorkspaceTransition:reason];
 }
 
@@ -1062,9 +1189,29 @@ void CV3ToggleExposeMode(void) {
 
     self.transform = CGAffineTransformIdentity;
     CV3SceneRotationContext context = CV3MakeSceneRotationContext(self.windowScene);
-    self.targetOrientation = context.orientation;
-    self.baseRotationTransform = context.transform;
-    self.rootTransformContainer.transform = context.transform;
+    UIInterfaceOrientation effectiveOrientation =
+        self.prefersLandscapePresentation && UIInterfaceOrientationIsLandscape(self.hostedContentOrientation)
+            ? self.hostedContentOrientation
+            : context.orientation;
+    if (!CV3IsValidInterfaceOrientation(effectiveOrientation)) {
+        effectiveOrientation = UIInterfaceOrientationPortrait;
+    }
+
+    BOOL wantsLandscape = UIInterfaceOrientationIsLandscape(effectiveOrientation);
+    BOOL shellIsLandscape = self.bounds.size.width > self.bounds.size.height;
+    if (wantsLandscape != shellIsLandscape && self.bounds.size.width > 0.0 && self.bounds.size.height > 0.0) {
+        CGSize size = self.bounds.size;
+        self.bounds = CGRectMake(0, 0, size.height, size.width);
+    }
+
+    self.targetOrientation = effectiveOrientation;
+    self.baseRotationTransform = CV3RotationTransformForInterfaceOrientation(effectiveOrientation);
+    // A landscape-only client is simulated inside a portrait SpringBoard
+    // Scene. Its outer chrome already has landscape bounds, so rotating the
+    // root again would mix portrait chrome with a landscape hosted canvas.
+    self.rootTransformContainer.transform = self.prefersLandscapePresentation
+        ? CGAffineTransformIdentity
+        : self.baseRotationTransform;
 }
 
 - (CGSize)portraitLogicalSizeForDisplayBounds:(CGRect)displayBounds widthRatio:(CGFloat)widthRatio {
@@ -1124,6 +1271,18 @@ void CV3ToggleExposeMode(void) {
 - (void)applySceneRotationContext:(CV3SceneRotationContext)context force:(BOOL)force {
     if (!CV3IsValidInterfaceOrientation(context.orientation) || self.isClosing) return;
 
+    // A landscape-only client owns the initial presentation orientation. The
+    // display Scene may still report portrait while the app is being hosted;
+    // letting that value overwrite the window produces a portrait shell with
+    // a partially rotated landscape client.
+    if (!self.isStashed && self.prefersLandscapePresentation &&
+        UIInterfaceOrientationIsLandscape(self.hostedContentOrientation) &&
+        !UIInterfaceOrientationIsLandscape(context.orientation)) {
+        context.orientation = self.hostedContentOrientation;
+        context.isLandscape = YES;
+        context.transform = CV3RotationTransformForInterfaceOrientation(context.orientation);
+    }
+
     BOOL orientationChanged = (self.lastLayoutOrientation != context.orientation);
     BOOL rotationChanged = !CGAffineTransformEqualToTransform(self.baseRotationTransform, context.transform);
 
@@ -1153,7 +1312,18 @@ void CV3ToggleExposeMode(void) {
 
     CGPoint oldCenter = self.center;
     CGRect screenBounds = CGRectIsEmpty(context.sceneBounds) ? CV3DisplayBoundsForWindow(self) : context.sceneBounds;
-    CGSize newSize = [self defaultPhysicalFloatingSizeForOrientation:context.orientation displayBounds:screenBounds];
+    CGSize currentSize = self.bounds.size;
+    BOOL currentLandscape = currentSize.width > currentSize.height;
+    BOOL targetLandscape = context.isLandscape;
+    CGSize newSize = currentSize;
+    // Preserve the user's current logical window size. A physical rotation
+    // swaps the shell axes; recomputing the default size here loses custom
+    // sizing and can leave a portrait-shaped window in landscape.
+    if (currentSize.width <= 1.0 || currentSize.height <= 1.0) {
+        newSize = [self defaultPhysicalFloatingSizeForOrientation:context.orientation displayBounds:screenBounds];
+    } else if (currentLandscape != targetLandscape) {
+        newSize = CGSizeMake(currentSize.height, currentSize.width);
+    }
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
@@ -1163,7 +1333,9 @@ void CV3ToggleExposeMode(void) {
     self.center = oldCenter;
 
     self.baseRotationTransform = context.transform;
-    self.rootTransformContainer.transform = context.transform;
+    self.rootTransformContainer.transform = self.prefersLandscapePresentation
+        ? CGAffineTransformIdentity
+        : context.transform;
     
     [CATransaction commit];
 
@@ -1262,13 +1434,16 @@ void CV3ToggleExposeMode(void) {
     // This proxy lives inside rootTransformContainer's upright logical coordinate
     // space. The root container applies the physical device rotation, while the
     // hosted Scene settings below describe the app's own content orientation.
-    // Keep the proxy portrait-canonical to avoid applying the width/height swap
-    // twice when both the device and hosted content are landscape.
     id sceneSettings = self.targetScene
         ? CV3InvokeObject(self.targetScene, @selector(settings))
         : nil;
-    CGSize canvasSize = CV3HostedCanvasSizeForOrientation(UIInterfaceOrientationPortrait,
-                                                          sceneSettings);
+    UIInterfaceOrientation hostedOrientation = CV3IsValidInterfaceOrientation(self.hostedContentOrientation)
+        ? self.hostedContentOrientation
+        : UIInterfaceOrientationPortrait;
+    // The proxy canvas must use the same orientation as the hosted Scene. A
+    // portrait-only canvas makes a landscape game look vertically letterboxed
+    // even when the Scene settings already request landscape.
+    CGSize canvasSize = CV3HostedCanvasSizeForOrientation(hostedOrientation, sceneSettings);
     return CGRectMake(0, 0, canvasSize.width, canvasSize.height);
 }
 
@@ -1279,8 +1454,10 @@ void CV3ToggleExposeMode(void) {
     UIInterfaceOrientation targetOrientation = CV3IsValidInterfaceOrientation(self.hostedContentOrientation)
         ? self.hostedContentOrientation
         : UIInterfaceOrientationPortrait;
-    CGSize canvasSize = CV3HostedCanvasSizeForOrientation(targetOrientation, settings);
-    CGRect targetFrame = CGRectMake(0, 0, canvasSize.width, canvasSize.height);
+    // FrontBoard's server frame uses the display's reference coordinates.
+    // UIKit rotates that frame into the client's interface coordinate space.
+    // Supplying the already-rotated canvas here swaps landscape dimensions twice.
+    CGRect targetFrame = CV3CanonicalApplicationSceneFrame(settings);
 
     @try {
         if (force ||
@@ -1335,15 +1512,19 @@ void CV3ToggleExposeMode(void) {
         BOOL resolverDrifted = self.crossOrientationMapApplied &&
             self.activeOrientationMapResolver &&
             currentResolver != self.activeOrientationMapResolver;
+        BOOL orientationPairChanged = self.mappedPresentationOrientation != presentationOrientation ||
+            self.mappedHostedOrientation != targetOrientation;
         BOOL mapModified = CV3ApplyCrossOrientationMapToSettings(
             settings,
             presentationOrientation,
             targetOrientation,
-            force || !self.crossOrientationMapApplied || resolverDrifted);
+            force || !self.crossOrientationMapApplied || resolverDrifted || orientationPairChanged);
         modified |= mapModified;
         if (mapModified) {
             self.crossOrientationMapApplied = YES;
             self.activeOrientationMapResolver = CV3OrientationMapResolverFromSettings(settings);
+            self.mappedPresentationOrientation = presentationOrientation;
+            self.mappedHostedOrientation = targetOrientation;
         }
     } else if (self.hasCapturedOrientationMapBaseline) {
         if (self.crossOrientationMapApplied) {
@@ -1364,11 +1545,21 @@ void CV3ToggleExposeMode(void) {
 
 - (void)applyHostedContentOrientation:(UIInterfaceOrientation)orientation {
     if (!CV3IsValidInterfaceOrientation(orientation) || self.isClosing) return;
+    if (self.requiresLandscapeContent && !UIInterfaceOrientationIsLandscape(orientation)) return;
     if (self.hostedContentOrientation == orientation) return;
 
     self.hostedContentOrientation = orientation;
+    self.prefersLandscapePresentation = UIInterfaceOrientationIsLandscape(orientation);
+    self.targetOrientation = orientation;
+    self.lastLayoutOrientation = orientation;
     [self syncHostedSceneLayoutForce:YES];
     [self refreshHostViewPresentation];
+    [self setNeedsLayout];
+    [self layoutIfNeeded];
+    // Home bar placement belongs to the logical content container. Re-run it
+    // after the scene orientation transaction, otherwise the bar keeps the
+    // pre-hosting portrait edge while the shell is already landscape.
+    [self layoutFloatingHomeBarForBounds:self.appContentWrapper.bounds];
     CV3LogToFile(@"[VideoBridge] 已更新托管内容方向=%ld: %@", (long)orientation, self.bundleID);
 }
 
@@ -1423,6 +1614,12 @@ void CV3ToggleExposeMode(void) {
 
 - (void)stabilizeForegroundForWorkspaceTransition:(NSString *)reason {
     if (!self.targetScene || self.isClosing || self.isStashed) return;
+
+    NSTimeInterval now = CACurrentMediaTime();
+    if (now - self.lastForegroundSceneRepairAt < 2.5) {
+        return;
+    }
+    self.lastForegroundSceneRepairAt = now;
 
     @try {
         FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
@@ -1866,31 +2063,34 @@ void CV3ToggleExposeMode(void) {
         }
     }
 
-    UIInterfaceOrientation orientation = self.targetOrientation;
-    if (!CV3IsValidInterfaceOrientation(orientation)) {
-        orientation = CV3TrustedInterfaceOrientation(self.windowScene);
+    // Map the selected display edge through the actual view transform. An
+    // independently landscape app does not imply that its chrome is rotated.
+    UIView *container = self.appContentWrapper ?: self;
+    CGRect localBounds = container.bounds;
+    CGPoint localCenter = CGPointMake(CGRectGetMidX(localBounds), CGRectGetMidY(localBounds));
+    CGPoint centerInWindow = [container convertPoint:localCenter toView:self];
+    CGPoint edges[4] = {
+        CGPointMake(localCenter.x, CGRectGetMaxY(localBounds)),
+        CGPointMake(localCenter.x, CGRectGetMinY(localBounds)),
+        CGPointMake(CGRectGetMaxX(localBounds), localCenter.y),
+        CGPointMake(CGRectGetMinX(localBounds), localCenter.y)
+    };
+    CGPoint directions[4] = {CGPointMake(0, 1), CGPointMake(0, -1), CGPointMake(1, 0), CGPointMake(-1, 0)};
+    CGFloat bestScore = -CGFLOAT_MAX;
+    NSInteger localPlacement = bestScreenPlacement;
+    for (NSInteger i = 0; i < 4; i++) {
+        CGPoint edge = [container convertPoint:edges[i] toView:self];
+        CGFloat dx = edge.x - centerInWindow.x;
+        CGFloat dy = edge.y - centerInWindow.y;
+        CGFloat length = hypot(dx, dy);
+        if (length < 0.01) continue;
+        CGFloat score = (dx * directions[bestScreenPlacement].x + dy * directions[bestScreenPlacement].y) / length;
+        if (score > bestScore) {
+            bestScore = score;
+            localPlacement = i;
+        }
     }
-
-    // Placement ids are local to appContentWrapper:
-    // 0 bottom, 1 top, 2 right, 3 left. The clearance calculation above is in
-    // screen space, so rotate the selected screen edge back into local space.
-    switch (orientation) {
-        case UIInterfaceOrientationLandscapeLeft: {
-            static const NSInteger map[4] = {3, 2, 0, 1};
-            return map[bestScreenPlacement];
-        }
-        case UIInterfaceOrientationLandscapeRight: {
-            static const NSInteger map[4] = {2, 3, 1, 0};
-            return map[bestScreenPlacement];
-        }
-        case UIInterfaceOrientationPortraitUpsideDown: {
-            static const NSInteger map[4] = {1, 0, 3, 2};
-            return map[bestScreenPlacement];
-        }
-        case UIInterfaceOrientationPortrait:
-        default:
-            return bestScreenPlacement;
-    }
+    return localPlacement;
 }
 
 - (CGRect)orientedDisplayBoundsForCurrentOrientation {
@@ -2749,16 +2949,26 @@ void CV3ToggleExposeMode(void) {
     
     if (self) {
         UIInterfaceOrientation currentOrientation = CV3TrustedInterfaceOrientation(windowScene);
+        UIInterfaceOrientation initialOrientation = CV3InitialHostedOrientationForBundleID(bundleID, currentOrientation);
         CGSize physicalSize = [self defaultPhysicalFloatingSizeForOrientation:currentOrientation
                                                                 displayBounds:CV3DisplayBoundsForWindow(self)];
+        if (initialOrientation != currentOrientation) {
+            physicalSize = [self defaultPhysicalFloatingSizeForOrientation:initialOrientation
+                                                               displayBounds:CV3DisplayBoundsForWindow(self)];
+        }
         
         self.frame = CGRectMake(0, 0, physicalSize.width, physicalSize.height);
-        self.lastLayoutOrientation = currentOrientation;
-        self.targetOrientation = currentOrientation;
+        self.lastLayoutOrientation = initialOrientation;
+        self.targetOrientation = initialOrientation;
         
         self.bundleID = bundleID;
         self.hostedSession = [[CV3HostedSceneSession alloc] initWithWindow:self];
-        self.hostedContentOrientation = UIInterfaceOrientationPortrait;
+        self.requiresLandscapeContent = CV3BundleDeclaresLandscapeOnly(bundleID);
+        self.prefersLandscapePresentation = UIInterfaceOrientationIsLandscape(initialOrientation) &&
+            self.requiresLandscapeContent;
+        self.hostedContentOrientation = self.prefersLandscapePresentation
+            ? initialOrientation
+            : UIInterfaceOrientationPortrait;
         self.allowProcessTerminationOnClose = NO;
         self.center = center;
         CV3RestoreSavedWindowLayout(self);
@@ -2787,6 +2997,10 @@ void CV3ToggleExposeMode(void) {
         self.appContentWrapper = [[UIView alloc] initWithFrame:self.rootTransformContainer.bounds];
         self.appContentWrapper.backgroundColor = [UIColor clearColor];
         [self.rootTransformContainer addSubview:self.appContentWrapper];
+        // Keep polling the client's first landscape canvas so layout is
+        // refreshed as soon as its Scene transaction lands. The container must
+        // remain visible because some clients publish no canvas notification.
+        self.awaitingInitialRenderableContent = YES;
         [self clearOuterWindowShadow];
         [self syncWindowShadowForCurrentState];
 
@@ -3114,7 +3328,82 @@ void CV3ToggleExposeMode(void) {
 
     id presentationContext = CV3InvokeObject(self.hostView, @selector(presentationContext));
     if (CV3TargetRespondsToSelector(self.hostView, @selector(presentationContext)) && !presentationContext) return NO;
+    if (!CV3SceneHasRenderableMainLayer(self.targetScene)) return NO;
+    if (self.awaitingInitialRenderableContent && self.requiresLandscapeContent) {
+        NSString *name = [NSString stringWithFormat:@"com.xu.chevronv3.canvas.%@", self.bundleID];
+        int token = -1;
+        uint64_t geometry = 0;
+        if (notify_register_check(name.UTF8String, &token) == NOTIFY_STATUS_OK) {
+            notify_get_state(token, &geometry);
+            notify_cancel(token);
+        }
+        CGSize expected = [self currentHostedSceneBounds].size;
+        CGFloat width = (geometry >> 16) & 0xFFFF;
+        CGFloat height = geometry & 0xFFFF;
+        NSTimeInterval now = CACurrentMediaTime();
+        BOOL canvasLandscape = fabs(width - expected.width) <= 1.0 &&
+            fabs(height - expected.height) <= 1.0;
+        if (!canvasLandscape) {
+            if (now - self.lastCanvasMismatchLoggedAt > 1.0) {
+                self.lastCanvasMismatchLoggedAt = now;
+                CV3LogToFile(@"[CanvasGate] %@ client=%.0fx%.0f expected=%.0fx%.0f proxy=%@ host=%@ children=%@ settings=%@ initial=1 waiting…",
+                             self.bundleID, width, height, expected.width, expected.height,
+                             NSStringFromCGRect(self.hostContainerProxy.bounds),
+                             NSStringFromCGRect(self.hostView.frame), self.hostView.subviews,
+                             CV3InvokeObject(self.targetScene, @selector(settings)));
+            }
+            self.hostedCanvasLandscapeSince = 0;
+            return NO;
+        }
+        if (self.hostedCanvasLandscapeSince <= 0) {
+            self.hostedCanvasLandscapeSince = now;
+            CV3LogToFile(@"[CanvasGate] %@ client=%.0fx%.0f landscape confirmed",
+                         self.bundleID, width, height);
+            return NO;
+        }
+        // One polling interval is enough for FrontBoard to commit the matching
+        // surface. Keep the window transparent during that interval instead of
+        // covering it with a blur or revealing a portrait strip on the left.
+        if (now - self.hostedCanvasLandscapeSince < 0.15) return NO;
+    }
     return self.hostView.layer.sublayers.count > 0 || self.hostView.subviews.count > 0;
+}
+
+- (void)recoverHostedPresentationIfNeeded:(NSString *)reason {
+    if (self.isClosing || self.isStashed || self.isMovingWindow || !self.targetScene ||
+        self.hostLifecycleState != CV3HostLifecycleStateLive) return;
+
+    NSTimeInterval now = CACurrentMediaTime();
+    if (self.hostContentRecoveryInFlight && now - self.lastHostContentRecoveryAt < 3.0) return;
+    self.hostContentRecoveryInFlight = NO;
+
+    BOOL hostAttached = self.hostView && self.hostView.superview &&
+        !self.hostView.hidden && self.hostView.alpha > 0.01;
+    BOOL hasPresentationContext = !CV3TargetRespondsToSelector(self.hostView, @selector(presentationContext)) ||
+        CV3InvokeObject(self.hostView, @selector(presentationContext)) != nil;
+    BOOL hasMainLayer = CV3SceneHasRenderableMainLayer(self.targetScene);
+
+    if (hostAttached && hasPresentationContext && hasMainLayer) {
+        self.hostContentFailureCount = 0;
+        return;
+    }
+
+    self.hostContentFailureCount += 1;
+    if (self.hostContentFailureCount < 2) return;
+
+    if (now - self.lastHostContentRecoveryAt < 3.0) return;
+    self.lastHostContentRecoveryAt = now;
+    self.hostContentRecoveryInFlight = YES;
+
+    CV3LogToFile(@"[Recovery] 托管内容层丢失，保留音频与浮窗几何并重建显示层: %@ reason=%@ host=%d context=%d mainLayer=%d",
+                 self.bundleID, reason ?: @"Heartbeat", hostAttached, hasPresentationContext, hasMainLayer);
+    [self ensureLaunchSplashVisible];
+    // Invalidate all delayed attach/retry callbacks from the old host before
+    // detaching. Reusing the same generation allows stale callbacks to race
+    // the recovery mount and create duplicate host views.
+    self.sceneHostGeneration += 1;
+    [self detachHostedSceneForReason:@"HostedContentUnavailable" clearScene:NO];
+    [self attemptToHostSceneWithRetries:6 delay:0.05 generation:self.sceneHostGeneration];
 }
 
 - (void)finishHostingWhenRenderableWithRetries:(NSInteger)retries {
@@ -3123,15 +3412,52 @@ void CV3ToggleExposeMode(void) {
 
 - (void)finishHostingWhenRenderableWithRetries:(NSInteger)retries generation:(NSUInteger)generation {
     if (self.isClosing || !self.hostView || generation != self.sceneHostGeneration) return;
+    // Remote content children can arrive after the host wrapper is attached.
+    // Give them the final canvas before declaring the loading surface ready.
+    [self setNeedsLayout];
+    [self layoutIfNeeded];
     if ([self hostViewHasRenderableContent]) {
+        self.hostContentFailureCount = 0;
+        self.hostContentRecoveryInFlight = NO;
         [self setHostLifecycleState:CV3HostLifecycleStateLive reason:@"Renderable"];
         [self syncWindowBoundsToClient];
         [self dismissLaunchSplashAnimated];
+        if (self.awaitingInitialRenderableContent) {
+            self.awaitingInitialRenderableContent = NO;
+            self.rootTransformContainer.hidden = NO;
+            [self setNeedsLayout];
+            [self layoutIfNeeded];
+        }
         CV3LogToFile(@"[SceneHost] 渲染层已就绪: %@", self.bundleID);
+        CV3LogToFile(@"[HostGeometry] bundle=%@ shell=%@ canvas=%@ host=%@ children=%@ displayOrientation=%ld contentOrientation=%ld mapped=%d",
+                     self.bundleID, NSStringFromCGRect(self.bounds),
+                     NSStringFromCGRect(self.hostContainerProxy.bounds), self.hostView,
+                     self.hostView.subviews, (long)CV3HostedPresentationOrientation(self),
+                     (long)self.hostedContentOrientation, self.crossOrientationMapApplied);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (self.isClosing || generation != self.sceneHostGeneration) return;
+            CV3LogToFile(@"[HostGeometryDetail] bundle=%@ settings=%@ client=%@ hierarchy=%@",
+                         self.bundleID, CV3InvokeObject(self.targetScene, @selector(settings)),
+                         CV3InvokeObject(self.targetScene, NSSelectorFromString(@"clientSettings")),
+                         CV3InvokeObject(self.hostView, NSSelectorFromString(@"recursiveDescription")));
+        });
         return;
     }
 
     if (retries <= 0) {
+        if (self.awaitingInitialRenderableContent && self.requiresLandscapeContent && !self.isClosing &&
+            self.hostLifecycleState != CV3HostLifecycleStateReleasing) {
+            // The hosted game may take several seconds to publish and commit a
+            // landscape canvas. Keep polling and relayouting without hiding the
+            // actual hosted surface or placing a launch overlay above it.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (self.isClosing || self.hostLifecycleState == CV3HostLifecycleStateReleasing ||
+                    generation != self.sceneHostGeneration) return;
+                [self finishHostingWhenRenderableWithRetries:1 generation:generation];
+            });
+            return;
+        }
+        self.hostContentRecoveryInFlight = NO;
         CV3LogToFile(@"[Error] Scene 容器存在但渲染层未就绪，保留加载界面: %@", self.bundleID);
         return;
     }
@@ -3145,69 +3471,19 @@ void CV3ToggleExposeMode(void) {
 }
 
 - (void)ensureLaunchSplashVisible {
-    if (!self.hostContainerProxy) return;
-
-    if (!self.splashView) {
-        UIBlurEffectStyle blurStyle = UIBlurEffectStyleSystemThinMaterial;
-        if (@available(iOS 13.0, *)) {
-            blurStyle = UIBlurEffectStyleSystemMaterial;
-        }
-
-        UIVisualEffectView *splash = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:blurStyle]];
-        splash.frame = self.hostContainerProxy.bounds;
-        splash.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        splash.userInteractionEnabled = NO;
-        splash.alpha = 1.0;
-
-        UIView *tintView = [[UIView alloc] initWithFrame:splash.contentView.bounds];
-        tintView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        UIColor *tintColor = self.adaptiveAppColor ?: [UIColor colorWithWhite:0.12 alpha:1.0];
-        tintView.backgroundColor = [tintColor colorWithAlphaComponent:0.24];
-        [splash.contentView addSubview:tintView];
-
-        UIImageView *iconView = [[UIImageView alloc] initWithFrame:CGRectMake(0, 0, 76, 76)];
-        iconView.center = CGPointMake(CGRectGetMidX(splash.contentView.bounds), CGRectGetMidY(splash.contentView.bounds));
-        iconView.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
-        iconView.layer.cornerRadius = 17.0;
-        iconView.layer.masksToBounds = YES;
-        iconView.contentMode = UIViewContentModeScaleAspectFill;
-        iconView.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.18];
-        if (self.appIconMiniView.image) {
-            iconView.image = self.appIconMiniView.image;
-        }
-        [splash.contentView addSubview:iconView];
-
-        self.splashView = splash;
-        self.largeSplashIcon = iconView;
-        [self.hostContainerProxy addSubview:self.splashView];
-    }
-
-    self.splashView.hidden = NO;
-    self.splashView.alpha = 1.0;
-    self.splashView.frame = self.hostContainerProxy.bounds;
-    [self.hostContainerProxy bringSubviewToFront:self.splashView];
-    if (self.largeSplashIcon && self.appIconMiniView.image) {
-        self.largeSplashIcon.image = self.appIconMiniView.image;
-    }
+    // Never obscure the hosted app with a synthetic blur/tint launch layer.
+    // Initial presentation is gated separately until the complete remote canvas
+    // has committed its final geometry.
+    [self.splashView removeFromSuperview];
+    self.splashView = nil;
+    self.largeSplashIcon = nil;
 }
 
 - (void)dismissLaunchSplashAnimated {
-    if (!self.splashView) return;
-
     UIView *splash = self.splashView;
-    UIImageView *icon = self.largeSplashIcon;
     self.splashView = nil;
     self.largeSplashIcon = nil;
-
-    [UIView animateWithDuration:0.35
-                          delay:0.05
-                        options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState
-                     animations:^{
-        splash.alpha = 0;
-        icon.transform = CGAffineTransformMakeScale(1.08, 1.08);
-    } completion:^(BOOL finished) {
-        [splash removeFromSuperview];
-    }];
+    [splash removeFromSuperview];
 }
 
 - (void)enforceSceneForegroundState {
@@ -3264,7 +3540,7 @@ void CV3ToggleExposeMode(void) {
 }
 
 - (void)updateSovereigntyAssertion {
-    if (!self.bundleID || self.isClosing) return;
+    if (!self.bundleID || self.isClosing || self.rbsAssertionUnsupported) return;
 
     NSString *attributeName = self.isStashed ? @"UserInitiated" : @"UserInteractive";
     if (self.rbsAssertion && [self.rbsAssertionAttributeName isEqualToString:attributeName]) return;
@@ -3312,6 +3588,16 @@ void CV3ToggleExposeMode(void) {
                          self.bundleID, attributeName);
         } else {
             [replacement invalidate];
+            // RBS domain attributes are OS-version dependent. A missing
+            // attribute is a capability mismatch, not a transient retryable
+            // failure; continuing to force Scene state makes hosting less
+            // stable on systems without these attributes.
+            NSString *failure = error.localizedDescription.lowercaseString ?: @"";
+            if ([failure containsString:@"attribute name"] ||
+                [failure containsString:@"domain plist"] ||
+                [failure containsString:@"unknown attribute"]) {
+                self.rbsAssertionUnsupported = YES;
+            }
             self.rbsAssertionFailureCount++;
             NSUInteger exponent = MIN(self.rbsAssertionFailureCount, (NSUInteger)5);
             self.rbsAssertionRetryAfter = self.rbsAssertionFailureCount >= 5
@@ -3323,6 +3609,7 @@ void CV3ToggleExposeMode(void) {
             }
         }
     } @catch (NSException *e) {
+        self.rbsAssertionUnsupported = YES;
         self.rbsAssertionFailureCount++;
         NSUInteger exponent = MIN(self.rbsAssertionFailureCount, (NSUInteger)5);
         self.rbsAssertionRetryAfter = self.rbsAssertionFailureCount >= 5
@@ -3597,7 +3884,9 @@ void CV3ToggleExposeMode(void) {
 }
 
 - (void)applyStashedGrabberOrientation {
-    self.stashGrabber.transform = self.baseRotationTransform;
+    // UIWindowScene coordinates already follow the device. Applying the same
+    // interface rotation here turns the minimized icon a second time.
+    self.stashGrabber.transform = CGAffineTransformIdentity;
 }
 
 - (void)normalizeStashedGrabberLayout {
@@ -3736,21 +4025,59 @@ void CV3ToggleExposeMode(void) {
     if (self.isStashed || self.isInLayout) return; 
     self.isInLayout = YES;
 
-    UIInterfaceOrientation activeOrientation = CV3TrustedInterfaceOrientation(self.windowScene);
+    // Scene settings are asynchronous acknowledgements. They must not replace
+    // the requested orientation while a previous transaction is still settling.
+
+    UIInterfaceOrientation activeOrientation = self.prefersLandscapePresentation &&
+        UIInterfaceOrientationIsLandscape(self.hostedContentOrientation)
+        ? self.hostedContentOrientation
+        : CV3TrustedInterfaceOrientation(self.windowScene);
+    if (self.prefersLandscapePresentation &&
+        UIInterfaceOrientationIsLandscape(self.hostedContentOrientation) &&
+        (!CV3IsValidInterfaceOrientation(activeOrientation) ||
+         !UIInterfaceOrientationIsLandscape(activeOrientation))) {
+        activeOrientation = self.hostedContentOrientation;
+    }
+    if (!CV3IsValidInterfaceOrientation(activeOrientation)) {
+        activeOrientation = UIInterfaceOrientationPortrait;
+    }
     self.targetOrientation = activeOrientation;
-    [self enforcePortraitWindowGeometry];
+
+    // Keep the UIWindow shell in the coordinate system supplied by the active
+    // display scene. Hosted content is rotated below, inside the logical root.
+    // Swapping bounds here is safe because the window transform itself remains
+    // identity, so frame/center calculations continue to use physical points.
+    BOOL wantsLandscape = UIInterfaceOrientationIsLandscape(activeOrientation);
+    BOOL shellIsLandscape = self.bounds.size.width > self.bounds.size.height;
+    if (wantsLandscape != shellIsLandscape && self.bounds.size.width > 0.0 && self.bounds.size.height > 0.0) {
+        CGSize shellSize = self.bounds.size;
+        self.bounds = CGRectMake(0, 0, shellSize.height, shellSize.width);
+    }
+
+    UIInterfaceOrientation sceneOrientation = self.windowScene
+        ? self.windowScene.interfaceOrientation
+        : UIInterfaceOrientationUnknown;
+    BOOL sceneOrientationValid = CV3IsValidInterfaceOrientation(sceneOrientation);
+    CGAffineTransform contentRotation = CGAffineTransformIdentity;
+    if (!self.prefersLandscapePresentation &&
+        (!sceneOrientationValid || sceneOrientation != activeOrientation)) {
+        contentRotation = CV3RotationTransformForInterfaceOrientation(activeOrientation);
+    }
+    // baseRotationTransform is the device orientation state consumed by the
+    // global dispatcher. Keep it canonical even when the Scene already owns
+    // the physical rotation; contentRotation is the local compensation below.
+    self.baseRotationTransform = CV3RotationTransformForInterfaceOrientation(activeOrientation);
+    self.transform = CGAffineTransformIdentity;
     
-    // [Safety] 移除在 layoutSubviews 中直接修改 bounds 的逻辑，该逻辑已移至 setTargetOrientation 或全局同步 Hook。
-    // 直接调用 super 进行基础布局。
     [super layoutSubviews];
     
     CGRect physicalFrame = self.bounds;
     CGFloat fullW = physicalFrame.size.width;
     CGFloat fullH = physicalFrame.size.height;
     
-    BOOL isLandscape = UIInterfaceOrientationIsLandscape(activeOrientation);
     CGFloat logicalW, logicalH;
-    if (isLandscape) {
+    BOOL needsManualRotation = !CGAffineTransformIsIdentity(contentRotation);
+    if (needsManualRotation) {
         logicalW = MIN(fullW, fullH);
         logicalH = MAX(fullW, fullH);
     } else {
@@ -3760,7 +4087,7 @@ void CV3ToggleExposeMode(void) {
 
     self.rootTransformContainer.bounds = CGRectMake(0, 0, logicalW, logicalH);
     self.rootTransformContainer.center = CGPointMake(fullW / 2.0, fullH / 2.0);
-    [self applyCurrentTransformWithScale:1.0];
+    self.rootTransformContainer.transform = contentRotation;
 
     self.appContentWrapper.bounds = CGRectMake(0, 0, logicalW, logicalH);
     self.appContentWrapper.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
@@ -3800,9 +4127,10 @@ void CV3ToggleExposeMode(void) {
         if (self.collisionReleaseValue > 0.001) {
             self.collisionReleaseValue = 0;
             self.collisionReleaseTime = 0;
+            CGAffineTransform releaseTransform = self.rootTransformContainer.transform;
             // 优化：解耦 layoutSubviews 递归 pass，改用平滑 Spring 过渡复位
             [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.75 initialSpringVelocity:0.5 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
-                self.rootTransformContainer.transform = CGAffineTransformIdentity;
+                self.rootTransformContainer.transform = releaseTransform;
             } completion:nil];
         }
     }
@@ -3811,6 +4139,11 @@ void CV3ToggleExposeMode(void) {
     // 4. 更新子组件布局 (基于直立的逻辑坐标系)
     self.clippingContainer.bounds = CGRectMake(0, 0, logicalW, logicalH);
     self.clippingContainer.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
+    // Do not rely solely on autoresizing here: the outer blur is the visible
+    // shell of the split window and must track the same logical bounds as the
+    // clipping container after an orientation change.
+    self.glassBackdrop.bounds = self.clippingContainer.bounds;
+    self.glassBackdrop.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
     
     CGFloat minEdge = MIN(logicalW, logicalH);
     CGFloat adaptiveRadius = MAX(CV3Style.adaptiveCornerRadiusMin, MIN(CV3Style.adaptiveCornerRadiusMax, minEdge * CV3Style.adaptiveCornerRadiusRatio));
@@ -3846,19 +4179,36 @@ void CV3ToggleExposeMode(void) {
     // 5. 更新内部 App 场景 (等比铺满算法：基于直立窗口比例动态映射虚拟画布)
     if (self.hostContainerProxy) {
         CGRect virtualBounds = [self currentHostedSceneBounds];
-        CGFloat scaleX = logicalW / MAX(virtualBounds.size.width, 1.0);
-        CGFloat scaleY = logicalH / MAX(virtualBounds.size.height, 1.0);
-        CGFloat uniformScale = MIN(scaleX, scaleY);
+        // Use exactly the same canvas as applyHostedSceneLayoutToSettings:.
+        CGFloat virtualW = MAX(CGRectGetWidth(virtualBounds), 1.0);
+        CGFloat virtualH = MAX(CGRectGetHeight(virtualBounds), 1.0);
+        // Preserve the Scene canvas. Enlarging only the host's bounds creates
+        // empty space: the remote application still renders its original size.
+        CGFloat uniformScale = MIN(logicalW / virtualW, logicalH / virtualH);
         
         if (!self.liveResizeSnapshotView && !self.isMovingWindow) {
             [self syncHostedSceneLayoutForce:NO];
         }
 
         self.hostContainerProxy.transform = CGAffineTransformIdentity;
-        self.hostContainerProxy.bounds = virtualBounds; 
+        self.hostContainerProxy.bounds = virtualBounds;
         if (self.hostView) {
             self.hostView.transform = CGAffineTransformIdentity;
             self.hostView.frame = virtualBounds;
+            [self.hostView layoutIfNeeded];
+            // FrontBoard can return a wrapper around the actual scene host.
+            // Match PullOver-X layoutContextView: resize the direct hosted
+            // children as well; changing just the wrapper leaves stale frames.
+            for (UIView *content in [self.hostView.subviews copy]) {
+                if (!CGRectEqualToRect(content.frame, self.hostView.bounds)) {
+                    CV3LogToFile(@"[HostGeometry] %@ child=%@ old=%@ canvas=%@",
+                                 self.bundleID, NSStringFromClass(content.class),
+                                 NSStringFromCGRect(content.frame), NSStringFromCGRect(self.hostView.bounds));
+                    content.frame = self.hostView.bounds;
+                }
+                content.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                [content layoutIfNeeded];
+            }
         }
         self.hostContainerProxy.layer.anchorPoint = CGPointMake(0.5, 0.5);
         self.hostContainerProxy.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
@@ -3971,6 +4321,12 @@ void CV3ToggleExposeMode(void) {
                 self.targetScene = targetScene;
                 [self setHostLifecycleState:CV3HostLifecycleStatePrepared reason:@"SceneFound"];
                 CV3LogToFile(@"[Debug] 找到场景: %@ (retries left: %d)", self.bundleID, retries);
+
+                // The initial hosted-state post can precede a cold-launched
+                // client's Darwin registration. Re-post after its Scene exists
+                // so the client bridge starts orientation and canvas reporting
+                // before the first hosted surface settles.
+                CV3PostHostedState(self.bundleID, YES);
                 
                 // Step 1: 确保 Scene 已准备好被托管
                 FBSMutableSceneSettings *settings = [[targetScene settings] mutableCopy];
@@ -4019,7 +4375,7 @@ void CV3ToggleExposeMode(void) {
                         
                         CV3LogToFile(isReused ? @"[Debug] 成功重用已有的 _UISceneLayerHostContainerView" : @"[Debug] 成功通过 _UISceneLayerHostContainerView 创建渲染视图");
                         
-                        [self finishHostingWhenRenderableWithRetries:20 generation:generation];
+                        [self finishHostingWhenRenderableWithRetries:200 generation:generation];
                     } else {
                         CV3LogToFile(@"[Error] _UISceneLayerHostContainerView 创建/重用失败");
                     }

@@ -53,6 +53,9 @@ Target: iPhone 14 Pro Max, iOS 16.5.1, RootHide.
 
 ## Video orientation
 
+- Host a landscape-only game while SpringBoard remains portrait. Confirm the shell, proxy and remote content fill the same landscape canvas, including after the initial scene acknowledgement.
+- Show and dismiss a non-video controller inside that game; verify it never requests a portrait scene or leaves a square surface inside the landscape shell.
+- Switch landscape-left to landscape-right while hosted and verify the orientation map updates without repeated scene transactions at rest.
 - In a hosted App, enter fullscreen video in landscape-left and landscape-right.
 - Confirm only that App's hosted content changes orientation.
 - Dismiss fullscreen video and verify the content returns to portrait.

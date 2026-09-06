@@ -12,12 +12,134 @@ static const char *CV3HostGenerationNotification = "com.xu.chevronv3.host-genera
 static int CV3VideoOrientationNotificationToken = -1;
 static int CV3PlaybackTraceNotificationToken = -1;
 static UIInterfaceOrientation CV3RequestedInterfaceOrientation = UIInterfaceOrientationUnknown;
+static __weak UIViewController *CV3VideoOrientationOwner = nil;
+static UIInterfaceOrientation CV3OrientationBeforeVideo = UIInterfaceOrientationUnknown;
 static int CV3HostedStateNotificationToken = -1;
 static int CV3HostGenerationNotificationToken = -1;
 static BOOL CV3ApplicationIsChevronHosted = NO;
 static BOOL CV3WorkspaceTransitionShieldActive = NO;
 static NSTimeInterval CV3PlaybackTransitionGraceDeadline = 0;
-static const uint64_t CV3ClientBridgeProtocolVersion = 0x2026072001ULL;
+static const uint64_t CV3ClientBridgeProtocolVersion = 0x2026090602ULL;
+static NSTimer *CV3CanvasTimer = nil;
+static int CV3CanvasNotificationToken = -1;
+static NSString *CV3CanvasNotificationName = nil;
+
+static NSString *CV3CanvasTracePath(void) {
+    return [NSTemporaryDirectory() stringByAppendingPathComponent:@"ChevronV3CanvasTrace.log"];
+}
+
+static void CV3AppendCanvasTrace(NSString *line) {
+    if (line.length == 0) return;
+    NSString *record = [NSString stringWithFormat:@"%.6f %@\n", CACurrentMediaTime(), line];
+    NSData *data = [record dataUsingEncoding:NSUTF8StringEncoding];
+    NSString *path = CV3CanvasTracePath();
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
+    }
+    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+    [handle seekToEndOfFile];
+    [handle writeData:data];
+    [handle closeFile];
+}
+
+static NSString *CV3TraceLayerValue(id object, NSString *key) {
+    @try {
+        id value = [object valueForKey:key];
+        return value ? [value description] : @"nil";
+    } @catch (__unused NSException *exception) {
+        return @"n/a";
+    }
+}
+
+static void CV3TraceLayerTree(CALayer *layer, NSString *path, NSUInteger depth) {
+    if (!layer || depth > 12) return;
+    CALayer *presentation = layer.presentationLayer;
+    CV3AppendCanvasTrace([NSString stringWithFormat:
+        @"[DEBUG-canvas-layer] %@ class=%@ frame=%@ bounds=%@ position=%@ transform=%@ contentsRect=%@ contentsScale=%.3f gravity=%@ hidden=%d opacity=%.3f delegate=%@ contents=%@ drawableSize=%@ contextId=%@ presentationFrame=%@ presentationBounds=%@ animations=%@",
+        path, NSStringFromClass(layer.class), NSStringFromCGRect(layer.frame), NSStringFromCGRect(layer.bounds),
+        NSStringFromCGPoint(layer.position), NSStringFromCGAffineTransform(layer.affineTransform),
+        NSStringFromCGRect(layer.contentsRect), layer.contentsScale, layer.contentsGravity,
+        layer.hidden, layer.opacity, NSStringFromClass([layer.delegate class]),
+        CV3TraceLayerValue(layer, @"contents"), CV3TraceLayerValue(layer, @"drawableSize"),
+        CV3TraceLayerValue(layer, @"contextId"),
+        presentation ? NSStringFromCGRect(presentation.frame) : @"nil",
+        presentation ? NSStringFromCGRect(presentation.bounds) : @"nil",
+        layer.animationKeys ?: @[]]);
+    NSUInteger index = 0;
+    for (CALayer *child in layer.sublayers ?: @[]) {
+        CV3TraceLayerTree(child, [path stringByAppendingFormat:@".%lu", (unsigned long)index++], depth + 1);
+    }
+}
+
+static void CV3TraceViewTree(UIView *view, NSString *path, NSUInteger depth) {
+    if (!view || depth > 12) return;
+    CV3AppendCanvasTrace([NSString stringWithFormat:
+        @"[DEBUG-canvas-view] %@ class=%@ frame=%@ bounds=%@ transform=%@ hidden=%d alpha=%.3f contentMode=%ld layerClass=%@ subviews=%lu",
+        path, NSStringFromClass(view.class), NSStringFromCGRect(view.frame), NSStringFromCGRect(view.bounds),
+        NSStringFromCGAffineTransform(view.transform), view.hidden, view.alpha, (long)view.contentMode,
+        NSStringFromClass(view.layer.class), (unsigned long)view.subviews.count]);
+    NSUInteger index = 0;
+    for (UIView *child in view.subviews ?: @[]) {
+        CV3TraceViewTree(child, [path stringByAppendingFormat:@".%lu", (unsigned long)index++], depth + 1);
+    }
+}
+
+static void CV3DumpCanvasTrace(NSString *tag) {
+    CV3AppendCanvasTrace([NSString stringWithFormat:@"[DEBUG-canvas-sample] BEGIN %@ hosted=%d", tag, CV3ApplicationIsChevronHosted]);
+    NSUInteger sceneIndex = 0;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        UIWindowScene *windowScene = (UIWindowScene *)scene;
+        CV3AppendCanvasTrace([NSString stringWithFormat:
+            @"[DEBUG-canvas-scene] %@.%lu activation=%ld orientation=%ld coordinate=%@ screen=%@ windows=%lu",
+            tag, (unsigned long)sceneIndex, (long)windowScene.activationState,
+            (long)windowScene.interfaceOrientation, NSStringFromCGRect(windowScene.coordinateSpace.bounds),
+            NSStringFromCGRect(windowScene.screen.bounds), (unsigned long)windowScene.windows.count]);
+        NSUInteger windowIndex = 0;
+        for (UIWindow *window in windowScene.windows) {
+            NSString *base = [NSString stringWithFormat:@"%@.S%lu.W%lu", tag,
+                              (unsigned long)sceneIndex, (unsigned long)windowIndex++];
+            CV3AppendCanvasTrace([NSString stringWithFormat:
+                @"[DEBUG-canvas-window] %@ class=%@ frame=%@ bounds=%@ transform=%@ level=%.3f hidden=%d alpha=%.3f key=%d root=%@",
+                base, NSStringFromClass(window.class), NSStringFromCGRect(window.frame), NSStringFromCGRect(window.bounds),
+                NSStringFromCGAffineTransform(window.transform), window.windowLevel, window.hidden, window.alpha,
+                window.isKeyWindow, NSStringFromClass(window.rootViewController.class)]);
+            CV3TraceViewTree(window, [base stringByAppendingString:@".V"], 0);
+            CV3TraceLayerTree(window.layer, [base stringByAppendingString:@".L"], 0);
+        }
+        sceneIndex++;
+    }
+    CV3AppendCanvasTrace([NSString stringWithFormat:@"[DEBUG-canvas-sample] END %@", tag]);
+}
+
+static BOOL CV3RepairHostedVideoLayerTree(CALayer *root, CGSize canvasSize) {
+    if (!root || canvasSize.width <= canvasSize.height) return NO;
+
+    __block BOOL repaired = NO;
+    for (CALayer *child in root.sublayers ?: @[]) {
+        CGSize parentSize = child.superlayer.bounds.size;
+        CGSize childSize = child.bounds.size;
+        BOOL parentMatchesCanvas = fabs(parentSize.width - canvasSize.width) <= 1.0 &&
+            fabs(parentSize.height - canvasSize.height) <= 1.0;
+        BOOL childIsTransposedCanvas = fabs(childSize.width - canvasSize.height) <= 1.0 &&
+            fabs(childSize.height - canvasSize.width) <= 1.0;
+        if ([child isKindOfClass:AVPlayerLayer.class] && parentMatchesCanvas && childIsTransposedCanvas) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            child.frame = child.superlayer.bounds;
+            [child setNeedsLayout];
+            [child layoutIfNeeded];
+            [CATransaction commit];
+            CV3AppendCanvasTrace([NSString stringWithFormat:
+                @"[DEBUG-canvas-repair] AVPlayerLayer %@ -> %@ parent=%@ videoGravity=%@",
+                NSStringFromCGSize(childSize), NSStringFromCGSize(child.bounds.size),
+                NSStringFromCGSize(parentSize), ((AVPlayerLayer *)child).videoGravity]);
+            repaired = YES;
+        }
+        repaired |= CV3RepairHostedVideoLayerTree(child, canvasSize);
+    }
+    return repaired;
+}
 
 typedef struct CV3SBIconImageInfo {
     CGSize size;
@@ -169,6 +291,64 @@ static void CV3RefreshHostedState(int token) {
         CV3ApplicationIsChevronHosted = (flags & 1) != 0;
         CV3WorkspaceTransitionShieldActive = (flags & 2) != 0;
         if (previousHosted != CV3ApplicationIsChevronHosted) {
+            [CV3CanvasTimer invalidate];
+            CV3CanvasTimer = nil;
+            NSString *canvasName = [NSString stringWithFormat:@"com.xu.chevronv3.canvas.%@", NSBundle.mainBundle.bundleIdentifier];
+            if (CV3CanvasNotificationToken < 0 || ![CV3CanvasNotificationName isEqualToString:canvasName]) {
+                if (CV3CanvasNotificationToken >= 0) notify_cancel(CV3CanvasNotificationToken);
+                CV3CanvasNotificationToken = -1;
+                CV3CanvasNotificationName = [canvasName copy];
+                notify_register_check(canvasName.UTF8String, &CV3CanvasNotificationToken);
+            }
+            if (CV3CanvasNotificationToken >= 0) {
+                notify_set_state(CV3CanvasNotificationToken, 0);
+            }
+            if (CV3ApplicationIsChevronHosted) {
+                CV3CanvasTimer = [NSTimer timerWithTimeInterval:0.15 repeats:YES block:^(NSTimer *timer) {
+                    uint64_t geometry = 0;
+                    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+                        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+                        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+                            if (window.hidden || window.alpha < 0.01 || !window.rootViewController) continue;
+                            if (window.windowLevel != UIWindowLevelNormal) continue;
+                            CGSize size = window.bounds.size;
+                            CGSize rootSize = window.rootViewController.viewIfLoaded.bounds.size;
+                            CV3RepairHostedVideoLayerTree(window.layer, size);
+                            if (fabs(size.width - rootSize.width) > 1 || fabs(size.height - rootSize.height) > 1) continue;
+                            geometry = ((uint64_t)llround(size.width) << 16) | (uint64_t)llround(size.height);
+                            break;
+                        }
+                        if (geometry) break;
+                    }
+                    // Keep a registered token alive for the lifetime of the
+                    // client. Darwin notification state is tied to registered
+                    // names and can disappear when the last transient token is
+                    // cancelled before SpringBoard reads it.
+                    if (CV3CanvasNotificationToken >= 0) {
+                        notify_set_state(CV3CanvasNotificationToken, geometry);
+                    }
+                }];
+                [[NSRunLoop mainRunLoop] addTimer:CV3CanvasTimer forMode:NSRunLoopCommonModes];
+                // Unity-style game loops may never enter the default run-loop
+                // mode during startup. Publish the first sample immediately so
+                // the host does not remain stuck at a synthetic 0x0 canvas.
+                [CV3CanvasTimer fire];
+                [@"" writeToFile:CV3CanvasTracePath()
+                          atomically:YES
+                            encoding:NSUTF8StringEncoding
+                               error:nil];
+                CV3DumpCanvasTrace(@"t+0.0");
+                NSArray<NSNumber *> *delays = @[@0.1, @0.5, @1.0, @2.0, @4.0];
+                for (NSNumber *delay in delays) {
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                                 (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                                   dispatch_get_main_queue(), ^{
+                        if (CV3ApplicationIsChevronHosted) {
+                            CV3DumpCanvasTrace([NSString stringWithFormat:@"t+%.1f", delay.doubleValue]);
+                        }
+                    });
+                }
+            }
             CV3PostPlaybackTrace(CV3ApplicationIsChevronHosted
                                  ? CV3PlaybackTraceHostedEnabled
                                  : CV3PlaybackTraceHostedDisabled);
@@ -181,6 +361,9 @@ static void CV3RefreshHostedState(int token) {
         NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
         if (!CV3ApplicationIsChevronHosted) {
             CV3PlaybackTransitionGraceDeadline = 0;
+            CV3RequestedInterfaceOrientation = UIInterfaceOrientationUnknown;
+            CV3VideoOrientationOwner = nil;
+            CV3OrientationBeforeVideo = UIInterfaceOrientationUnknown;
         } else if (CV3WorkspaceTransitionShieldActive) {
             CV3PlaybackTransitionGraceDeadline = now + 60.0;
         } else if (previousShield) {
@@ -385,9 +568,15 @@ static void CV3PostOrientationForController(UIViewController *controller) {
     UIInterfaceOrientation orientation = CV3InterfaceOrientationForMask(supportedOrientations,
                                                                          preferredOrientation);
     if (UIInterfaceOrientationIsLandscape(orientation) && CV3ControllerLikelyOwnsFullscreenVideo(controller)) {
+        if (!CV3VideoOrientationOwner) {
+            CV3OrientationBeforeVideo = controller.viewIfLoaded.window.windowScene.interfaceOrientation;
+        }
+        CV3VideoOrientationOwner = controller;
         CV3PostVideoOrientation(orientation);
-    } else if (CV3RequestedInterfaceOrientation != UIInterfaceOrientationUnknown) {
-        CV3PostVideoOrientation(UIInterfaceOrientationPortrait);
+    } else if (CV3VideoOrientationOwner == controller) {
+        CV3VideoOrientationOwner = nil;
+        CV3PostVideoOrientation(CV3OrientationBeforeVideo);
+        CV3OrientationBeforeVideo = UIInterfaceOrientationUnknown;
     }
 }
 
@@ -430,13 +619,23 @@ static BOOL CV3ControllerLikelyOwnsFullscreenVideo(UIViewController *controller)
 - (void)viewDidAppear:(BOOL)animated {
     %orig(animated);
     CV3PostOrientationForController(self);
+#ifdef DEBUG
+    if (CV3ApplicationIsChevronHosted) {
+        UIWindow *window = self.viewIfLoaded.window;
+        NSLog(@"[CV3ClientGeometry] scene=%@ orientation=%ld window=%@ root=%@",
+              NSStringFromCGRect(window.windowScene.coordinateSpace.bounds),
+              (long)window.windowScene.interfaceOrientation,
+              NSStringFromCGRect(window.bounds), NSStringFromCGRect(self.viewIfLoaded.bounds));
+    }
+#endif
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
     %orig(animated);
-    if (CV3RequestedInterfaceOrientation != UIInterfaceOrientationUnknown &&
-        CV3ControllerLikelyOwnsFullscreenVideo(self)) {
-        CV3PostVideoOrientation(UIInterfaceOrientationPortrait);
+    if (CV3VideoOrientationOwner == self) {
+        CV3VideoOrientationOwner = nil;
+        CV3PostVideoOrientation(CV3OrientationBeforeVideo);
+        CV3OrientationBeforeVideo = UIInterfaceOrientationUnknown;
     }
 }
 %end
