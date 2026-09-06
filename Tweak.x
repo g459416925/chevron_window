@@ -191,6 +191,16 @@ static void CV3PostHostedState(NSString *bundleID, BOOL hosted);
 + (instancetype)attributeWithDomain:(NSString *)arg1 name:(NSString *)arg2;
 @end
 
+@interface BKSProcessAssertion : NSObject
+- (instancetype)initWithBundleIdentifier:(NSString *)identifier
+                                    flags:(NSUInteger)flags
+                                   reason:(NSUInteger)reason
+                                     name:(NSString *)name
+                              withHandler:(id)handler;
+- (BOOL)valid;
+- (void)invalidate;
+@end
+
 @interface FBProcessTerminationContext : NSObject
 @property (assign, nonatomic) unsigned long long exceptionCode;
 @property (copy, nonatomic) NSString *explanation;
@@ -761,19 +771,7 @@ static BOOL CV3ShouldRewriteSceneSettings(FBScene *scene, NSString *bundleID, id
     return YES;
 }
 
-static BOOL CV3SceneIsForegroundForContentState(FBScene *scene) {
-    id settings = scene.settings;
-    id foreground = CV3SafeSettingValue(settings, @"foreground");
-    id backgrounded = CV3SafeSettingValue(settings, @"backgrounded");
-    id occluded = CV3SafeSettingValue(settings, @"occluded");
-    return foreground && [foreground boolValue] &&
-           (!backgrounded || ![backgrounded boolValue]) &&
-           (!occluded || ![occluded boolValue]);
-}
-
 static BOOL CV3ShouldForceSceneContentState(FBScene *scene, NSString *bundleID) {
-    if (!CV3SceneIsForegroundForContentState(scene)) return NO;
-
     NSString *key = CV3SceneGateKey(scene, bundleID);
     NSTimeInterval now = CACurrentMediaTime();
     @synchronized ([NSObject class]) {
@@ -1561,7 +1559,7 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, assign) BOOL isFullscreenMode;
 @property (nonatomic, assign) BOOL isCompactMode;
 @property (nonatomic, strong) UIView *liveResizeSnapshotView;
-@property (nonatomic, strong) RBSAssertion *rbsAssertion;
+@property (nonatomic, strong) id rbsAssertion;
 @property (nonatomic, copy) NSString *rbsAssertionAttributeName;
 @property (nonatomic, copy) NSString *rbsAssertionLastAttemptedAttributeName;
 @property (nonatomic, assign) NSUInteger rbsAssertionFailureCount;
@@ -1580,6 +1578,9 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, assign) UIViewAutoresizing exposeContentOriginalAutoresizingMask;
 @property (nonatomic, assign) BOOL exposeContentOriginalUserInteractionEnabled;
 @property (nonatomic, strong) NSTimer *assertionWatchdogTimer;
+@property (nonatomic, strong) NSTimer *receptionTraceTimer;
+@property (nonatomic, copy) NSString *lastReceptionTraceSignature;
+@property (nonatomic, assign) NSTimeInterval lastReceptionTraceHeartbeatTime;
 @property (nonatomic, assign) NSUInteger sceneHostGeneration;
 @property (nonatomic, assign) CV3HostLifecycleState hostLifecycleState;
 @property (nonatomic, assign) NSUInteger hostContentFailureCount;
@@ -1663,6 +1664,8 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 - (void)ensureLaunchSplashVisible;
 - (void)recordColdLaunchMilestone:(NSString *)milestone details:(NSString *)details;
 - (void)recordOrientationTrace:(NSString *)phase force:(BOOL)force;
+- (void)recordReceptionTrace:(NSString *)phase force:(BOOL)force;
+- (void)receptionTraceTimerFired:(NSTimer *)timer;
 - (void)loadAppScene;
 - (UIEdgeInsets)currentSafeAreaInsets;
 - (void)dismissLaunchSplashAnimated;
@@ -4940,10 +4943,14 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
                                                          clearDeactivation:YES
                                                                forceLayout:NO];
 
-                if (modified && CV3ShouldRewriteSceneSettings((FBScene *)self, win.bundleID, mutableSettings)) {
-                    CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=FBSceneSettingsRewritten bundle=%@ transition=%@",
-                                 win.bundleID, arg2 ? @"YES" : @"NO");
-                    CV3LogToFile(@"[FBScene] 捕捉到 Settings 更新请求: %@", win.bundleID);
+                if (modified) {
+                    if (CV3ShouldRewriteSceneSettings((FBScene *)self, win.bundleID, mutableSettings)) {
+                        CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=FBSceneSettingsRewritten bundle=%@ transition=%@",
+                                     win.bundleID, arg2 ? @"YES" : @"NO");
+                        CV3LogToFile(@"[FBScene] 捕捉到 Settings 更新请求: %@", win.bundleID);
+                    }
+                    // The gate only throttles diagnostics. Passing arg1 here
+                    // allowed FrontBoard's background settings to escape.
                     %orig(mutableSettings, arg2);
                 } else {
                     %orig(arg1, arg2);
@@ -4979,10 +4986,12 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
                                                          clearDeactivation:YES
                                                                forceLayout:NO];
 
-                if (modified && CV3ShouldRewriteSceneSettings((FBScene *)self, win.bundleID, mutableSettings)) {
-                    CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=FBSceneSettingsRewrittenWithCompletion bundle=%@ transition=%@",
-                                 win.bundleID, arg2 ? @"YES" : @"NO");
-                    CV3LogToFile(@"[FBScene] 捕捉到 Settings 更新请求 (带 completion): %@", win.bundleID);
+                if (modified) {
+                    if (CV3ShouldRewriteSceneSettings((FBScene *)self, win.bundleID, mutableSettings)) {
+                        CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=FBSceneSettingsRewrittenWithCompletion bundle=%@ transition=%@",
+                                     win.bundleID, arg2 ? @"YES" : @"NO");
+                        CV3LogToFile(@"[FBScene] 捕捉到 Settings 更新请求 (带 completion): %@", win.bundleID);
+                    }
                     %orig(mutableSettings, arg2, arg3);
                 } else {
                     %orig(arg1, arg2, arg3);
@@ -5011,10 +5020,12 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
                     %orig(arg1);
                     return;
                 }
-                if (arg1 != 2 && CV3ShouldForceSceneContentState((FBScene *)self, win.bundleID)) {
-                    CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=FBSceneContentStateDowngrade bundle=%@ requested=%ld forced=2",
-                                 win.bundleID, (long)arg1);
-                    CV3LogToFile(@"[FBScene] 拦截到 contentState 降级 -> %ld，强制恢复为 2: %@", (long)arg1, win.bundleID);
+                if (arg1 != 2) {
+                    if (CV3ShouldForceSceneContentState((FBScene *)self, win.bundleID)) {
+                        CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=FBSceneContentStateDowngrade bundle=%@ requested=%ld forced=2",
+                                     win.bundleID, (long)arg1);
+                        CV3LogToFile(@"[FBScene] 拦截到 contentState 降级 -> %ld，强制恢复为 2: %@", (long)arg1, win.bundleID);
+                    }
                     arg1 = 2;
                 }
                 break;

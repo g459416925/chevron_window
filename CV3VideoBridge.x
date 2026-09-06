@@ -25,6 +25,13 @@ static NSTimer *CV3CanvasTimer = nil;
 static int CV3CanvasNotificationToken = -1;
 static NSString *CV3CanvasNotificationName = nil;
 static NSString *CV3LastClientDirectionSignature = nil;
+static NSString *CV3LastClientReceptionSignature = nil;
+static NSTimeInterval CV3LastClientReceptionHeartbeatTime = 0;
+static BOOL CV3ShouldProtectHostedPlayback(void);
+static volatile uint64_t CV3MetalDrawableRequestCount = 0;
+static volatile uint64_t CV3VideoPixelBufferCopyCount = 0;
+static volatile CFTimeInterval CV3LastMetalDrawableRequestTime = 0;
+static volatile CFTimeInterval CV3LastVideoPixelBufferCopyTime = 0;
 
 static NSString *CV3CanvasTracePath(void) {
     return [NSTemporaryDirectory() stringByAppendingPathComponent:@"ChevronV3CanvasTrace.log"];
@@ -32,6 +39,9 @@ static NSString *CV3CanvasTracePath(void) {
 
 static void CV3AppendCanvasTrace(NSString *line) {
     if (line.length == 0) return;
+    if ([line containsString:@"[ReceptionTrace][Client]"]) {
+        NSLog(@"%@", line);
+    }
     NSString *record = [NSString stringWithFormat:@"%.6f %@\n", CACurrentMediaTime(), line];
     NSData *data = [record dataUsingEncoding:NSUTF8StringEncoding];
     NSString *path = CV3CanvasTracePath();
@@ -143,6 +153,89 @@ static AVPlayerLayer *CV3FirstPlayerLayer(CALayer *layer) {
         if (result) return result;
     }
     return nil;
+}
+
+static void CV3CollectClientReceptionLayers(CALayer *layer,
+                                            NSString *path,
+                                            NSUInteger depth,
+                                            NSMutableArray<NSString *> *entries) {
+    if (!layer || depth > 12 || entries.count >= 64) return;
+    BOOL isPlayer = [layer isKindOfClass:AVPlayerLayer.class];
+    BOOL isMetal = [NSStringFromClass(layer.class) containsString:@"Metal"];
+    if (isPlayer || isMetal) {
+        CALayer *presentation = layer.presentationLayer;
+        NSMutableString *entry = [NSMutableString stringWithFormat:
+            @"%@:%@ frame=%@ hidden=%d opacity=%.2f contents=%@ drawable=%@ pres=%@",
+            path, NSStringFromClass(layer.class), NSStringFromCGRect(layer.frame), layer.hidden, layer.opacity,
+            CV3TraceLayerValue(layer, @"contents"), CV3TraceLayerValue(layer, @"drawableSize"),
+            presentation ? NSStringFromCGRect(presentation.frame) : @"nil"];
+        if (isPlayer) {
+            AVPlayer *player = ((AVPlayerLayer *)layer).player;
+            AVPlayerItem *item = player.currentItem;
+            [entry appendFormat:@" player=%p rate=%.3f timeControl=%ld reason=%@ item=%p itemStatus=%ld error=%@",
+                player, player.rate, (long)player.timeControlStatus, player.reasonForWaitingToPlay,
+                item, (long)item.status, item.error];
+        }
+        [entries addObject:entry];
+    }
+    NSUInteger index = 0;
+    for (CALayer *child in layer.sublayers ?: @[]) {
+        CV3CollectClientReceptionLayers(child, [path stringByAppendingFormat:@".%lu", (unsigned long)index++],
+                                        depth + 1, entries);
+    }
+}
+
+static void CV3RecordClientReceptionTrace(NSString *phase, BOOL force) {
+    if (!CV3ApplicationIsChevronHosted && !force) return;
+    NSMutableArray<NSString *> *windows = [NSMutableArray array];
+    NSUInteger sceneIndex = 0;
+    for (UIScene *sceneObject in UIApplication.sharedApplication.connectedScenes) {
+        if (![sceneObject isKindOfClass:UIWindowScene.class]) continue;
+        UIWindowScene *scene = (UIWindowScene *)sceneObject;
+        NSUInteger windowIndex = 0;
+        for (UIWindow *window in scene.windows) {
+            NSMutableArray<NSString *> *layers = [NSMutableArray array];
+            CV3CollectClientReceptionLayers(window.layer, @"L", 0, layers);
+            [windows addObject:[NSString stringWithFormat:
+                @"S%lu.W%lu sceneActivation=%ld sceneOrientation=%ld hidden=%d alpha=%.2f key=%d "
+                 "frame=%@ bounds=%@ root=%@ layers=[%@]",
+                (unsigned long)sceneIndex, (unsigned long)windowIndex++, (long)scene.activationState,
+                (long)scene.interfaceOrientation, window.hidden, window.alpha, window.isKeyWindow,
+                NSStringFromCGRect(window.frame), NSStringFromCGRect(window.bounds),
+                NSStringFromClass(window.rootViewController.class), [layers componentsJoinedByString:@" | "]]];
+        }
+        sceneIndex++;
+    }
+    NSString *signature = [NSString stringWithFormat:
+        @"hosted=%d shield=%d appState=%ld protected=%d metalDrawableRequests=%llu metalAge=%.3f "
+         "videoPixelCopies=%llu videoAge=%.3f windows=%@",
+        CV3ApplicationIsChevronHosted, CV3WorkspaceTransitionShieldActive,
+        (long)UIApplication.sharedApplication.applicationState,
+        CV3ShouldProtectHostedPlayback(), (unsigned long long)CV3MetalDrawableRequestCount,
+        CV3LastMetalDrawableRequestTime > 0 ? CACurrentMediaTime() - CV3LastMetalDrawableRequestTime : -1.0,
+        (unsigned long long)CV3VideoPixelBufferCopyCount,
+        CV3LastVideoPixelBufferCopyTime > 0 ? CACurrentMediaTime() - CV3LastVideoPixelBufferCopyTime : -1.0,
+        [windows componentsJoinedByString:@" || "]];
+    NSTimeInterval now = CACurrentMediaTime();
+    BOOL changed = ![signature isEqualToString:CV3LastClientReceptionSignature];
+    BOOL heartbeatDue = now - CV3LastClientReceptionHeartbeatTime >= 2.0;
+    if (!force && !changed && !heartbeatDue) return;
+    CV3LastClientReceptionSignature = signature;
+    CV3LastClientReceptionHeartbeatTime = now;
+    CV3AppendCanvasTrace([NSString stringWithFormat:@"[ReceptionTrace][Client] event=%@ phase=%@ %@",
+        changed ? @"change" : @"heartbeat", phase ?: @"unknown", signature]);
+}
+
+static void CV3RecordClientReceptionLifecycleEvent(NSNotificationName name) {
+    if (!CV3ApplicationIsChevronHosted || name.length == 0) return;
+    NSString *phase = [@"lifecycle.notification." stringByAppendingString:name];
+    if ([NSThread isMainThread]) {
+        CV3RecordClientReceptionTrace(phase, YES);
+    } else {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CV3RecordClientReceptionTrace(phase, YES);
+        });
+    }
 }
 
 static void CV3RecordClientDirectionTrace(UIWindowScene *scene,
@@ -372,6 +465,14 @@ static void CV3RefreshHostedState(int token) {
             [CV3CanvasTimer invalidate];
             CV3CanvasTimer = nil;
             CV3LastClientDirectionSignature = nil;
+            CV3LastClientReceptionSignature = nil;
+            if (CV3ApplicationIsChevronHosted) {
+                CV3MetalDrawableRequestCount = 0;
+                CV3VideoPixelBufferCopyCount = 0;
+                CV3LastMetalDrawableRequestTime = 0;
+                CV3LastVideoPixelBufferCopyTime = 0;
+            }
+            CV3RecordClientReceptionTrace(CV3ApplicationIsChevronHosted ? @"hosted.begin" : @"hosted.end", YES);
             NSString *canvasName = [NSString stringWithFormat:@"com.xu.chevronv3.canvas.%@", NSBundle.mainBundle.bundleIdentifier];
             if (CV3CanvasNotificationToken < 0 || ![CV3CanvasNotificationName isEqualToString:canvasName]) {
                 if (CV3CanvasNotificationToken >= 0) notify_cancel(CV3CanvasNotificationToken);
@@ -420,6 +521,7 @@ static void CV3RefreshHostedState(int token) {
                     if (CV3CanvasNotificationToken >= 0) {
                         notify_set_state(CV3CanvasNotificationToken, geometry);
                     }
+                    CV3RecordClientReceptionTrace(@"timer", NO);
                 }];
                 [[NSRunLoop mainRunLoop] addTimer:CV3CanvasTimer forMode:NSRunLoopCommonModes];
                 // Unity-style game loops may never enter the default run-loop
@@ -474,9 +576,10 @@ static void CV3RefreshHostedState(int token) {
 }
 
 static BOOL CV3ShouldProtectHostedPlayback(void) {
-    if (!CV3ApplicationIsChevronHosted) return NO;
-    if (CV3WorkspaceTransitionShieldActive) return YES;
-    return [NSDate timeIntervalSinceReferenceDate] < CV3PlaybackTransitionGraceDeadline;
+    // The hosted-state lease already excludes stashed and closing windows.
+    // Keep lifecycle/playback protection active for that whole lease instead
+    // of relying on transition callbacks, which miss some iOS 16 paths.
+    return CV3ApplicationIsChevronHosted;
 }
 
 static BOOL CV3IsLifecycleDeactivationNotification(NSNotificationName name) {
@@ -485,6 +588,14 @@ static BOOL CV3IsLifecycleDeactivationNotification(NSNotificationName name) {
            [name isEqualToString:UIApplicationDidEnterBackgroundNotification] ||
            [name isEqualToString:UISceneWillDeactivateNotification] ||
            [name isEqualToString:UISceneDidEnterBackgroundNotification];
+}
+
+static BOOL CV3IsLifecycleTraceNotification(NSNotificationName name) {
+    if (CV3IsLifecycleDeactivationNotification(name)) return YES;
+    return [name isEqualToString:UIApplicationDidBecomeActiveNotification] ||
+           [name isEqualToString:UIApplicationWillEnterForegroundNotification] ||
+           [name isEqualToString:UISceneDidActivateNotification] ||
+           [name isEqualToString:UISceneWillEnterForegroundNotification];
 }
 
 static BOOL CV3IsAppSuspensionAudioInterruption(NSDictionary *userInfo) {
@@ -687,6 +798,28 @@ static BOOL CV3ControllerLikelyOwnsFullscreenVideo(UIViewController *controller)
 
 %group CV3HostedAppHooks
 
+%hook CAMetalLayer
+- (id)nextDrawable {
+    if (CV3ApplicationIsChevronHosted) {
+        __sync_add_and_fetch(&CV3MetalDrawableRequestCount, 1);
+        CV3LastMetalDrawableRequestTime = CACurrentMediaTime();
+    }
+    return %orig;
+}
+%end
+
+%hook AVPlayerItemVideoOutput
+- (CVPixelBufferRef)copyPixelBufferForItemTime:(CMTime)itemTime
+                           itemTimeForDisplay:(CMTime *)outItemTimeForDisplay {
+    CVPixelBufferRef buffer = %orig(itemTime, outItemTimeForDisplay);
+    if (CV3ApplicationIsChevronHosted && buffer) {
+        __sync_add_and_fetch(&CV3VideoPixelBufferCopyCount, 1);
+        CV3LastVideoPixelBufferCopyTime = CACurrentMediaTime();
+    }
+    return buffer;
+}
+%end
+
 %hook UIWindowScene
 - (void)requestGeometryUpdateWithPreferences:(id)preferences errorHandler:(id)errorHandler {
     SEL selector = NSSelectorFromString(@"interfaceOrientations");
@@ -765,23 +898,35 @@ static BOOL CV3ControllerLikelyOwnsFullscreenVideo(UIViewController *controller)
 %hook AVPlayer
 - (void)pause {
     if (CV3ApplicationIsChevronHosted) CV3PostPlaybackTrace(CV3PlaybackTraceAVPlayerPause);
+    if (CV3ApplicationIsChevronHosted) CV3RecordClientReceptionTrace(@"AVPlayer.pause.before", YES);
     if (CV3ShouldProtectHostedPlayback()) {
         NSLog(@"[ChevronV3VideoBridge] Suppressed AVPlayer pause during workspace transition");
         return;
     }
     %orig;
+    if (CV3ApplicationIsChevronHosted) {
+        dispatch_async(dispatch_get_main_queue(), ^{ CV3RecordClientReceptionTrace(@"AVPlayer.pause.after", YES); });
+    }
 }
 
 - (void)setRate:(float)rate {
     if (rate == 0.0f && CV3ApplicationIsChevronHosted) CV3PostPlaybackTrace(CV3PlaybackTraceAVPlayerRateZero);
+    if (rate == 0.0f && CV3ApplicationIsChevronHosted) CV3RecordClientReceptionTrace(@"AVPlayer.setRateZero.before", YES);
     if (rate == 0.0f && CV3ShouldProtectHostedPlayback()) return;
     %orig(rate);
+    if (rate == 0.0f && CV3ApplicationIsChevronHosted) {
+        dispatch_async(dispatch_get_main_queue(), ^{ CV3RecordClientReceptionTrace(@"AVPlayer.setRateZero.after", YES); });
+    }
 }
 
 - (void)setRate:(float)rate time:(CMTime)itemTime atHostTime:(CMTime)hostClockTime {
     if (rate == 0.0f && CV3ApplicationIsChevronHosted) CV3PostPlaybackTrace(CV3PlaybackTraceAVPlayerTimedRateZero);
+    if (rate == 0.0f && CV3ApplicationIsChevronHosted) CV3RecordClientReceptionTrace(@"AVPlayer.setTimedRateZero.before", YES);
     if (rate == 0.0f && CV3ShouldProtectHostedPlayback()) return;
     %orig(rate, itemTime, hostClockTime);
+    if (rate == 0.0f && CV3ApplicationIsChevronHosted) {
+        dispatch_async(dispatch_get_main_queue(), ^{ CV3RecordClientReceptionTrace(@"AVPlayer.setTimedRateZero.after", YES); });
+    }
 }
 %end
 
@@ -844,6 +989,9 @@ withApplicationOfDeactivationReasons:(NSUInteger)reasons
 
 %hook NSNotificationCenter
 - (void)postNotification:(NSNotification *)notification {
+    if (CV3IsLifecycleTraceNotification(notification.name)) {
+        CV3RecordClientReceptionLifecycleEvent(notification.name);
+    }
     if (CV3ShouldProtectHostedPlayback() &&
         CV3IsLifecycleDeactivationNotification(notification.name)) {
         CV3PostPlaybackTrace(CV3PlaybackTraceLifecycleNotification);
@@ -857,6 +1005,9 @@ withApplicationOfDeactivationReasons:(NSUInteger)reasons
 }
 
 - (void)postNotificationName:(NSNotificationName)name object:(id)object {
+    if (CV3IsLifecycleTraceNotification(name)) {
+        CV3RecordClientReceptionLifecycleEvent(name);
+    }
     if (CV3ShouldProtectHostedPlayback() &&
         CV3IsLifecycleDeactivationNotification(name)) {
         CV3PostPlaybackTrace(CV3PlaybackTraceLifecycleNotification);
@@ -866,6 +1017,9 @@ withApplicationOfDeactivationReasons:(NSUInteger)reasons
 }
 
 - (void)postNotificationName:(NSNotificationName)name object:(id)object userInfo:(NSDictionary *)userInfo {
+    if (CV3IsLifecycleTraceNotification(name)) {
+        CV3RecordClientReceptionLifecycleEvent(name);
+    }
     if (CV3ShouldProtectHostedPlayback() &&
         CV3IsLifecycleDeactivationNotification(name)) {
         CV3PostPlaybackTrace(CV3PlaybackTraceLifecycleNotification);

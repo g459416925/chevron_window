@@ -11,6 +11,7 @@ ChevronV3_FILES = Tweak.x
 ChevronV3_CFLAGS = -fobjc-arc
 ChevronV3_ARCHS = arm64 arm64e
 ChevronV3_FRAMEWORKS = UIKit CoreGraphics CoreMotion QuartzCore
+ChevronV3_PRIVATE_FRAMEWORKS = AssertionServices
 
 ChevronV3VideoBridge_FILES = CV3VideoBridge.x
 ChevronV3VideoBridge_CFLAGS = -fobjc-arc
