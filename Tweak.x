@@ -1472,7 +1472,7 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @interface CV3FloatingAppWindow : UIWindow <UIGestureRecognizerDelegate>
 
 @property (nonatomic, copy) NSString *bundleID;
-@property (nonatomic, strong) UIVisualEffectView *glassBackdrop; // New: Fluid background
+@property (nonatomic, strong) UIVisualEffectView *glassBackdrop; // Transparent fallback behind hosted content
 @property (nonatomic, strong) UIView *appContentWrapper;
 @property (nonatomic, strong) UIView *rootTransformContainer;
 @property (nonatomic, strong) UIView *clippingContainer; 

@@ -2158,7 +2158,7 @@ void CV3ToggleExposeMode(void) {
     [UIView animateWithDuration:0.2 animations:^{
         [self visualShadowLayer].shadowOpacity = CV3Style.shadowOpacityUnfocused * 0.5;
         self.glassBackdrop.effect = nil;
-        self.glassBackdrop.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.2];
+        self.glassBackdrop.backgroundColor = [UIColor clearColor];
     }];
 
     if (self.hostView) {
@@ -2488,7 +2488,7 @@ void CV3ToggleExposeMode(void) {
             [self visualShadowLayer].shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:finalRadius].CGPath;
             [self animateFocusShadow:self.isFocused];
             [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.80 initialSpringVelocity:0.5 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
-                self.glassBackdrop.effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial];
+                self.glassBackdrop.effect = nil;
                 self.glassBackdrop.backgroundColor = [UIColor clearColor];
                 if (self.homeBarPillIndicator) {
                     CGFloat minEdge = MIN(self.bounds.size.width, self.bounds.size.height);
@@ -2587,7 +2587,7 @@ void CV3ToggleExposeMode(void) {
                 CGFloat finalRadius = MAX(CV3Style.adaptiveCornerRadiusMin, MIN(CV3Style.adaptiveCornerRadiusMax, minEdge * CV3Style.adaptiveCornerRadiusRatio));
                 [self visualShadowLayer].shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:finalRadius].CGPath;
                 [UIView animateWithDuration:0.4 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
-                    self.glassBackdrop.effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial];
+                    self.glassBackdrop.effect = nil;
                     self.glassBackdrop.backgroundColor = [UIColor clearColor];
                 } completion:nil];
                 [self syncWindowBoundsToClientAndNotify:YES];
@@ -3018,7 +3018,11 @@ void CV3ToggleExposeMode(void) {
         self.clippingContainer.backgroundColor = [UIColor clearColor];
         [self.appContentWrapper addSubview:self.clippingContainer];
 
-        self.glassBackdrop = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial]];
+        // The hosted scene must be the first visible content. A material effect
+        // here becomes a bright veil while the remote canvas is still making
+        // its first commit, so keep the fallback completely transparent.
+        self.glassBackdrop = [[UIVisualEffectView alloc] initWithEffect:nil];
+        self.glassBackdrop.backgroundColor = [UIColor clearColor];
         self.glassBackdrop.frame = self.clippingContainer.bounds;
         self.glassBackdrop.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         [self.clippingContainer insertSubview:self.glassBackdrop atIndex:0];
@@ -5017,7 +5021,7 @@ void CV3ToggleExposeMode(void) {
         [UIView animateWithDuration:0.2 animations:^{
             shadowLayer.shadowOpacity = CV3Style.shadowOpacityUnfocused * 0.5;
             self.glassBackdrop.effect = nil;
-            self.glassBackdrop.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.2];
+            self.glassBackdrop.backgroundColor = [UIColor clearColor];
         }];
 
         if (self.hostView) {
@@ -5162,7 +5166,7 @@ void CV3ToggleExposeMode(void) {
             [self animateFocusShadow:self.isFocused];
             
             [UIView animateWithDuration:0.4 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
-                self.glassBackdrop.effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial];
+                self.glassBackdrop.effect = nil;
                 self.glassBackdrop.backgroundColor = [UIColor clearColor];
             } completion:nil];
         }
@@ -5277,7 +5281,7 @@ void CV3ToggleExposeMode(void) {
                 [self visualShadowLayer].shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:finalRadius].CGPath;
                 
                 [UIView animateWithDuration:0.4 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
-                    self.glassBackdrop.effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial];
+                    self.glassBackdrop.effect = nil;
                     self.glassBackdrop.backgroundColor = [UIColor clearColor];
                 } completion:nil];
 
