@@ -1,0 +1,7 @@
+{
+  "extensions": {
+    ".h": "objc",
+    ".inc": "objc",
+    ".x": "objc"
+  }
+}

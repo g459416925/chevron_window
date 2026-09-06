@@ -99,6 +99,75 @@ static CGRect CV3DisplayBoundsForWindow(UIWindow *window) {
     return [UIScreen mainScreen].bounds;
 }
 
+// SpringBoard can keep a portrait UIWindowScene coordinate space while the
+// physical display is already landscape. In that state CoreAnimation maps the
+// Scene to the display by swapping its axes. A landscape floating shell must
+// therefore be portrait-shaped in Scene coordinates, then rotate its logical
+// content into that shell exactly once.
+static BOOL CV3SceneAndDisplayAxesDifferForScene(UIWindowScene *scene) {
+    if (!scene || !scene.screen) return NO;
+    CGSize sceneSize = scene.coordinateSpace.bounds.size;
+    CGSize screenSize = scene.screen.bounds.size;
+    if (sceneSize.width <= 0.0 || sceneSize.height <= 0.0 ||
+        screenSize.width <= 0.0 || screenSize.height <= 0.0) return NO;
+    BOOL sceneLandscape = sceneSize.width > sceneSize.height;
+    BOOL screenLandscape = screenSize.width > screenSize.height;
+    return sceneLandscape != screenLandscape;
+}
+
+static BOOL CV3SceneAndDisplayAxesDiffer(UIWindow *window) {
+    return window ? CV3SceneAndDisplayAxesDifferForScene(window.windowScene) : NO;
+}
+
+static BOOL CV3ShellShouldBeLandscape(CV3FloatingAppWindow *window,
+                                      UIInterfaceOrientation presentationOrientation) {
+    BOOL presentationLandscape = UIInterfaceOrientationIsLandscape(presentationOrientation);
+    BOOL landscapeClientNeedsSceneAxisCompensation = window.prefersLandscapePresentation &&
+        window.requiresLandscapeContent && CV3SceneAndDisplayAxesDiffer(window);
+    return landscapeClientNeedsSceneAxisCompensation ? !presentationLandscape : presentationLandscape;
+}
+
+static CGAffineTransform CV3HostedContentRotationInScene(CV3FloatingAppWindow *window) {
+    if (!window.prefersLandscapePresentation ||
+        !UIInterfaceOrientationIsLandscape(window.hostedContentOrientation) ||
+        !CV3SceneAndDisplayAxesDiffer(window)) {
+        return CGAffineTransformIdentity;
+    }
+    UIInterfaceOrientation sceneOrientation = window.windowScene.interfaceOrientation;
+    if (!CV3IsValidInterfaceOrientation(sceneOrientation)) {
+        sceneOrientation = UIInterfaceOrientationPortrait;
+    }
+    CGAffineTransform hosted = CV3RotationTransformForInterfaceOrientation(window.hostedContentOrientation);
+    CGAffineTransform scene = CV3RotationTransformForInterfaceOrientation(sceneOrientation);
+    return CGAffineTransformConcat(hosted, CGAffineTransformInvert(scene));
+}
+
+static UIEdgeInsets CV3InitialFloatingSafeAreaInsets(UIWindowScene *scene) {
+    UIWindow *keyWindow = nil;
+    if (@available(iOS 15.0, *)) {
+        keyWindow = scene.keyWindow;
+    }
+    UIEdgeInsets safeArea = keyWindow.safeAreaInsets;
+    if (safeArea.top == 0.0 && safeArea.bottom == 0.0 &&
+        safeArea.left == 0.0 && safeArea.right == 0.0) {
+        safeArea = UIEdgeInsetsMake(47.0, 0.0, 34.0, 0.0);
+    }
+    return safeArea;
+}
+
+static CGRect CV3ClampInitialFloatingFrame(CGRect frame, CGRect bounds, UIEdgeInsets safeArea) {
+    CGFloat breath = CV3Style.safeAreaBreath;
+    CGFloat minX = CGRectGetMinX(bounds) + safeArea.left + breath;
+    CGFloat minY = CGRectGetMinY(bounds) + safeArea.top + breath;
+    CGFloat maxX = CGRectGetMaxX(bounds) - safeArea.right - breath - frame.size.width;
+    CGFloat maxY = CGRectGetMaxY(bounds) - safeArea.bottom - breath - frame.size.height;
+    if (maxX < minX) maxX = minX;
+    if (maxY < minY) maxY = minY;
+    frame.origin.x = MIN(MAX(frame.origin.x, minX), maxX);
+    frame.origin.y = MIN(MAX(frame.origin.y, minY), maxY);
+    return frame;
+}
+
 static NSString *CV3WindowLayoutKey(NSString *bundleID) {
     if (bundleID.length == 0) return nil;
     return [NSString stringWithFormat:@"CV3WindowLayout.%@", bundleID];
@@ -126,31 +195,6 @@ static void CV3SaveWindowLayout(CV3FloatingAppWindow *window) {
     [defaults synchronize];
     CV3LogToFile(@"[LayoutStore] 保存 %@ frame=%@ orientation=%ld",
                  window.bundleID, NSStringFromCGRect(window.frame), (long)window.targetOrientation);
-}
-
-static BOOL CV3RestoreSavedWindowLayout(CV3FloatingAppWindow *window) {
-    if (!window || window.bundleID.length == 0) return NO;
-    NSDictionary *layout = CV3SavedWindowLayout(window.bundleID);
-    NSString *frameString = layout[@"frame"];
-    NSNumber *orientationNumber = layout[@"orientation"];
-    if (![frameString isKindOfClass:[NSString class]] ||
-        ![orientationNumber isKindOfClass:[NSNumber class]]) return NO;
-
-    UIInterfaceOrientation savedOrientation = (UIInterfaceOrientation)orientationNumber.integerValue;
-    if (!CV3IsValidInterfaceOrientation(savedOrientation) ||
-        UIInterfaceOrientationIsLandscape(savedOrientation) != UIInterfaceOrientationIsLandscape(window.targetOrientation)) {
-        return NO;
-    }
-
-    CGRect savedFrame = CGRectFromString(frameString);
-    if (CGRectIsNull(savedFrame) || CGRectIsEmpty(savedFrame) ||
-        savedFrame.size.width < 1.0 || savedFrame.size.height < 1.0) return NO;
-
-    window.frame = [window constrainedFloatingFrameForSize:savedFrame.size
-                                             preferredCenter:CGPointMake(CGRectGetMidX(savedFrame), CGRectGetMidY(savedFrame))];
-    CV3LogToFile(@"[LayoutStore] 恢复 %@ frame=%@ orientation=%ld",
-                 window.bundleID, NSStringFromCGRect(window.frame), (long)savedOrientation);
-    return YES;
 }
 
 static CGRect CV3CanonicalApplicationSceneFrame(id settings) {
@@ -1197,7 +1241,7 @@ void CV3ToggleExposeMode(void) {
         effectiveOrientation = UIInterfaceOrientationPortrait;
     }
 
-    BOOL wantsLandscape = UIInterfaceOrientationIsLandscape(effectiveOrientation);
+    BOOL wantsLandscape = CV3ShellShouldBeLandscape(self, effectiveOrientation);
     BOOL shellIsLandscape = self.bounds.size.width > self.bounds.size.height;
     if (wantsLandscape != shellIsLandscape && self.bounds.size.width > 0.0 && self.bounds.size.height > 0.0) {
         CGSize size = self.bounds.size;
@@ -1210,7 +1254,7 @@ void CV3ToggleExposeMode(void) {
     // Scene. Its outer chrome already has landscape bounds, so rotating the
     // root again would mix portrait chrome with a landscape hosted canvas.
     self.rootTransformContainer.transform = self.prefersLandscapePresentation
-        ? CGAffineTransformIdentity
+        ? CV3HostedContentRotationInScene(self)
         : self.baseRotationTransform;
 }
 
@@ -1270,6 +1314,7 @@ void CV3ToggleExposeMode(void) {
 
 - (void)applySceneRotationContext:(CV3SceneRotationContext)context force:(BOOL)force {
     if (!CV3IsValidInterfaceOrientation(context.orientation) || self.isClosing) return;
+    [self recordOrientationTrace:@"applySceneRotationContext.begin" force:YES];
 
     // A landscape-only client owns the initial presentation orientation. The
     // display Scene may still report portrait while the app is being hosted;
@@ -1303,10 +1348,12 @@ void CV3ToggleExposeMode(void) {
         self.lastLayoutOrientation = context.orientation;
         self.rootTransformContainer.transform = CGAffineTransformIdentity;
         [self normalizeStashedGrabberLayout];
+        [self recordOrientationTrace:@"applySceneRotationContext.stashed" force:YES];
         return;
     }
 
     if (!force && !orientationChanged && !rotationChanged) {
+        [self recordOrientationTrace:@"applySceneRotationContext.noChange" force:NO];
         return;
     }
 
@@ -1314,7 +1361,7 @@ void CV3ToggleExposeMode(void) {
     CGRect screenBounds = CGRectIsEmpty(context.sceneBounds) ? CV3DisplayBoundsForWindow(self) : context.sceneBounds;
     CGSize currentSize = self.bounds.size;
     BOOL currentLandscape = currentSize.width > currentSize.height;
-    BOOL targetLandscape = context.isLandscape;
+    BOOL targetLandscape = CV3ShellShouldBeLandscape(self, context.orientation);
     CGSize newSize = currentSize;
     // Preserve the user's current logical window size. A physical rotation
     // swaps the shell axes; recomputing the default size here loses custom
@@ -1334,7 +1381,7 @@ void CV3ToggleExposeMode(void) {
 
     self.baseRotationTransform = context.transform;
     self.rootTransformContainer.transform = self.prefersLandscapePresentation
-        ? CGAffineTransformIdentity
+        ? CV3HostedContentRotationInScene(self)
         : context.transform;
     
     [CATransaction commit];
@@ -1365,6 +1412,7 @@ void CV3ToggleExposeMode(void) {
     [self layoutIfNeeded];
     [self clampToScreenBounds];
     [self syncWindowBoundsToClient];
+    [self recordOrientationTrace:@"applySceneRotationContext.end" force:YES];
 }
 
 - (void)applyTrustedOrientationNow {
@@ -2940,6 +2988,116 @@ void CV3ToggleExposeMode(void) {
     CV3ToggleExposeMode();
 }
 
+static NSString *CV3DirectionTraceTransform3D(CATransform3D t) {
+    return [NSString stringWithFormat:
+        @"[%.4f %.4f %.4f %.4f; %.4f %.4f %.4f %.4f; %.4f %.4f %.4f %.4f; %.4f %.4f %.4f %.4f]",
+        t.m11, t.m12, t.m13, t.m14,
+        t.m21, t.m22, t.m23, t.m24,
+        t.m31, t.m32, t.m33, t.m34,
+        t.m41, t.m42, t.m43, t.m44];
+}
+
+static NSString *CV3DirectionTraceView(UIView *view) {
+    if (!view) return @"nil";
+    CALayer *layer = view.layer;
+    CALayer *presentation = layer.presentationLayer;
+    return [NSString stringWithFormat:
+        @"%@ frame=%@ bounds=%@ center=%@ viewT=%@ hidden=%d alpha=%.3f "
+         "layerFrame=%@ layerBounds=%@ layerT=%@ presentationFrame=%@ presentationBounds=%@ presentationT=%@",
+        NSStringFromClass(view.class), NSStringFromCGRect(view.frame), NSStringFromCGRect(view.bounds),
+        NSStringFromCGPoint(view.center), NSStringFromCGAffineTransform(view.transform), view.hidden, view.alpha,
+        NSStringFromCGRect(layer.frame), NSStringFromCGRect(layer.bounds), CV3DirectionTraceTransform3D(layer.transform),
+        presentation ? NSStringFromCGRect(presentation.frame) : @"nil",
+        presentation ? NSStringFromCGRect(presentation.bounds) : @"nil",
+        presentation ? CV3DirectionTraceTransform3D(presentation.transform) : @"nil"];
+}
+
++ (CGRect)initialFrameForBundleID:(NSString *)bundleID
+                           center:(CGPoint)center
+                      windowScene:(UIWindowScene *)windowScene {
+    CGRect sceneBounds = windowScene.coordinateSpace.bounds;
+    if (CGRectIsEmpty(sceneBounds)) sceneBounds = windowScene.screen.bounds;
+    if (CGRectIsEmpty(sceneBounds)) sceneBounds = UIScreen.mainScreen.bounds;
+
+    UIInterfaceOrientation displayOrientation = CV3TrustedInterfaceOrientation(windowScene);
+    UIInterfaceOrientation hostedOrientation =
+        CV3InitialHostedOrientationForBundleID(bundleID, displayOrientation);
+    CGFloat shortSide = MIN(sceneBounds.size.width, sceneBounds.size.height);
+    CGFloat longSide = MAX(sceneBounds.size.width, sceneBounds.size.height);
+    CGFloat logicalWidth = shortSide * kCV3FloatingDefaultWidthRatio;
+    CGSize size = CGSizeMake(logicalWidth, logicalWidth * (longSide / MAX(shortSide, 1.0)));
+    if (UIInterfaceOrientationIsLandscape(hostedOrientation)) {
+        size = CGSizeMake(size.height, size.width);
+    }
+
+    UIEdgeInsets safeArea = CV3InitialFloatingSafeAreaInsets(windowScene);
+    CGFloat breath = CV3Style.safeAreaBreath;
+    CGFloat visibleWidth = MAX(1.0, sceneBounds.size.width - safeArea.left - safeArea.right - breath * 2.0);
+    CGFloat visibleHeight = MAX(1.0, sceneBounds.size.height - safeArea.top - safeArea.bottom - breath * 2.0);
+    CGFloat fitScale = MIN(1.0, MIN(visibleWidth / MAX(size.width, 1.0),
+                                   visibleHeight / MAX(size.height, 1.0)));
+    if (fitScale < 1.0) {
+        size.width *= fitScale;
+        size.height *= fitScale;
+    }
+
+    BOOL shellLandscape = UIInterfaceOrientationIsLandscape(hostedOrientation);
+    BOOL requiresLandscapeContent = CV3BundleDeclaresLandscapeOnly(bundleID);
+    if (requiresLandscapeContent && CV3SceneAndDisplayAxesDifferForScene(windowScene)) {
+        shellLandscape = !shellLandscape;
+    }
+    if ((size.width > size.height) != shellLandscape) {
+        size = CGSizeMake(size.height, size.width);
+    }
+
+    CGPoint targetCenter = center;
+    NSDictionary *savedLayout = CV3SavedWindowLayout(bundleID);
+    NSNumber *savedOrientationNumber = savedLayout[@"orientation"];
+    NSString *savedFrameString = savedLayout[@"frame"];
+    if ([savedOrientationNumber isKindOfClass:NSNumber.class] &&
+        [savedFrameString isKindOfClass:NSString.class]) {
+        UIInterfaceOrientation savedOrientation =
+            (UIInterfaceOrientation)savedOrientationNumber.integerValue;
+        CGRect savedFrame = CGRectFromString(savedFrameString);
+        if (CV3IsValidInterfaceOrientation(savedOrientation) &&
+            UIInterfaceOrientationIsLandscape(savedOrientation) == UIInterfaceOrientationIsLandscape(hostedOrientation) &&
+            !CGRectIsNull(savedFrame) && !CGRectIsEmpty(savedFrame) &&
+            savedFrame.size.width >= 1.0 && savedFrame.size.height >= 1.0) {
+            size = savedFrame.size;
+            if ((size.width > size.height) != shellLandscape) {
+                size = CGSizeMake(size.height, size.width);
+            }
+            targetCenter = CGPointMake(CGRectGetMidX(savedFrame), CGRectGetMidY(savedFrame));
+        }
+    }
+
+    CGRect frame = CGRectMake(targetCenter.x - size.width * 0.5,
+                              targetCenter.y - size.height * 0.5,
+                              size.width, size.height);
+    return CV3ClampInitialFloatingFrame(frame, sceneBounds, safeArea);
+}
+
+- (void)recordOrientationTrace:(NSString *)phase force:(BOOL)force {
+    UIWindowScene *scene = self.windowScene;
+    CGRect sceneBounds = scene ? scene.coordinateSpace.bounds : CGRectZero;
+    UIInterfaceOrientation sceneOrientation = scene ? scene.interfaceOrientation : UIInterfaceOrientationUnknown;
+    CGRect screenBounds = scene.screen ? scene.screen.bounds : UIScreen.mainScreen.bounds;
+    UIInterfaceOrientation presentationOrientation = CV3HostedPresentationOrientation(self);
+    NSString *signature = [NSString stringWithFormat:
+        @"scene=%ld/%@ screen=%@ target=%ld hosted=%ld presentation=%ld landscape=%d/%d "
+         "window={%@} root={%@} wrapper={%@} clip={%@} proxy={%@} host={%@}",
+        (long)sceneOrientation, NSStringFromCGRect(sceneBounds), NSStringFromCGRect(screenBounds),
+        (long)self.targetOrientation, (long)self.hostedContentOrientation, (long)presentationOrientation,
+        self.prefersLandscapePresentation, self.requiresLandscapeContent,
+        CV3DirectionTraceView(self), CV3DirectionTraceView(self.rootTransformContainer),
+        CV3DirectionTraceView(self.appContentWrapper), CV3DirectionTraceView(self.clippingContainer),
+        CV3DirectionTraceView(self.hostContainerProxy), CV3DirectionTraceView(self.hostView)];
+    if (!force && [signature isEqualToString:self.lastOrientationTraceSignature]) return;
+    self.lastOrientationTraceSignature = signature;
+    CV3LogToFile(@"[DirectionTrace][Host] phase=%@ bundle=%@ %@",
+                 phase ?: @"unknown", self.bundleID ?: @"nil", signature);
+}
+
 - (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene {
     if (windowScene) {
         self = [super initWithWindowScene:windowScene];
@@ -2957,14 +3115,7 @@ void CV3ToggleExposeMode(void) {
 
         UIInterfaceOrientation currentOrientation = CV3TrustedInterfaceOrientation(windowScene);
         UIInterfaceOrientation initialOrientation = CV3InitialHostedOrientationForBundleID(bundleID, currentOrientation);
-        CGSize physicalSize = [self defaultPhysicalFloatingSizeForOrientation:currentOrientation
-                                                                displayBounds:CV3DisplayBoundsForWindow(self)];
-        if (initialOrientation != currentOrientation) {
-            physicalSize = [self defaultPhysicalFloatingSizeForOrientation:initialOrientation
-                                                               displayBounds:CV3DisplayBoundsForWindow(self)];
-        }
-        
-        self.frame = CGRectMake(0, 0, physicalSize.width, physicalSize.height);
+        self.frame = [[self class] initialFrameForBundleID:bundleID center:center windowScene:windowScene];
         self.lastLayoutOrientation = initialOrientation;
         self.targetOrientation = initialOrientation;
         
@@ -2976,8 +3127,6 @@ void CV3ToggleExposeMode(void) {
             ? initialOrientation
             : UIInterfaceOrientationPortrait;
         self.allowProcessTerminationOnClose = NO;
-        self.center = center;
-        CV3RestoreSavedWindowLayout(self);
         [self enforcePortraitWindowGeometry];
         self.windowLevel = CV3Style.floatingApp; // 高于普通 App，但低于通知栏/控制中心
         self.backgroundColor = [UIColor clearColor];
@@ -3147,6 +3296,7 @@ void CV3ToggleExposeMode(void) {
         // [SHM Lazy Unmapping] 持有共享内存引用计数
         CV3RetainSharedGeometry(self.bundleID);
         [self.hostedSession setActive:YES];
+        [self recordOrientationTrace:@"init.complete" force:YES];
     }
     return self;
 }
@@ -3444,10 +3594,12 @@ void CV3ToggleExposeMode(void) {
         [self dismissLaunchSplashAnimated];
         if (self.awaitingInitialRenderableContent) {
             self.awaitingInitialRenderableContent = NO;
+            [self recordOrientationTrace:@"firstFrame.beforeReveal" force:YES];
             [UIView performWithoutAnimation:^{
                 [CATransaction begin];
                 [CATransaction setDisableActions:YES];
                 [CATransaction setCompletionBlock:^{
+                    [self recordOrientationTrace:@"firstFrame.transactionCommitted" force:YES];
                     if (!self.coldLaunchCompletedRecorded) {
                         self.coldLaunchCompletedRecorded = YES;
                         [self recordColdLaunchMilestone:@"FIRST_FRAME_COMMITTED" details:nil];
@@ -3458,6 +3610,7 @@ void CV3ToggleExposeMode(void) {
                 [self layoutIfNeeded];
                 [CATransaction commit];
             }];
+            [self recordOrientationTrace:@"firstFrame.afterRevealRequest" force:YES];
             [self recordColdLaunchMilestone:@"FIRST_FRAME_REVEAL_REQUESTED" details:nil];
         }
         CV3LogToFile(@"[SceneHost] 渲染层已就绪: %@", self.bundleID);
@@ -3753,6 +3906,7 @@ void CV3ToggleExposeMode(void) {
 }
 
 - (void)setWindowFocused:(BOOL)focused {
+    [self recordOrientationTrace:focused ? @"setWindowFocused.begin.focus" : @"setWindowFocused.begin.blur" force:YES];
     BOOL focusChanged = (self.isFocused != focused);
     if (!focusChanged && !focused) return;
     self.isFocused = focused;
@@ -3777,6 +3931,7 @@ void CV3ToggleExposeMode(void) {
         // Z-Order 发生变化，级联刷新所有窗口前台优先级断言
         CV3CascadeUpdateSovereigntyAssertions();
     }
+    [self recordOrientationTrace:focused ? @"setWindowFocused.end.focus" : @"setWindowFocused.end.blur" force:YES];
 }
 
 - (void)promoteFloatingWindowInZOrder {
@@ -4050,12 +4205,21 @@ void CV3ToggleExposeMode(void) {
 }
 
 - (void)applyCurrentTransformWithScale:(CGFloat)scale {
-    CGAffineTransform transform = self.baseRotationTransform;
+    [self recordOrientationTrace:@"applyCurrentTransform.begin" force:YES];
+    // A landscape-only app already owns a landscape shell and landscape
+    // canvas. Reapplying the display's ±90° transform during focus changes
+    // recreates the legacy portrait-card presentation with sideways content.
+    BOOL hostedLandscapeOwnsPresentation = self.prefersLandscapePresentation &&
+        UIInterfaceOrientationIsLandscape(self.hostedContentOrientation);
+    CGAffineTransform transform = hostedLandscapeOwnsPresentation
+        ? CV3HostedContentRotationInScene(self)
+        : self.baseRotationTransform;
     if (scale != 1.0) {
         transform = CGAffineTransformScale(transform, scale, scale);
     }
     self.transform = CGAffineTransformIdentity; // Keep physical upright
     self.rootTransformContainer.transform = transform;
+    [self recordOrientationTrace:@"applyCurrentTransform.end" force:YES];
 }
 
 - (CALayer *)visualShadowLayer {
@@ -4123,7 +4287,7 @@ void CV3ToggleExposeMode(void) {
     // display scene. Hosted content is rotated below, inside the logical root.
     // Swapping bounds here is safe because the window transform itself remains
     // identity, so frame/center calculations continue to use physical points.
-    BOOL wantsLandscape = UIInterfaceOrientationIsLandscape(activeOrientation);
+    BOOL wantsLandscape = CV3ShellShouldBeLandscape(self, activeOrientation);
     BOOL shellIsLandscape = self.bounds.size.width > self.bounds.size.height;
     if (wantsLandscape != shellIsLandscape && self.bounds.size.width > 0.0 && self.bounds.size.height > 0.0) {
         CGSize shellSize = self.bounds.size;
@@ -4134,7 +4298,9 @@ void CV3ToggleExposeMode(void) {
         ? self.windowScene.interfaceOrientation
         : UIInterfaceOrientationUnknown;
     BOOL sceneOrientationValid = CV3IsValidInterfaceOrientation(sceneOrientation);
-    CGAffineTransform contentRotation = CGAffineTransformIdentity;
+    CGAffineTransform contentRotation = self.prefersLandscapePresentation
+        ? CV3HostedContentRotationInScene(self)
+        : CGAffineTransformIdentity;
     if (!self.prefersLandscapePresentation &&
         (!sceneOrientationValid || sceneOrientation != activeOrientation)) {
         contentRotation = CV3RotationTransformForInterfaceOrientation(activeOrientation);
@@ -4153,9 +4319,10 @@ void CV3ToggleExposeMode(void) {
     
     CGFloat logicalW, logicalH;
     BOOL needsManualRotation = !CGAffineTransformIsIdentity(contentRotation);
-    if (needsManualRotation) {
-        logicalW = MIN(fullW, fullH);
-        logicalH = MAX(fullW, fullH);
+    BOOL rotationSwapsAxes = fabs(contentRotation.b) > 0.5 || fabs(contentRotation.c) > 0.5;
+    if (needsManualRotation && rotationSwapsAxes) {
+        logicalW = fullH;
+        logicalH = fullW;
     } else {
         logicalW = fullW;
         logicalH = fullH;
@@ -4299,6 +4466,7 @@ void CV3ToggleExposeMode(void) {
     }
     
     self.isInLayout = NO;
+    [self recordOrientationTrace:@"layoutSubviews.end" force:NO];
 }
 
 - (void)clampToScreenBounds {
@@ -4452,6 +4620,7 @@ void CV3ToggleExposeMode(void) {
                                 [self.hostContainerProxy addSubview:hostedView];
                             }
                         }
+                        [self recordOrientationTrace:@"hostView.attached" force:YES];
                         if (!self.coldLaunchHostAttachedRecorded) {
                             self.coldLaunchHostAttachedRecorded = YES;
                             [self recordColdLaunchMilestone:@"HOST_VIEW_ATTACHED"
