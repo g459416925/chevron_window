@@ -708,7 +708,9 @@ static BOOL CV3OpenBundleInFloatingWindow(NSString *bundleID, NSString *reason) 
                                                                                    windowScene:scene];
     if (!floatingWindow) return NO;
 
-    floatingWindow.targetOrientation = CV3TrustedInterfaceOrientation(scene);
+    // initWithBundleID: already resolves the presentation orientation from the
+    // app's declared capabilities. Do not overwrite a landscape-only game's
+    // orientation with the portrait orientation of SpringBoard's display Scene.
     floatingWindow.isSuppressedByLockScreen = CV3LockScreenPresented;
     [floatingWindows addObject:floatingWindow];
     if (CV3LockScreenPresented) {
@@ -1597,65 +1599,26 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 
 
 - (CGRect)splitDropPreviewFrameForCenter:(CGPoint)center {
-    CGRect screen = self.windowScene ? self.windowScene.coordinateSpace.bounds : self.bounds;
-    if (CGRectIsEmpty(screen)) screen = [UIScreen mainScreen].bounds;
-
-    UIInterfaceOrientation orientation = CV3InitialHostedOrientationForBundleID(self.draggedAppInfo.bundleId,
-        CV3TrustedInterfaceOrientation(self.windowScene));
-    BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
-    CGFloat portraitW = MIN(screen.size.width, screen.size.height);
-    CGFloat portraitH = MAX(screen.size.width, screen.size.height);
-    CGFloat logicalW = portraitW * 0.45;
-    CGFloat logicalH = logicalW * (portraitH / MAX(portraitW, 1.0));
-    CGSize physicalSize = isLandscape ? CGSizeMake(logicalH, logicalW) : CGSizeMake(logicalW, logicalH);
-
-    UIEdgeInsets safe = self.safeAreaInsets;
-    CGFloat breath = CV3Style.safeAreaBreath;
-    CGFloat visibleW = MAX(1.0, screen.size.width - safe.left - safe.right - breath * 2.0);
-    CGFloat visibleH = MAX(1.0, screen.size.height - safe.top - safe.bottom - breath * 2.0);
-    CGFloat fitScale = MIN(1.0, MIN(visibleW / MAX(physicalSize.width, 1.0),
-                                   visibleH / MAX(physicalSize.height, 1.0)));
-    if (fitScale < 1.0) {
-        physicalSize.width *= fitScale;
-        physicalSize.height *= fitScale;
-    }
-
-    CGRect frame = CGRectMake(center.x - physicalSize.width * 0.5,
-                              center.y - physicalSize.height * 0.5,
-                              physicalSize.width,
-                              physicalSize.height);
-
-    CGFloat minX = safe.left + breath;
-    CGFloat minY = safe.top + breath;
-    CGFloat maxX = screen.size.width - safe.right - breath - frame.size.width;
-    CGFloat maxY = screen.size.height - safe.bottom - breath - frame.size.height;
-    if (maxX < minX) maxX = minX;
-    if (maxY < minY) maxY = minY;
-    frame.origin.x = MIN(MAX(frame.origin.x, minX), maxX);
-    frame.origin.y = MIN(MAX(frame.origin.y, minY), maxY);
-    return frame;
+    return [CV3FloatingAppWindow initialFrameForBundleID:self.draggedAppInfo.bundleId
+                                                  center:center
+                                             windowScene:self.windowScene];
 }
 
 - (void)layoutSplitDropPreviewLayer {
     if (!self.splitDropPreviewView || !self.splitDropPreviewLayer) return;
 
     CGRect bounds = self.splitDropPreviewView.bounds;
-    UIInterfaceOrientation orientation = CV3TrustedInterfaceOrientation(self.windowScene);
-    BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
-    CGSize logicalSize = isLandscape
-        ? CGSizeMake(MIN(bounds.size.width, bounds.size.height), MAX(bounds.size.width, bounds.size.height))
-        : bounds.size;
-    CGRect logicalBounds = CGRectMake(0, 0, logicalSize.width, logicalSize.height);
-    CGFloat cornerRadius = MIN(CV3Style.floatingChromeCornerRadius, MIN(logicalSize.width, logicalSize.height) * 0.5);
-    UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(logicalBounds, 2.0, 2.0)
+    CGRect pathBounds = CGRectMake(0, 0, bounds.size.width, bounds.size.height);
+    CGFloat cornerRadius = MIN(CV3Style.floatingChromeCornerRadius, MIN(bounds.size.width, bounds.size.height) * 0.5);
+    UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(pathBounds, 2.0, 2.0)
                                                     cornerRadius:cornerRadius];
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    self.splitDropPreviewLayer.bounds = logicalBounds;
+    self.splitDropPreviewLayer.bounds = pathBounds;
     self.splitDropPreviewLayer.position = CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds));
     self.splitDropPreviewLayer.path = path.CGPath;
     self.splitDropPreviewLayer.cornerRadius = cornerRadius;
-    [self.splitDropPreviewLayer setAffineTransform:CV3RotationTransformForInterfaceOrientation(orientation)];
+    [self.splitDropPreviewLayer setAffineTransform:CGAffineTransformIdentity];
     [CATransaction commit];
 }
 
@@ -1876,7 +1839,9 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
                     } else {
                         // 使用实际拖拽图标的屏幕位置创建分屏，横屏下不会退回竖屏坐标。
                         CV3FloatingAppWindow *floatingWindow = [[CV3FloatingAppWindow alloc] initWithBundleID:bundleID center:spawnPoint windowScene:self.windowScene];
-                        floatingWindow.targetOrientation = CV3TrustedInterfaceOrientation(self.windowScene);
+                        // Preserve the orientation selected by the hosted app.
+                        // The phone may remain portrait while a landscape-only
+                        // game owns a landscape floating canvas.
                         [floatingWindows addObject:floatingWindow];
                         [floatingWindow makeKeyAndVisible];
                         floatingWindow.windowLevel = CV3Style.floatingApp;

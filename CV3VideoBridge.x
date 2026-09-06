@@ -24,6 +24,7 @@ static const uint64_t CV3CanvasReadyFlag = (1ULL << 63);
 static NSTimer *CV3CanvasTimer = nil;
 static int CV3CanvasNotificationToken = -1;
 static NSString *CV3CanvasNotificationName = nil;
+static NSString *CV3LastClientDirectionSignature = nil;
 
 static NSString *CV3CanvasTracePath(void) {
     return [NSTemporaryDirectory() stringByAppendingPathComponent:@"ChevronV3CanvasTrace.log"];
@@ -111,6 +112,60 @@ static void CV3DumpCanvasTrace(NSString *tag) {
         sceneIndex++;
     }
     CV3AppendCanvasTrace([NSString stringWithFormat:@"[DEBUG-canvas-sample] END %@", tag]);
+}
+
+static NSString *CV3ClientDirectionTransform3D(CATransform3D t) {
+    return [NSString stringWithFormat:
+        @"[%.4f %.4f %.4f %.4f; %.4f %.4f %.4f %.4f; %.4f %.4f %.4f %.4f; %.4f %.4f %.4f %.4f]",
+        t.m11, t.m12, t.m13, t.m14,
+        t.m21, t.m22, t.m23, t.m24,
+        t.m31, t.m32, t.m33, t.m34,
+        t.m41, t.m42, t.m43, t.m44];
+}
+
+static NSString *CV3ClientDirectionLayer(CALayer *layer) {
+    if (!layer) return @"nil";
+    CALayer *presentation = layer.presentationLayer;
+    return [NSString stringWithFormat:
+        @"%@ frame=%@ bounds=%@ affine=%@ transform=%@ presentationFrame=%@ presentationBounds=%@ presentationTransform=%@",
+        NSStringFromClass(layer.class), NSStringFromCGRect(layer.frame), NSStringFromCGRect(layer.bounds),
+        NSStringFromCGAffineTransform(layer.affineTransform), CV3ClientDirectionTransform3D(layer.transform),
+        presentation ? NSStringFromCGRect(presentation.frame) : @"nil",
+        presentation ? NSStringFromCGRect(presentation.bounds) : @"nil",
+        presentation ? CV3ClientDirectionTransform3D(presentation.transform) : @"nil"];
+}
+
+static AVPlayerLayer *CV3FirstPlayerLayer(CALayer *layer) {
+    if (!layer) return nil;
+    if ([layer isKindOfClass:AVPlayerLayer.class]) return (AVPlayerLayer *)layer;
+    for (CALayer *child in layer.sublayers ?: @[]) {
+        AVPlayerLayer *result = CV3FirstPlayerLayer(child);
+        if (result) return result;
+    }
+    return nil;
+}
+
+static void CV3RecordClientDirectionTrace(UIWindowScene *scene,
+                                          UIWindow *window,
+                                          BOOL repairedVideoLayer,
+                                          uint64_t readyGeometry,
+                                          BOOL force) {
+    if (!scene || !window) return;
+    UIView *rootView = window.rootViewController.viewIfLoaded;
+    AVPlayerLayer *playerLayer = CV3FirstPlayerLayer(window.layer);
+    NSString *signature = [NSString stringWithFormat:
+        @"sceneOrientation=%ld deviceOrientation=%ld sceneBounds=%@ screenBounds=%@ "
+         "windowFrame=%@ windowBounds=%@ windowTransform=%@ windowLayer={%@} "
+         "rootFrame=%@ rootBounds=%@ rootTransform=%@ rootLayer={%@} player={%@} repaired=%d ready=0x%016llx",
+        (long)scene.interfaceOrientation, (long)UIDevice.currentDevice.orientation,
+        NSStringFromCGRect(scene.coordinateSpace.bounds), NSStringFromCGRect(scene.screen.bounds),
+        NSStringFromCGRect(window.frame), NSStringFromCGRect(window.bounds), NSStringFromCGAffineTransform(window.transform),
+        CV3ClientDirectionLayer(window.layer), NSStringFromCGRect(rootView.frame), NSStringFromCGRect(rootView.bounds),
+        NSStringFromCGAffineTransform(rootView.transform), CV3ClientDirectionLayer(rootView.layer),
+        CV3ClientDirectionLayer(playerLayer), repairedVideoLayer, (unsigned long long)readyGeometry];
+    if (!force && [signature isEqualToString:CV3LastClientDirectionSignature]) return;
+    CV3LastClientDirectionSignature = signature;
+    CV3AppendCanvasTrace([NSString stringWithFormat:@"[DirectionTrace][Client] %@", signature]);
 }
 
 static BOOL CV3RepairHostedVideoLayerTreeRecursive(CALayer *root, CGSize canvasSize) {
@@ -316,6 +371,7 @@ static void CV3RefreshHostedState(int token) {
         if (previousHosted != CV3ApplicationIsChevronHosted) {
             [CV3CanvasTimer invalidate];
             CV3CanvasTimer = nil;
+            CV3LastClientDirectionSignature = nil;
             NSString *canvasName = [NSString stringWithFormat:@"com.xu.chevronv3.canvas.%@", NSBundle.mainBundle.bundleIdentifier];
             if (CV3CanvasNotificationToken < 0 || ![CV3CanvasNotificationName isEqualToString:canvasName]) {
                 if (CV3CanvasNotificationToken >= 0) notify_cancel(CV3CanvasNotificationToken);
@@ -337,6 +393,15 @@ static void CV3RefreshHostedState(int token) {
                             CGSize size = window.bounds.size;
                             CGSize rootSize = window.rootViewController.viewIfLoaded.bounds.size;
                             BOOL repairedVideoLayer = CV3RepairHostedVideoLayerTree(window.layer, size);
+                            uint64_t sampledGeometry = ((uint64_t)llround(size.width) << 16) |
+                                (uint64_t)llround(size.height);
+                            if (!repairedVideoLayer &&
+                                fabs(size.width - rootSize.width) <= 1 &&
+                                fabs(size.height - rootSize.height) <= 1) {
+                                sampledGeometry |= CV3CanvasReadyFlag;
+                            }
+                            CV3RecordClientDirectionTrace((UIWindowScene *)scene, window,
+                                                          repairedVideoLayer, sampledGeometry, NO);
                             if (fabs(size.width - rootSize.width) > 1 || fabs(size.height - rootSize.height) > 1) continue;
                             geometry = ((uint64_t)llround(size.width) << 16) | (uint64_t)llround(size.height);
                             // If no transposed video layer needed repair, the

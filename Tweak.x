@@ -1596,8 +1596,12 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, assign) NSInteger collisionReleaseAxis;
 @property (nonatomic, strong) UIImage *stashedRestoreSnapshotImage;
 @property (nonatomic, assign) UIInterfaceOrientation stashedRestoreSnapshotOrientation;
+@property (nonatomic, copy) NSString *lastOrientationTraceSignature;
 
 + (CMMotionManager *)sharedMotionManager;
++ (CGRect)initialFrameForBundleID:(NSString *)bundleID
+                           center:(CGPoint)center
+                      windowScene:(UIWindowScene *)windowScene;
 - (void)startLiquidMotion;
 - (void)stopLiquidMotion;
 - (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene;
@@ -1656,6 +1660,7 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 - (void)dismissMultitaskingMenu;
 - (void)ensureLaunchSplashVisible;
 - (void)recordColdLaunchMilestone:(NSString *)milestone details:(NSString *)details;
+- (void)recordOrientationTrace:(NSString *)phase force:(BOOL)force;
 - (void)loadAppScene;
 - (UIEdgeInsets)currentSafeAreaInsets;
 - (void)dismissLaunchSplashAnimated;
