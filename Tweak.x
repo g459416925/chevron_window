@@ -932,6 +932,7 @@ static const char *CV3PlaybackTraceNotification = "com.xu.chevronv3.playback-tra
 static int CV3VideoOrientationNotificationToken = -1;
 static int CV3PlaybackTraceNotificationToken = -1;
 static UIInterfaceOrientation CV3LastTrustedInterfaceOrientation = UIInterfaceOrientationPortrait;
+static UIInterfaceOrientation CV3LastPhysicalDeviceInterfaceOrientation = UIInterfaceOrientationPortrait;
 static BOOL CV3SuppressPresentationContextFanout = NO;
 static BOOL CV3WorkspaceTransitionActive = NO;
 static NSUInteger CV3WorkspaceTransitionProtectionToken = 0;
@@ -1631,6 +1632,7 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 - (void)finishHostingWhenRenderableWithRetries:(NSInteger)retries;
 - (void)finishHostingWhenRenderableWithRetries:(NSInteger)retries generation:(NSUInteger)generation;
 - (void)applyStashedGrabberOrientation;
+- (void)physicalDeviceOrientationDidChange:(NSNotification *)notification;
 - (void)normalizeStashedGrabberLayout;
 - (void)updateStashIconAppearance;
 - (CGRect)safeAreaClampedFrame:(CGRect)frame preferredCenter:(CGPoint)preferredCenter preserveSize:(BOOL)preserveSize;

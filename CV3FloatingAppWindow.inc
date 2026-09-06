@@ -3289,6 +3289,11 @@ static NSString *CV3DirectionTraceView(UIView *view) {
         // 核心修复：监听 Scene 变更与系统通知，确保窗口持久存在
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(attachToCurrentActiveScene) name:UISceneDidActivateNotification object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(enforceSceneForegroundState) name:UISceneDidEnterBackgroundNotification object:nil];
+        [[UIDevice currentDevice] beginGeneratingDeviceOrientationNotifications];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(physicalDeviceOrientationDidChange:)
+                                                     name:UIDeviceOrientationDidChangeNotification
+                                                   object:[UIDevice currentDevice]];
 
         // Assertions are refreshed by state changes; this slower watchdog only retries failures.
         self.assertionWatchdogTimer = [NSTimer scheduledTimerWithTimeInterval:15.0 target:self selector:@selector(assertionWatchdogTick:) userInfo:nil repeats:YES];
@@ -4071,9 +4076,9 @@ static NSString *CV3DirectionTraceView(UIView *view) {
     self.stashGrabber.alpha = 0.0;
     self.stashGrabber.bounds = CGRectMake(0, 0, kCV3StashIconSize, kCV3StashIconSize);
     self.stashGrabber.center = CGPointMake(CGRectGetMidX(targetFrameInWindow), CGRectGetMidY(targetFrameInWindow));
-    [self applyStashedGrabberOrientation];
     [self updateStashIconAppearance];
-    self.appIconMiniView.transform = CGAffineTransformMakeScale(0.82, 0.82);
+    [self applyStashedGrabberOrientation];
+    self.appIconMiniView.transform = CGAffineTransformScale(self.appIconMiniView.transform, 0.82, 0.82);
     self.appContentWrapper.alpha = 0.0;
     self.resizeHandle.alpha = 0.0;
     self.homeBarView.alpha = 0.0;
@@ -4110,14 +4115,59 @@ static NSString *CV3DirectionTraceView(UIView *view) {
                         options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState
                      animations:^{
         self.stashGrabber.alpha = 1.0;
-        self.appIconMiniView.transform = CGAffineTransformIdentity;
+        [self applyStashedGrabberOrientation];
     } completion:nil];
 }
 
 - (void)applyStashedGrabberOrientation {
-    // UIWindowScene coordinates already follow the device. Applying the same
-    // interface rotation here turns the minimized icon a second time.
+    // A minimized icon is device UI, not hosted-app content. Its only rotation
+    // input is the physical device orientation relative to the SpringBoard
+    // Scene that contains this window.
     self.stashGrabber.transform = CGAffineTransformIdentity;
+
+    UIInterfaceOrientation deviceOrientation = CV3InterfaceOrientationFromDevice();
+    CGSize screenSize = self.windowScene.screen.bounds.size;
+    BOOL screenLandscape = screenSize.width > screenSize.height;
+    if (CV3IsValidInterfaceOrientation(deviceOrientation) &&
+        UIInterfaceOrientationIsLandscape(deviceOrientation) == screenLandscape) {
+        CV3LastPhysicalDeviceInterfaceOrientation = deviceOrientation;
+    } else if (CV3IsValidInterfaceOrientation(CV3LastPhysicalDeviceInterfaceOrientation) &&
+               UIInterfaceOrientationIsLandscape(CV3LastPhysicalDeviceInterfaceOrientation) == screenLandscape) {
+        deviceOrientation = CV3LastPhysicalDeviceInterfaceOrientation;
+    } else {
+        UIInterfaceOrientation sceneCandidate = self.windowScene.interfaceOrientation;
+        if (CV3IsValidInterfaceOrientation(sceneCandidate) &&
+            UIInterfaceOrientationIsLandscape(sceneCandidate) == screenLandscape) {
+            deviceOrientation = sceneCandidate;
+        } else {
+            deviceOrientation = screenLandscape
+                ? UIInterfaceOrientationLandscapeRight
+                : UIInterfaceOrientationPortrait;
+        }
+        CV3LastPhysicalDeviceInterfaceOrientation = deviceOrientation;
+    }
+
+    UIInterfaceOrientation sceneOrientation = self.windowScene.interfaceOrientation;
+    if (!CV3IsValidInterfaceOrientation(sceneOrientation)) {
+        sceneOrientation = deviceOrientation;
+    }
+    CGAffineTransform deviceTransform = CV3RotationTransformForInterfaceOrientation(deviceOrientation);
+    CGAffineTransform sceneTransform = CV3RotationTransformForInterfaceOrientation(sceneOrientation);
+    self.appIconMiniView.transform = CGAffineTransformConcat(deviceTransform,
+                                                              CGAffineTransformInvert(sceneTransform));
+}
+
+- (void)physicalDeviceOrientationDidChange:(NSNotification *)notification {
+    (void)notification;
+    UIInterfaceOrientation current = CV3InterfaceOrientationFromDevice();
+    if (CV3IsValidInterfaceOrientation(current)) {
+        CV3LastPhysicalDeviceInterfaceOrientation = current;
+    }
+    if (!self.isStashed || self.isClosing) return;
+    [UIView performWithoutAnimation:^{
+        [self updateStashIconAppearance];
+        [self applyStashedGrabberOrientation];
+    }];
 }
 
 - (void)normalizeStashedGrabberLayout {
@@ -4126,11 +4176,10 @@ static NSString *CV3DirectionTraceView(UIView *view) {
     self.rootTransformContainer.frame = self.bounds;
     self.stashGrabber.bounds = CGRectMake(0, 0, kCV3StashIconSize, kCV3StashIconSize);
     self.stashGrabber.center = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
-    [self applyStashedGrabberOrientation];
     self.stashGrabber.alpha = 1.0;
     self.stashGrabber.userInteractionEnabled = YES;
     [self updateStashIconAppearance];
-    self.appIconMiniView.transform = CGAffineTransformIdentity;
+    [self applyStashedGrabberOrientation];
     [self bringSubviewToFront:self.stashGrabber];
     [self syncWindowShadowForCurrentState];
 }
@@ -4158,7 +4207,9 @@ static NSString *CV3DirectionTraceView(UIView *view) {
                              0.88,
                              YES);
 
-    self.appIconMiniView.frame = CGRectInset(bounds, kCV3StashIconInset, kCV3StashIconInset);
+    CGRect iconFrame = CGRectInset(bounds, kCV3StashIconInset, kCV3StashIconInset);
+    self.appIconMiniView.bounds = CGRectMake(0, 0, iconFrame.size.width, iconFrame.size.height);
+    self.appIconMiniView.center = CGPointMake(CGRectGetMidX(iconFrame), CGRectGetMidY(iconFrame));
     self.appIconMiniView.layer.cornerRadius = 10.0;
     self.appIconMiniView.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.30].CGColor;
     self.appIconMiniView.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;
@@ -5678,6 +5729,7 @@ static NSString *CV3DirectionTraceView(UIView *view) {
 - (void)dealloc {
     CV3LogToFile(@"[Lifecycle] CV3FloatingAppWindow Dealloc: %@", self.bundleID);
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [[UIDevice currentDevice] endGeneratingDeviceOrientationNotifications];
     
     [self stopLiquidMotion];
     
