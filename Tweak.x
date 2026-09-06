@@ -985,7 +985,8 @@ static uint64_t CV3StableBundleHash(NSString *bundleID) {
     return hash & 0x00FFFFFFFFFFFFFFULL;
 }
 
-static const uint64_t CV3RequiredClientBridgeProtocolVersion = 0x2026090602ULL;
+static const uint64_t CV3RequiredClientBridgeProtocolVersion = 0x2026090603ULL;
+static const uint64_t CV3CanvasReadyFlag = (1ULL << 63);
 static NSMutableSet<NSString *> *CV3ClientBridgeRelaunchPendingBundleIDs = nil;
 static NSMutableSet<NSString *> *CV3ClientBridgeRelaunchAuthorizedBundleIDs = nil;
 
@@ -1536,9 +1537,15 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, assign) BOOL prefersLandscapePresentation;
 @property (nonatomic, assign) BOOL requiresLandscapeContent;
 @property (nonatomic, assign) BOOL awaitingInitialRenderableContent;
+@property (nonatomic, assign) CFTimeInterval coldLaunchStartTime;
+@property (nonatomic, copy) NSString *coldLaunchTraceID;
+@property (nonatomic, assign) BOOL coldLaunchSceneFoundRecorded;
+@property (nonatomic, assign) BOOL coldLaunchHostAttachedRecorded;
+@property (nonatomic, assign) BOOL coldLaunchCanvasMatchedRecorded;
+@property (nonatomic, assign) BOOL coldLaunchCompletedRecorded;
+@property (nonatomic, assign) CFTimeInterval lastInitialHostPresentationRefreshTime;
 @property (nonatomic, assign) UIInterfaceOrientation mappedPresentationOrientation;
 @property (nonatomic, assign) UIInterfaceOrientation mappedHostedOrientation;
-@property (nonatomic, assign) NSTimeInterval hostedCanvasLandscapeSince;
 @property (nonatomic, assign) NSTimeInterval lastCanvasMismatchLoggedAt;
 @property (nonatomic, strong) id originalOrientationMapResolver;
 @property (nonatomic, strong) id activeOrientationMapResolver;
@@ -1648,6 +1655,7 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 - (void)handleCopyHostedContentAction:(id)sender;
 - (void)dismissMultitaskingMenu;
 - (void)ensureLaunchSplashVisible;
+- (void)recordColdLaunchMilestone:(NSString *)milestone details:(NSString *)details;
 - (void)loadAppScene;
 - (UIEdgeInsets)currentSafeAreaInsets;
 - (void)dismissLaunchSplashAnimated;
