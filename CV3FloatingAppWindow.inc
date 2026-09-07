@@ -1353,7 +1353,10 @@ void CV3ToggleExposeMode(void) {
     BOOL shellIsLandscape = self.bounds.size.width > self.bounds.size.height;
     if (wantsLandscape != shellIsLandscape && self.bounds.size.width > 0.0 && self.bounds.size.height > 0.0) {
         CGSize size = self.bounds.size;
-        self.bounds = CGRectMake(0, 0, size.height, size.width);
+        CGRect fitted = [self safeAreaClampedFrame:CGRectMake(0, 0, size.height, size.width)
+                                  preferredCenter:self.center preserveSize:NO];
+        self.bounds = CGRectMake(0, 0, fitted.size.width, fitted.size.height);
+        self.center = CGPointMake(CGRectGetMidX(fitted), CGRectGetMidY(fitted));
     }
 
     self.targetOrientation = effectiveOrientation;
@@ -2083,7 +2086,58 @@ static NSString *CV3OrientationResolverTrace(id settings) {
                  [layers componentsJoinedByString:@" | "]);
 }
 
+- (void)recordViewportConstraintAudit:(NSString *)phase force:(BOOL)force {
+    if (self.isClosing) return;
+    CGRect display = CV3DisplayBoundsForWindow(self);
+    UIEdgeInsets insets = [self currentSafeAreaInsets];
+    CGFloat breath = CV3Style.safeAreaBreath;
+    // Use the same coordinate limits as safeAreaClampedFrame/clampToScreenBounds.
+    CGRect allowed = CGRectMake(insets.left + breath, insets.top + breath,
+        display.size.width - insets.left - insets.right - 2.0 * breath,
+        display.size.height - insets.top - insets.bottom - 2.0 * breath);
+    CALayer *presentation = self.layer.presentationLayer;
+    CGRect model = self.frame;
+    CGRect presented = presentation ? presentation.frame : model;
+    BOOL valid = isfinite(allowed.size.width) && isfinite(allowed.size.height) &&
+        allowed.size.width > 0 && allowed.size.height > 0 &&
+        isfinite(model.origin.x) && isfinite(model.origin.y) &&
+        isfinite(model.size.width) && isfinite(model.size.height) &&
+        isfinite(presented.origin.x) && isfinite(presented.origin.y) &&
+        isfinite(presented.size.width) && isfinite(presented.size.height);
+    CGFloat tolerance = 1.0 / MAX(1.0, self.screen.scale);
+    CGFloat widthOver = MAX(0.0, model.size.width - allowed.size.width);
+    CGFloat heightOver = MAX(0.0, model.size.height - allowed.size.height);
+    CGFloat presentedWidthOver = MAX(0.0, presented.size.width - allowed.size.width);
+    CGFloat presentedHeightOver = MAX(0.0, presented.size.height - allowed.size.height);
+    UIEdgeInsets overflow = UIEdgeInsetsMake(
+        MAX(0.0, CGRectGetMinY(allowed) - CGRectGetMinY(model)),
+        MAX(0.0, CGRectGetMinX(allowed) - CGRectGetMinX(model)),
+        MAX(0.0, CGRectGetMaxY(model) - CGRectGetMaxY(allowed)),
+        MAX(0.0, CGRectGetMaxX(model) - CGRectGetMaxX(allowed)));
+    BOOL sizeExceeded = widthOver > tolerance || heightOver > tolerance;
+    BOOL presentedSizeExceeded = presentedWidthOver > tolerance || presentedHeightOver > tolerance;
+    BOOL positionExceeded = MAX(MAX(overflow.top, overflow.bottom), MAX(overflow.left, overflow.right)) > tolerance;
+    NSString *verdict = self.isStashed ? @"notApplicable.stashed" : !valid ? @"invalidGeometry" :
+        (sizeExceeded || presentedSizeExceeded || positionExceeded) ? @"exceeded" : @"within";
+    NSString *signature = [NSString stringWithFormat:@"%@ model=%@ presented=%@ allowed=%@ moving=%d resizing=%d",
+        verdict, NSStringFromCGRect(model), NSStringFromCGRect(presented), NSStringFromCGRect(allowed),
+        self.isMovingWindow, self.isLiveResizing];
+    CFTimeInterval now = CACurrentMediaTime();
+    BOOL changed = ![signature isEqualToString:self.lastViewportConstraintSignature];
+    if (!force && !changed && now - self.lastViewportConstraintLogTime < 5.0) return;
+    self.lastViewportConstraintSignature = signature;
+    self.lastViewportConstraintLogTime = now;
+    CV3LogToFile(@"[ViewportConstraint] phase=%@ event=%@ bundle=%@ verdict=%@ valid=%d applicable=%d units=pt tolerance=%.3f display=%@ safeArea=%@ breath=%.3f allowed=%@ model=%@ presentation=%@ presentationAvailable=%d sizeExceeded=%d widthOver=%.3f heightOver=%.3f presentationSizeExceeded=%d presentationWidthOver=%.3f presentationHeightOver=%.3f positionExceeded=%d overflowTLBR=%@ moving=%d resizing=%d fullscreen=%d compact=%d target=%ld",
+        phase, changed ? @"change" : @"heartbeat", self.bundleID, verdict, valid, !self.isStashed,
+        tolerance, NSStringFromCGRect(display), NSStringFromUIEdgeInsets(insets), breath,
+        NSStringFromCGRect(allowed), NSStringFromCGRect(model), NSStringFromCGRect(presented), presentation != nil,
+        sizeExceeded, widthOver, heightOver, presentedSizeExceeded, presentedWidthOver, presentedHeightOver,
+        positionExceeded, NSStringFromUIEdgeInsets(overflow), self.isMovingWindow, self.isLiveResizing,
+        self.isFullscreenMode, self.isCompactMode, (long)self.targetOrientation);
+}
+
 - (void)recordSurfaceOrientationAudit:(NSString *)phase force:(BOOL)force {
+    [self recordViewportConstraintAudit:phase force:force];
     if (self.isClosing) return;
     id settings = CV3InvokeObject(self.targetScene, @selector(settings));
     id clientSettings = CV3InvokeObject(self.targetScene, NSSelectorFromString(@"clientSettings"));
@@ -5587,7 +5641,13 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     BOOL shellIsLandscape = self.bounds.size.width > self.bounds.size.height;
     if (wantsLandscape != shellIsLandscape && self.bounds.size.width > 0.0 && self.bounds.size.height > 0.0) {
         CGSize shellSize = self.bounds.size;
-        self.bounds = CGRectMake(0, 0, shellSize.height, shellSize.width);
+        CGRect requested = CGRectMake(0, 0, shellSize.height, shellSize.width);
+        CGRect fitted = [self safeAreaClampedFrame:requested
+                                  preferredCenter:self.center preserveSize:NO];
+        self.bounds = CGRectMake(0, 0, fitted.size.width, fitted.size.height);
+        self.center = CGPointMake(CGRectGetMidX(fitted), CGRectGetMidY(fitted));
+        CV3LogToFile(@"[ViewportFit] phase=orientationSwap bundle=%@ requestedSize=%@ fitted=%@",
+                     self.bundleID, NSStringFromCGSize(requested.size), NSStringFromCGRect(fitted));
     }
 
     UIInterfaceOrientation sceneOrientation = self.windowScene
