@@ -1733,6 +1733,8 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, strong) NSTimer *assertionWatchdogTimer;
 @property (nonatomic, strong) NSTimer *receptionTraceTimer;
 @property (nonatomic, copy) NSString *lastReceptionTraceSignature;
+@property (nonatomic, copy) NSString *lastViewportConstraintSignature;
+@property (nonatomic, assign) CFTimeInterval lastViewportConstraintLogTime;
 @property (nonatomic, assign) NSTimeInterval lastReceptionTraceHeartbeatTime;
 @property (nonatomic, assign) NSUInteger sceneHostGeneration;
 @property (nonatomic, assign) CV3HostLifecycleState hostLifecycleState;
@@ -1849,6 +1851,7 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 - (void)recordColdLaunchMilestone:(NSString *)milestone details:(NSString *)details;
 - (void)recordOrientationTrace:(NSString *)phase force:(BOOL)force;
 - (void)recordReceptionTrace:(NSString *)phase force:(BOOL)force;
+- (void)recordViewportConstraintAudit:(NSString *)phase force:(BOOL)force;
 - (void)receptionTraceTimerFired:(NSTimer *)timer;
 - (void)schedulePendingPortraitConfirmation;
 - (void)loadAppScene;
