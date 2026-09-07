@@ -2151,6 +2151,7 @@ static NSString *CV3OrientationResolverTrace(id settings) {
 }
 
 - (void)applyHostedContentOrientation:(UIInterfaceOrientation)orientation {
+    CFTimeInterval orientationStart = CACurrentMediaTime();
     [self recordSurfaceOrientationAudit:@"orientation.request.before" force:YES];
     [self recordStrictSplitTrace:@"orientation.request.received"
                          details:[NSString stringWithFormat:@"requested=%ld", (long)orientation]];
@@ -2203,15 +2204,15 @@ static NSString *CV3OrientationResolverTrace(id settings) {
                          details:[NSString stringWithFormat:@"requested=%ld", (long)orientation]];
     [self recordProducerGeometryTrace:@"orientation.afterMutation"];
     [self syncHostedSceneLayoutForce:YES];
-    [self recordStrictSplitTrace:@"orientation.afterSceneSync" details:nil];
+    [self recordStrictSplitTrace:@"orientation.afterSceneSync" details:[NSString stringWithFormat:@"elapsedMs=%.3f", (CACurrentMediaTime() - orientationStart) * 1000.0]];
     [self recordProducerGeometryTrace:@"orientation.afterSceneSync"];
     [self refreshHostViewPresentation];
-    [self recordStrictSplitTrace:@"orientation.afterPresentationRefresh" details:nil];
+    [self recordStrictSplitTrace:@"orientation.afterPresentationRefresh" details:[NSString stringWithFormat:@"elapsedMs=%.3f", (CACurrentMediaTime() - orientationStart) * 1000.0]];
     [self recordProducerGeometryTrace:@"orientation.afterPresentationRefresh"];
     [self setNeedsLayout];
     [self recordStrictSplitTrace:@"orientation.afterSetNeedsLayout" details:nil];
     [self layoutIfNeeded];
-    [self recordStrictSplitTrace:@"orientation.afterLayoutIfNeeded" details:nil];
+    [self recordStrictSplitTrace:@"orientation.afterLayoutIfNeeded" details:[NSString stringWithFormat:@"elapsedMs=%.3f", (CACurrentMediaTime() - orientationStart) * 1000.0]];
     [self recordProducerGeometryTrace:@"orientation.afterLayoutIfNeeded"];
     [self synchronizeHostedContextLayerGeometry];
     [self recordStrictSplitTrace:@"orientation.afterLayerGeometrySync" details:nil];
@@ -2226,7 +2227,7 @@ static NSString *CV3OrientationResolverTrace(id settings) {
                 return;
             }
             [self recordStrictSplitTrace:@"orientation.delayedSync.before"
-                                 details:[NSString stringWithFormat:@"delay=%.3f", delay.doubleValue]];
+                                     details:[NSString stringWithFormat:@"delay=%.3f sinceRequestMs=%.3f", delay.doubleValue, (CACurrentMediaTime() - orientationStart) * 1000.0]];
             [self synchronizeHostedContextLayerGeometry];
             [self recordStrictSplitTrace:@"orientation.delayedSync.after"
                                  details:[NSString stringWithFormat:@"delay=%.3f", delay.doubleValue]];
@@ -3843,6 +3844,28 @@ static void CV3CollectReceptionLayers(CALayer *layer,
                  changed ? @"change" : @"heartbeat", phase ?: @"unknown", signature);
 }
 
+- (void)schedulePendingPortraitConfirmation {
+    if (!CV3IsValidInterfaceOrientation(self.pendingPortraitOrientation) ||
+        self.pendingPortraitStableSince <= 0) return;
+    CFTimeInterval stableSince = self.pendingPortraitStableSince;
+    CFTimeInterval deadline = self.pendingPortraitDeadline;
+    UIInterfaceOrientation orientation = self.pendingPortraitOrientation;
+    // Check just after the threshold instead of waiting for a 250 ms timer tick.
+    NSTimeInterval delay = MAX(0.001, stableSince + 0.501 - CACurrentMediaTime());
+    __weak CV3FloatingAppWindow *weakWindow = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        CV3FloatingAppWindow *window = weakWindow;
+        if (!window || window.isClosing || window.isStashed ||
+            window.pendingPortraitOrientation != orientation ||
+            window.pendingPortraitDeadline != deadline ||
+            window.pendingPortraitStableSince != stableSince) return;
+        CV3LogToFile(@"[PortraitRestore] phase=deadlineCheck bundle=%@ stableMs=%.3f",
+                     window.bundleID, (CACurrentMediaTime() - stableSince) * 1000.0);
+        [window receptionTraceTimerFired:nil];
+    });
+}
+
 - (void)receptionTraceTimerFired:(NSTimer *)timer {
     (void)timer;
     [self recordReceptionTrace:@"timer" force:NO];
@@ -3897,6 +3920,11 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     UIInterfaceOrientation liveClientOrientation = CV3HostedClientOrientation(self);
     if (CV3IsValidInterfaceOrientation(self.pendingPortraitOrientation)) {
         CFTimeInterval sampleTime = CACurrentMediaTime();
+        CV3LogToFile(@"[PortraitRestore] phase=sample bundle=%@ requested=%ld client=%ld elapsedMs=%.3f stableMs=%.3f remainingMs=%.3f",
+                     self.bundleID, (long)self.pendingPortraitOrientation, (long)liveClientOrientation,
+                     (sampleTime - (self.pendingPortraitDeadline - 1.5)) * 1000.0,
+                     self.pendingPortraitStableSince > 0 ? (sampleTime - self.pendingPortraitStableSince) * 1000.0 : 0.0,
+                     (self.pendingPortraitDeadline - sampleTime) * 1000.0);
         if (self.isClosing || self.isStashed || self.requiresLandscapeContent ||
             sampleTime >= self.pendingPortraitDeadline) {
             CV3LogToFile(@"[PortraitRestore] phase=cancelled bundle=%@ client=%ld closing=%d stashed=%d",
@@ -3908,6 +3936,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
                 self.pendingPortraitStableSince = 0;
             } else if (self.pendingPortraitStableSince == 0) {
                 self.pendingPortraitStableSince = sampleTime;
+                [self schedulePendingPortraitConfirmation];
             } else if (sampleTime - self.pendingPortraitStableSince >= 0.5) {
                 UIInterfaceOrientation confirmed = self.pendingPortraitOrientation;
                 self.pendingPortraitOrientation = UIInterfaceOrientationUnknown;
@@ -3916,7 +3945,10 @@ static void CV3CollectReceptionLayers(CALayer *layer,
                 self.hostedOrientationDriftRepairApplied = NO;
                 CV3LogToFile(@"[PortraitRestore] phase=confirmed bundle=%@ requested=%ld client=%ld",
                              self.bundleID, (long)confirmed, (long)liveClientOrientation);
+                CFTimeInterval applyStart = CACurrentMediaTime();
                 [self applyHostedContentOrientation:confirmed];
+                CV3LogToFile(@"[PortraitRestore] phase=applyReturned bundle=%@ elapsedMs=%.3f",
+                             self.bundleID, (CACurrentMediaTime() - applyStart) * 1000.0);
             }
             // Do not reassert the old landscape request while checking an exit.
             return;
