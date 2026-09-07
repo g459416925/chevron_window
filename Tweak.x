@@ -1708,6 +1708,7 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, assign) UIInterfaceOrientation lastLayoutOrientation;
 @property (nonatomic, assign) CGAffineTransform baseRotationTransform;
 @property (nonatomic, assign) CGRect preFullscreenFrame;
+@property (nonatomic, assign) CGRect preHostedLandscapePortraitFrame;
 @property (nonatomic, assign) CGRect preCompactFrame;
 @property (nonatomic, assign) BOOL isFullscreenMode;
 @property (nonatomic, assign) BOOL isCompactMode;
