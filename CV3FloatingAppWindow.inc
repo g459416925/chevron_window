@@ -2246,6 +2246,18 @@ static NSString *CV3OrientationResolverTrace(id settings) {
                      (long)liveClientOrientation, (long)self.clientAcknowledgedOrientation);
     }
 
+    if (!self.isStashed && !self.requiresLandscapeContent &&
+        UIInterfaceOrientationIsLandscape(orientation) &&
+        UIInterfaceOrientationIsPortrait(self.hostedContentOrientation) &&
+        self.bounds.size.width > 0 && self.bounds.size.height > self.bounds.size.width &&
+        CGRectIsEmpty(self.preHostedLandscapePortraitFrame)) {
+        CGSize size = self.bounds.size;
+        self.preHostedLandscapePortraitFrame = CGRectMake(self.center.x - size.width * 0.5,
+            self.center.y - size.height * 0.5, size.width, size.height);
+        CV3LogToFile(@"[PortraitWindowRestore] phase=saved bundle=%@ frame=%@",
+                     self.bundleID, NSStringFromCGRect(self.preHostedLandscapePortraitFrame));
+    }
+
     [self recordStrictSplitTrace:@"orientation.state.beforeMutation"
                          details:[NSString stringWithFormat:@"requested=%ld", (long)orientation]];
     [self recordProducerGeometryTrace:@"orientation.beforeMutation"];
@@ -2263,6 +2275,22 @@ static NSString *CV3OrientationResolverTrace(id settings) {
     [self refreshHostViewPresentation];
     [self recordStrictSplitTrace:@"orientation.afterPresentationRefresh" details:[NSString stringWithFormat:@"elapsedMs=%.3f", (CACurrentMediaTime() - orientationStart) * 1000.0]];
     [self recordProducerGeometryTrace:@"orientation.afterPresentationRefresh"];
+    if (!self.isStashed && UIInterfaceOrientationIsPortrait(orientation) &&
+        !CV3ShellShouldBeLandscape(self, orientation) &&
+        !CGRectIsEmpty(self.preHostedLandscapePortraitFrame)) {
+        CGRect saved = self.preHostedLandscapePortraitFrame;
+        CGRect fitted = [self safeAreaClampedFrame:saved
+                                  preferredCenter:CGPointMake(CGRectGetMidX(saved), CGRectGetMidY(saved))
+                                     preserveSize:NO];
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        self.bounds = CGRectMake(0, 0, fitted.size.width, fitted.size.height);
+        self.center = CGPointMake(CGRectGetMidX(fitted), CGRectGetMidY(fitted));
+        [CATransaction commit];
+        self.preHostedLandscapePortraitFrame = CGRectZero;
+        CV3LogToFile(@"[PortraitWindowRestore] phase=restored bundle=%@ saved=%@ fitted=%@",
+                     self.bundleID, NSStringFromCGRect(saved), NSStringFromCGRect(fitted));
+    }
     [self setNeedsLayout];
     [self recordStrictSplitTrace:@"orientation.afterSetNeedsLayout" details:nil];
     [self layoutIfNeeded];
