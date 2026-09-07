@@ -59,9 +59,9 @@ static void CV3AppendCanvasTrace(NSString *line) {
             [NSString stringWithFormat:@"ChevronV3-Client-%@.log", NSUUID.UUID.UUIDString]];
         NSLog(@"[ChevronV3][ClientTrace] path=%@", tracePath);
     });
-    NSString *entry = [NSString stringWithFormat:@"%@ pid=%d bundle=%@ %@\n",
+    NSString *entry = [NSString stringWithFormat:@"%@ pid=%d bundle=%@ mono=%.6f eventUnix=%.6f %@\n",
         NSDate.date, NSProcessInfo.processInfo.processIdentifier,
-        NSBundle.mainBundle.bundleIdentifier, line];
+        NSBundle.mainBundle.bundleIdentifier, CACurrentMediaTime(), NSDate.date.timeIntervalSince1970, line];
     dispatch_async(traceQueue, ^{
         // Preserve full records on disk; unified logging truncates long layer traces.
         if (traceBytes >= 8 * 1024 * 1024) return;

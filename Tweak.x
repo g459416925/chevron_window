@@ -845,6 +845,10 @@ static void CV3WriteFocusedDiagnostic(NSString *message) {
         ![message hasPrefix:@"[WindowOrientationTrace]"] &&
         ![message hasPrefix:@"[SplitTrace]"]) return;
 
+    // Capture the event before logging or queueing can delay persistence.
+    NSDate *eventDate = [NSDate date];
+    CFTimeInterval eventMono = CACurrentMediaTime();
+    BOOL eventOnMain = NSThread.isMainThread;
     NSLog(@"[ChevronV3] %@", message);
 
     dispatch_async(CV3LogQueue(), ^{
@@ -858,11 +862,12 @@ static void CV3WriteFocusedDiagnostic(NSString *message) {
                 formatter.dateFormat = @"yyyy-MM-dd HH:mm:ss.SSS";
             }
             uint64_t currentSequence = ++sequence;
-            NSString *timestamp = [formatter stringFromDate:[NSDate date]];
+            NSString *timestamp = [formatter stringFromDate:eventDate];
             NSString *entry = [NSString stringWithFormat:
-                @"[%@][seq=%llu][mono=%.6f][thread=%@] %@",
-                timestamp, currentSequence, CACurrentMediaTime(),
-                NSThread.isMainThread ? @"main" : @"background", message];
+                @"[%@][seq=%llu][mono=%.6f][thread=%@][queueMs=%.3f][clock=event-v2] %@",
+                timestamp, currentSequence, eventMono,
+                eventOnMain ? @"main" : @"background",
+                (CACurrentMediaTime() - eventMono) * 1000.0, message];
 
             NSString *documents = @"/var/mobile/Documents";
             NSString *path = [documents stringByAppendingPathComponent:@"ChevronV3_SplitTrace.log"];
@@ -1845,6 +1850,7 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 - (void)recordOrientationTrace:(NSString *)phase force:(BOOL)force;
 - (void)recordReceptionTrace:(NSString *)phase force:(BOOL)force;
 - (void)receptionTraceTimerFired:(NSTimer *)timer;
+- (void)schedulePendingPortraitConfirmation;
 - (void)loadAppScene;
 - (UIEdgeInsets)currentSafeAreaInsets;
 - (void)dismissLaunchSplashAnimated;
@@ -2112,8 +2118,11 @@ static void CV3RegisterVideoOrientationBridge(void) {
                 !window.requiresLandscapeContent && !window.isStashed) {
                 window.pendingPortraitOrientation = orientation;
                 window.pendingPortraitDeadline = now + 1.5;
+                UIInterfaceOrientation clientOrientation = CV3HostedClientOrientation(window);
+                window.pendingPortraitStableSince = clientOrientation == orientation ? now : 0;
+                [window schedulePendingPortraitConfirmation];
                 CV3LogToFile(@"[PortraitRestore] phase=pending bundle=%@ requested=%ld client=%ld",
-                             window.bundleID, (long)orientation, (long)CV3HostedClientOrientation(window));
+                             window.bundleID, (long)orientation, (long)clientOrientation);
                 return;
             }
         }
