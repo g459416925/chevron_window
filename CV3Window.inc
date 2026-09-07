@@ -1277,9 +1277,85 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     return CV3CurrentWorkspaceBundleID();
 }
 
+- (NSString *)edgeEnvironmentBlockReason {
+    if (CV3LockScreenPresented) return @"reject.lockScreen";
+    @try {
+        id lock = CV3InvokeObject(CV3ClassNamed(@"SBLockScreenManager"), @selector(sharedInstance));
+        if (CV3InvokeBool(lock, NSSelectorFromString(@"isUILocked"), NO) ||
+            CV3InvokeBool(lock, NSSelectorFromString(@"isLocked"), NO)) return @"reject.lockScreen";
+        id cc = CV3InvokeObject(CV3ClassNamed(@"SBControlCenterController"), @selector(sharedInstance));
+        if (CV3InvokeBool(cc, @selector(isPresented), NO)) return @"reject.controlCenter";
+        UIView *coverView = CV3GestureCoverSheetController.viewIfLoaded;
+        if (CV3GestureCoverSheetPresented || (coverView.window && !coverView.hidden)) return @"reject.coverSheet";
+    } @catch (__unused NSException *e) {
+        return @"reject.environmentUnavailable";
+    }
+    if (self.isSuppressedBySystem) return @"reject.systemSuppressed";
+    return nil;
+}
+
+- (void)cancelEdgeEnvironmentInteraction {
+    self.edgeEnvironmentCancelled = YES;
+    CV3PanelWakeGestureActive = NO;
+    CV3SetHomeScreenPullDownSuppressed(NO);
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.triggerPreviewLayer.opacity = 0;
+    self.bezierContainer.alpha = 0;
+    if (!self.isPanelShowing) {
+        self.panelContainer.hidden = YES;
+        self.panelContainer.alpha = 0;
+    }
+    [CATransaction commit];
+}
+
+- (void)recordEdgeEnvironment:(NSString *)phase gesture:(UIGestureRecognizer *)gesture decision:(NSString *)decision {
+    // Unknown private selectors must not be reported as a false/hidden state.
+    NSInteger (^readFlag)(id, NSString *) = ^NSInteger(id object, NSString *name) {
+        @try {
+            SEL selector = NSSelectorFromString(name);
+            if (!CV3TargetRespondsToSelector(object, selector)) return -1;
+            return CV3InvokeBool(object, selector, NO) ? 1 : 0;
+        } @catch (__unused NSException *e) { return -1; }
+    };
+    id lock = nil, cc = nil, cover = nil;
+    @try {
+        lock = CV3InvokeObject(CV3ClassNamed(@"SBLockScreenManager"), @selector(sharedInstance));
+        cc = CV3InvokeObject(CV3ClassNamed(@"SBControlCenterController"), @selector(sharedInstance));
+        cover = CV3InvokeObject(CV3ClassNamed(@"SBCoverSheetPresentationManager"), @selector(sharedInstance));
+    } @catch (__unused NSException *e) {}
+    CGPoint location = [gesture locationInView:self];
+    CV3LogToFile(@"[EdgeSystemEnvironment] trace=%lu phase=%@ coverSheetCached=%d coverSheetViewAttached=%d blockReason=%@",
+        (unsigned long)self.edgeEnvironmentSequence, phase, CV3GestureCoverSheetPresented,
+        CV3GestureCoverSheetController.viewIfLoaded.window != nil, [self edgeEnvironmentBlockReason] ?: @"none");
+    CGPoint translation = CGPointZero, velocity = CGPointZero;
+    if ([gesture isKindOfClass:UIPanGestureRecognizer.class]) {
+        translation = [(UIPanGestureRecognizer *)gesture translationInView:self];
+        velocity = [(UIPanGestureRecognizer *)gesture velocityInView:self];
+    }
+    CV3LogToFile(@"[EdgeGestureEnvironment] trace=%lu phase=%@ decision=%@ state=%ld enabled=%d edge=%lu lockCached=%d uiLocked=%ld locked=%ld controlCenterPresented=%ld coverSheetVisible=%ld suppressedBySystem=%d windowHidden=%d windowAlpha=%.3f panelShowing=%d animating=%d sceneActivation=%ld orientation=%ld bounds=%@ safeArea=%@ location=%@ translation=%@ velocity=%@ workspace=%@ recognizerView=%@ unknown=-1",
+        (unsigned long)self.edgeEnvironmentSequence, phase, decision, (long)gesture.state, gesture.enabled,
+        (unsigned long)self.systemEdgePan.edges, CV3LockScreenPresented,
+        (long)readFlag(lock, @"isUILocked"), (long)readFlag(lock, @"isLocked"),
+        (long)readFlag(cc, @"isPresented"), (long)readFlag(cover, @"isAnyCoverSheetVisible"),
+        self.isSuppressedBySystem, self.hidden, self.alpha, self.isPanelShowing, self.isAnimating,
+        self.windowScene ? (long)self.windowScene.activationState : -1L, (long)self.targetOrientation,
+        NSStringFromCGRect(self.bounds), NSStringFromUIEdgeInsets(self.safeAreaInsets),
+        NSStringFromCGPoint(location), NSStringFromCGPoint(translation), NSStringFromCGPoint(velocity),
+        [self currentActiveBundleID] ?: @"unknown", NSStringFromClass(gesture.view.class));
+}
+
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
     if (gesture == self.systemEdgePan) {
+        self.edgeEnvironmentSequence += 1;
+        self.edgeEnvironmentCancelled = NO;
+        NSString *blocked = [self edgeEnvironmentBlockReason];
+        if (blocked) {
+            [self recordEdgeEnvironment:@"shouldBegin" gesture:gesture decision:blocked];
+            return NO;
+        }
         if (self.isPanelShowing) {
+            [self recordEdgeEnvironment:@"shouldBegin" gesture:gesture decision:@"reject.panelShowing"];
             return NO;
         }
 
@@ -1299,15 +1375,18 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         if (self.systemEdgePan.edges == UIRectEdgeLeft || self.systemEdgePan.edges == UIRectEdgeRight) {
             // 垂直方向边缘（Portrait）: 限制 Y 轴
             if (location.y < safeArea.top + 10 || location.y > screenSize.height - safeArea.bottom - 10) {
+                [self recordEdgeEnvironment:@"shouldBegin" gesture:gesture decision:@"reject.verticalRange"];
                 return NO;
             }
         } else if (self.systemEdgePan.edges == UIRectEdgeTop || self.systemEdgePan.edges == UIRectEdgeBottom) {
             // 水平方向边缘（Landscape）: 限制 X 轴
             if (location.x < safeArea.left + 10 || location.x > screenSize.width - safeArea.right - 10) {
+                [self recordEdgeEnvironment:@"shouldBegin" gesture:gesture decision:@"reject.horizontalRange"];
                 return NO;
             }
         }
         
+        [self recordEdgeEnvironment:@"shouldBegin" gesture:gesture decision:@"allow"];
         return YES;
     }
     return YES;
@@ -2648,6 +2727,17 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 
 
 - (void)handleEdgeInteraction:(UIPanGestureRecognizer *)gesture {
+    NSString *blocked = [self edgeEnvironmentBlockReason];
+    if (blocked || self.edgeEnvironmentCancelled) {
+        if (!self.edgeEnvironmentCancelled) {
+            [self recordEdgeEnvironment:@"action.blocked" gesture:gesture decision:blocked];
+            [self cancelEdgeEnvironmentInteraction];
+        }
+        return;
+    }
+    if (gesture.state != UIGestureRecognizerStateChanged) {
+        [self recordEdgeEnvironment:@"action" gesture:gesture decision:@"received"];
+    }
     CGPoint location = [gesture locationInView:self];
     CGPoint translation = [gesture translationInView:self];
     CGPoint velocity = [gesture velocityInView:self];
@@ -2741,6 +2831,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             }
 
             if (stretch > triggerDistance) {
+                [self recordEdgeEnvironment:@"panel.request" gesture:gesture decision:@"distanceThreshold"];
                 [self requestPanelPresentationFromPoint:location velocity:vel];
                 gesture.enabled = NO; gesture.enabled = YES; 
             }
@@ -2760,6 +2851,7 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         BOOL shouldActivate = (stretch > triggerDistance || projectedStretch > triggerDistance || vel > 320.0);
 
         if (self.bezierContainer.alpha > 0 && !self.isPanelShowing && shouldActivate && gesture.state == UIGestureRecognizerStateEnded) {
+            [self recordEdgeEnvironment:@"panel.request" gesture:gesture decision:@"releaseProjectionOrVelocity"];
             [self requestPanelPresentationFromPoint:location velocity:vel];
         } else if (!self.isPanelShowing) {
             // 修复：确保中断时重置所有状态
@@ -2795,12 +2887,24 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 }
 
 - (void)requestPanelPresentationFromPoint:(CGPoint)point velocity:(CGFloat)velocity {
+    NSString *blocked = [self edgeEnvironmentBlockReason];
+    if (blocked || self.edgeEnvironmentCancelled) {
+        [self recordEdgeEnvironment:@"panel.blocked" gesture:self.systemEdgePan decision:blocked ?: @"reject.cancelled"];
+        [self cancelEdgeEnvironmentInteraction];
+        return;
+    }
     if (self.isPanelShowing || self.isAnimating || CV3PendingPanelPresentation) return;
 
     __weak CV3Window *weakSelf = self;
     CV3QueuePanelPresentationAfterSystemGesture(^{
         CV3Window *strongSelf = weakSelf;
         if (!strongSelf || strongSelf.isPanelShowing || strongSelf.isAnimating) return;
+        NSString *blocked = [strongSelf edgeEnvironmentBlockReason];
+        if (blocked || strongSelf.edgeEnvironmentCancelled) {
+            [strongSelf recordEdgeEnvironment:@"panel.deferredBlocked" gesture:strongSelf.systemEdgePan decision:blocked ?: @"reject.cancelled"];
+            [strongSelf cancelEdgeEnvironmentInteraction];
+            return;
+        }
         [strongSelf animateSpotlight:YES fromPoint:point velocity:velocity];
     });
 }

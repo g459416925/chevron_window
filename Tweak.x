@@ -1037,6 +1037,8 @@ static NSUInteger CV3WorkspaceTransitionProtectionToken = 0;
 static BOOL CV3SwitcherWindowVisible = NO;
 static BOOL CV3MainSwitcherVisible = NO;
 static BOOL CV3LockScreenPresented = NO;
+static BOOL CV3GestureCoverSheetPresented = NO;
+static __weak UIViewController *CV3GestureCoverSheetController;
 static const char *CV3HostGenerationNotification = "com.xu.chevronv3.host-generation";
 static uint32_t CV3HostGeneration = 0;
 
@@ -2546,6 +2548,8 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 @property (nonatomic, assign) NSUInteger appLoadGeneration;
 @property (nonatomic, assign) CGFloat lastHapticX;
 @property (nonatomic, strong) UIScreenEdgePanGestureRecognizer *systemEdgePan;
+@property (nonatomic, assign) NSUInteger edgeEnvironmentSequence;
+@property (nonatomic, assign) BOOL edgeEnvironmentCancelled;
 @property (nonatomic, strong) CAGradientLayer *triggerPreviewLayer;
 @property (nonatomic, assign) UIInterfaceOrientation targetOrientation;
 @property (nonatomic, assign) CGPoint lastTriggerPoint;
@@ -4806,6 +4810,8 @@ static BOOL CV3FocusHostedLaunchTargetFromObject(id request, NSString *source) {
 
 %hook SBCoverSheetPresentationManager
 - (void)setCoverSheetPresented:(BOOL)arg1 animated:(BOOL)arg2 {
+    CV3GestureCoverSheetPresented = arg1;
+    CV3LogToFile(@"[EdgeSystemEnvironment] source=coverSheetManager presented=%d", arg1);
     %orig;
     if (arg1) CV3ExitExposeModeIfNeeded(nil, NO);
     if (sharedWindow) {
@@ -4826,6 +4832,9 @@ static BOOL CV3FocusHostedLaunchTargetFromObject(id request, NSString *source) {
 
 %hook CSCoverSheetViewController
 - (void)viewWillAppear:(BOOL)animated {
+    CV3GestureCoverSheetController = self;
+    CV3GestureCoverSheetPresented = YES;
+    CV3LogToFile(@"[EdgeSystemEnvironment] source=coverSheetWillAppear presented=1");
     %orig;
     CV3ExitExposeModeIfNeeded(nil, NO);
     if (sharedWindow) {
@@ -4835,6 +4844,11 @@ static BOOL CV3FocusHostedLaunchTargetFromObject(id request, NSString *source) {
 }
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
+    if (CV3GestureCoverSheetController == self) {
+        CV3GestureCoverSheetController = nil;
+        CV3GestureCoverSheetPresented = NO;
+    }
+    CV3LogToFile(@"[EdgeSystemEnvironment] source=coverSheetDidDisappear presented=%d", CV3GestureCoverSheetPresented);
     if (sharedWindow) {
         // 只有当没有其他系统 UI 活跃时才解除压制
         if (![sharedWindow isSystemUIActive]) {
