@@ -11,6 +11,8 @@ static void CV3CascadeUpdateSovereigntyAssertions(void) {
 // A host UIView can survive after FrontBoard drops the Scene's real content
 // layer. Match PullOver-X's stronger readiness check instead of treating any
 // sublayer as proof that the client is still drawable.
+static NSString *CV3DirectionTraceView(UIView *view);
+
 static BOOL CV3SceneHasRenderableMainLayer(FBScene *scene) {
     if (!scene) return NO;
 
@@ -51,6 +53,28 @@ static BOOL CV3SceneHasRenderableMainLayer(FBScene *scene) {
         } @catch (__unused NSException *exception) {}
     }
     return NO;
+}
+
+// Return the first live remote CA context carried by a host hierarchy.  The
+// value is intentionally read from the layer tree instead of the presentation
+// context object: the latter can exist before FrontBoard has published a new
+// CALayerHost and was the source of the false-positive readiness in v70.
+static NSString *CV3HostedLayerContextID(CALayer *layer) {
+    if (!layer) return nil;
+    for (NSString *key in @[@"contextId", @"_contextId"]) {
+        @try {
+            id value = [layer valueForKey:key];
+            if ([value respondsToSelector:@selector(unsignedLongLongValue)] &&
+                [value unsignedLongLongValue] != 0) {
+                return [value description];
+            }
+        } @catch (__unused NSException *exception) {}
+    }
+    for (CALayer *child in layer.sublayers) {
+        NSString *value = CV3HostedLayerContextID(child);
+        if (value.length > 0) return value;
+    }
+    return nil;
 }
 
 static void CV3StashPeerWindowsForFullscreen(CV3FloatingAppWindow *activeWindow) {
@@ -127,15 +151,78 @@ static BOOL CV3ShellShouldBeLandscape(CV3FloatingAppWindow *window,
     return landscapeClientNeedsSceneAxisCompensation ? !presentationLandscape : presentationLandscape;
 }
 
+static UIInterfaceOrientation CV3HostedClientOrientation(CV3FloatingAppWindow *window) {
+    if (!window.targetScene) return UIInterfaceOrientationUnknown;
+    id clientSettings = CV3InvokeObject(window.targetScene,
+                                        NSSelectorFromString(@"clientSettings"));
+    return (UIInterfaceOrientation)CV3InvokeInteger(clientSettings,
+                                                     @selector(interfaceOrientation),
+                                                     UIInterfaceOrientationUnknown);
+}
+
+static CGSize CV3SceneSettingsBounds(id settings) {
+    SEL boundsSelector = NSSelectorFromString(@"bounds");
+    if (!settings || ![settings respondsToSelector:boundsSelector]) return CGSizeZero;
+    @try {
+        CGRect bounds = ((CGRect (*)(id, SEL))objc_msgSend)(settings, boundsSelector);
+        return bounds.size;
+    } @catch (__unused NSException *exception) {
+        return CGSizeZero;
+    }
+}
+
+static BOOL CV3SceneSettingsBoundsMatchOrientation(id settings,
+                                                    UIInterfaceOrientation orientation) {
+    if (!CV3IsValidInterfaceOrientation(orientation)) return NO;
+    CGSize bounds = CV3SceneSettingsBounds(settings);
+    if (bounds.width <= 0.0 || bounds.height <= 0.0 ||
+        fabs(bounds.width - bounds.height) <= 0.5) return NO;
+    return (bounds.width > bounds.height) == UIInterfaceOrientationIsLandscape(orientation);
+}
+
 static CGAffineTransform CV3HostedContentRotationInScene(CV3FloatingAppWindow *window) {
     if (!window.prefersLandscapePresentation ||
-        !UIInterfaceOrientationIsLandscape(window.hostedContentOrientation) ||
-        !CV3SceneAndDisplayAxesDiffer(window)) {
+        !UIInterfaceOrientationIsLandscape(window.hostedContentOrientation)) {
         return CGAffineTransformIdentity;
     }
+
+    // clientSettings is the producer-side acknowledgement. Once it reaches the
+    // requested orientation, UIKit has already oriented the remote Surface.
+    // Rotating rootTransformContainer as well applies the presentation a second
+    // time and leaves the translated client content in only half of the shell.
+    UIInterfaceOrientation clientOrientation = CV3HostedClientOrientation(window);
+    if (CV3IsValidInterfaceOrientation(clientOrientation)) {
+        if (clientOrientation == window.hostedContentOrientation) {
+            window.clientAcknowledgedOrientation = clientOrientation;
+        } else if (window.clientAcknowledgedOrientation == window.hostedContentOrientation) {
+            UIInterfaceOrientation staleAcknowledgement = window.clientAcknowledgedOrientation;
+            window.clientAcknowledgedOrientation = UIInterfaceOrientationUnknown;
+            CV3LogToFile(@"[OrientationRepair] phase=clientAckInvalidated bundle=%@ liveClient=%ld cachedAck=%ld requested=%ld",
+                         window.bundleID ?: @"nil", (long)clientOrientation,
+                         (long)staleAcknowledgement, (long)window.hostedContentOrientation);
+        }
+    }
+    if (window.clientAcknowledgedOrientation == window.hostedContentOrientation) {
+        return CGAffineTransformIdentity;
+    }
+
+    // The server frame remains in portrait reference coordinates, but the
+    // effective Scene bounds are orientation-aware. When those bounds already
+    // match the requested hosted axis, the remote surface is already laid out
+    // in landscape and rotating the root again clips it to a square slice.
+    id settings = window.targetScene
+        ? CV3InvokeObject(window.targetScene, @selector(settings))
+        : nil;
+    if (CV3SceneSettingsBoundsMatchOrientation(settings, window.hostedContentOrientation)) {
+        return CGAffineTransformIdentity;
+    }
+
     UIInterfaceOrientation sceneOrientation = window.windowScene.interfaceOrientation;
     if (!CV3IsValidInterfaceOrientation(sceneOrientation)) {
         sceneOrientation = UIInterfaceOrientationPortrait;
+    }
+    if (sceneOrientation == window.hostedContentOrientation) {
+        return CGAffineTransformIdentity;
     }
     CGAffineTransform hosted = CV3RotationTransformForInterfaceOrientation(window.hostedContentOrientation);
     CGAffineTransform scene = CV3RotationTransformForInterfaceOrientation(sceneOrientation);
@@ -244,8 +331,15 @@ static CGSize CV3HostedCanvasSizeForOrientation(UIInterfaceOrientation orientati
 static UIInterfaceOrientation CV3HostedPresentationOrientation(CV3FloatingAppWindow *window) {
     if (!window) return UIInterfaceOrientationUnknown;
     // The destination is SpringBoard's display scene, not the hosted app.
-    // Reading the app's own orientation here removes the cross-orientation map
-    // as soon as that app commits its first landscape scene update.
+    // Use this window's live Scene orientation even when its private session
+    // role is not _UIScreenBasedSceneSession. Falling through the global
+    // trusted-orientation cache can return the hosted app's landscape request
+    // while SpringBoard is still portrait, causing the required cross-axis map
+    // to be restored incorrectly.
+    UIInterfaceOrientation sceneOrientation = window.windowScene.interfaceOrientation;
+    if (CV3IsValidInterfaceOrientation(sceneOrientation)) {
+        return sceneOrientation;
+    }
     return CV3TrustedInterfaceOrientation(window.windowScene);
 }
 
@@ -1502,10 +1596,17 @@ void CV3ToggleExposeMode(void) {
     UIInterfaceOrientation hostedOrientation = CV3IsValidInterfaceOrientation(self.hostedContentOrientation)
         ? self.hostedContentOrientation
         : UIInterfaceOrientationPortrait;
-    // The proxy canvas must use the same orientation as the hosted Scene. A
-    // portrait-only canvas makes a landscape game look vertically letterboxed
-    // even when the Scene settings already request landscape.
-    CGSize canvasSize = CV3HostedCanvasSizeForOrientation(hostedOrientation, sceneSettings);
+    CGAffineTransform localRotation = CV3HostedContentRotationInScene(self);
+    BOOL localRotationSwapsAxes = fabs(localRotation.b) > 0.5 || fabs(localRotation.c) > 0.5;
+    // When SpringBoard remains portrait but the hosted App requests landscape,
+    // FrontBoard still publishes the remote Scene in portrait reference
+    // coordinates. Preserve that complete 430x932 canvas and rotate it once in
+    // rootTransformContainer. Asking the host for 932x430 at the same time
+    // stretches only the container; the producer's valid 430-wide Surface then
+    // occupies the left half and leaves the remainder transparent.
+    CGSize canvasSize = localRotationSwapsAxes
+        ? CV3CanonicalApplicationSceneFrame(sceneSettings).size
+        : CV3HostedCanvasSizeForOrientation(hostedOrientation, sceneSettings);
     return CGRectMake(0, 0, canvasSize.width, canvasSize.height);
 }
 
@@ -1516,10 +1617,15 @@ void CV3ToggleExposeMode(void) {
     UIInterfaceOrientation targetOrientation = CV3IsValidInterfaceOrientation(self.hostedContentOrientation)
         ? self.hostedContentOrientation
         : UIInterfaceOrientationPortrait;
-    // FrontBoard's server frame uses the display's reference coordinates.
-    // UIKit rotates that frame into the client's interface coordinate space.
-    // Supplying the already-rotated canvas here swaps landscape dimensions twice.
+    // FBS scene frames use the display's portrait reference coordinates. The
+    // host presentation rotates this canonical canvas when the hosted App and
+    // SpringBoard Scene differ; swapping this frame itself leaves only the
+    // producer's original 430-wide content visible in a 932-wide container.
     CGRect targetFrame = CV3CanonicalApplicationSceneFrame(settings);
+    CV3LogToFile(@"[Strict] trace=%@ phase=settingsLayout.begin force=%d targetOrientation=%ld targetFrame=%@ before={%@} resolver={%@}",
+                 self.coldLaunchTraceID, force, (long)targetOrientation,
+                 NSStringFromCGRect(targetFrame), CV3SceneSettingsFingerprint(settings),
+                 CV3OrientationResolverTrace(settings));
 
     @try {
         if (force ||
@@ -1528,9 +1634,15 @@ void CV3ToggleExposeMode(void) {
             if ([settings respondsToSelector:@selector(setFrame:)]) {
                 [(FBSMutableSceneSettings *)settings setFrame:targetFrame];
                 modified = YES;
+                CV3LogToFile(@"[Strict] trace=%@ phase=settingsLayout.frame.written value=%@ now={%@}",
+                             self.coldLaunchTraceID, NSStringFromCGRect(targetFrame),
+                             CV3SceneSettingsFingerprint(settings));
             }
         }
-    } @catch (NSException *e) {}
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Strict] trace=%@ phase=settingsLayout.frame.exception exception=%@",
+                     self.coldLaunchTraceID, e);
+    }
 
     NSInteger orientationValue = (NSInteger)targetOrientation;
     modified |= CV3SetIntegerSetting(settings,
@@ -1539,6 +1651,9 @@ void CV3ToggleExposeMode(void) {
                                      @"interfaceOrientation",
                                      orientationValue,
                                      force);
+    CV3LogToFile(@"[Strict] trace=%@ phase=settingsLayout.interfaceOrientation.applied requested=%ld modified=%d now={%@}",
+                 self.coldLaunchTraceID, (long)orientationValue, modified,
+                 CV3SceneSettingsFingerprint(settings));
 
     UIDeviceOrientation deviceOrientation = CV3DeviceOrientationFromInterface(targetOrientation);
     if (deviceOrientation != UIDeviceOrientationUnknown) {
@@ -1548,14 +1663,28 @@ void CV3ToggleExposeMode(void) {
                                          @"deviceOrientation",
                                          (NSInteger)deviceOrientation,
                                          force);
+        CV3LogToFile(@"[Strict] trace=%@ phase=settingsLayout.deviceOrientation.applied requested=%ld modified=%d now={%@}",
+                     self.coldLaunchTraceID, (long)deviceOrientation, modified,
+                     CV3SceneSettingsFingerprint(settings));
     }
 
     modified |= CV3ApplyLockedOrientationTraitsToSettings(settings, targetOrientation, force);
+    CV3LogToFile(@"[Strict] trace=%@ phase=settingsLayout.traits.applied target=%ld modified=%d traits=%@ clientTraits=%@ preferredTraits=%@ effectiveTraits=%@",
+                 self.coldLaunchTraceID, (long)targetOrientation, modified,
+                 CV3SafeSettingValue(settings, @"traitCollection"),
+                 CV3SafeSettingValue(settings, @"clientTraitCollection"),
+                 CV3SafeSettingValue(settings, @"preferredTraitCollection"),
+                 CV3SafeSettingValue(settings, @"effectiveTraitCollection"));
 
     UIInterfaceOrientation presentationOrientation = CV3HostedPresentationOrientation(self);
+    BOOL sceneBoundsMatchTarget =
+        CV3SceneSettingsBoundsMatchOrientation(settings, targetOrientation);
     BOOL needsCrossOrientationMap =
+        CV3IsValidInterfaceOrientation(presentationOrientation) &&
         UIInterfaceOrientationIsLandscape(presentationOrientation) !=
-        UIInterfaceOrientationIsLandscape(targetOrientation);
+            UIInterfaceOrientationIsLandscape(targetOrientation) &&
+        !sceneBoundsMatchTarget;
+    id currentOrientationResolver = CV3OrientationMapResolverFromSettings(settings);
     if (needsCrossOrientationMap) {
         if (!self.hasCapturedOrientationMapBaseline) {
             self.originalOrientationMapResolver = CV3OrientationMapResolverFromSettings(settings);
@@ -1565,42 +1694,62 @@ void CV3ToggleExposeMode(void) {
                     self.originalInterfaceOrientationMode =
                         ((NSInteger (*)(id, SEL))objc_msgSend)(settings, modeGetter);
                     self.hasOriginalInterfaceOrientationMode = YES;
-                } @catch (NSException *exception) {}
+                } @catch (__unused NSException *exception) {}
             }
             self.hasCapturedOrientationMapBaseline = YES;
         }
 
-        id currentResolver = CV3OrientationMapResolverFromSettings(settings);
-        BOOL resolverDrifted = self.crossOrientationMapApplied &&
-            self.activeOrientationMapResolver &&
-            currentResolver != self.activeOrientationMapResolver;
-        BOOL orientationPairChanged = self.mappedPresentationOrientation != presentationOrientation ||
+        BOOL mappingChanged =
+            self.mappedPresentationOrientation != presentationOrientation ||
             self.mappedHostedOrientation != targetOrientation;
+        BOOL resolverDrifted = !CV3OrientationMapResolverMatches(
+            currentOrientationResolver, presentationOrientation, targetOrientation);
+        BOOL mappingStateChanged = !self.crossOrientationMapApplied || mappingChanged || resolverDrifted;
         BOOL mapModified = CV3ApplyCrossOrientationMapToSettings(
-            settings,
-            presentationOrientation,
-            targetOrientation,
-            force || !self.crossOrientationMapApplied || resolverDrifted || orientationPairChanged);
+            settings, presentationOrientation, targetOrientation,
+            force || !self.crossOrientationMapApplied || mappingChanged || resolverDrifted);
         modified |= mapModified;
-        if (mapModified) {
+        if (mapModified || CV3OrientationMapResolverFromSettings(settings)) {
             self.crossOrientationMapApplied = YES;
             self.activeOrientationMapResolver = CV3OrientationMapResolverFromSettings(settings);
             self.mappedPresentationOrientation = presentationOrientation;
             self.mappedHostedOrientation = targetOrientation;
         }
-    } else if (self.hasCapturedOrientationMapBaseline) {
-        if (self.crossOrientationMapApplied) {
-            modified |= CV3RestoreCrossOrientationMapOnSettings(settings,
-                                                                 self.originalOrientationMapResolver,
-                                                                 self.originalInterfaceOrientationMode,
-                                                                 self.hasOriginalInterfaceOrientationMode);
+        if (mapModified && mappingStateChanged && self.hostView) {
+            self.hostPresentationRepublishPending = YES;
+            CV3LogToFile(@"[HostRepublish] trace=%@ phase=marked reason=orientationMapChanged host=%p contextId=%@ presentation=%ld hosted=%ld",
+                         self.coldLaunchTraceID, self.hostView,
+                         CV3HostedLayerContextID(self.hostView.layer) ?: @"nil",
+                         (long)presentationOrientation, (long)targetOrientation);
         }
+        CV3LogToFile(@"[Strict] trace=%@ phase=settingsLayout.orientationMap needs=1 presentation=%ld hosted=%ld modified=%d resolver={%@}",
+                     self.coldLaunchTraceID, (long)presentationOrientation,
+                     (long)targetOrientation, mapModified,
+                     CV3OrientationResolverTrace(settings));
+    } else if (self.hasCapturedOrientationMapBaseline ||
+               CV3OrientationMapResolverMatches(currentOrientationResolver,
+                                                presentationOrientation,
+                                                targetOrientation)) {
+        // Effective Scene bounds already own the requested orientation. A
+        // canonical cross-axis resolver rotates those pixels a second time.
+        modified |= CV3RestoreCrossOrientationMapOnSettings(settings, nil, 0, YES);
         self.originalOrientationMapResolver = nil;
         self.activeOrientationMapResolver = nil;
         self.hasOriginalInterfaceOrientationMode = NO;
         self.hasCapturedOrientationMapBaseline = NO;
         self.crossOrientationMapApplied = NO;
+        self.mappedPresentationOrientation = UIInterfaceOrientationUnknown;
+        self.mappedHostedOrientation = UIInterfaceOrientationUnknown;
+        self.hostPresentationRepublishPending = NO;
+        CV3LogToFile(@"[Strict] trace=%@ phase=settingsLayout.orientationMap cleared presentation=%ld hosted=%ld boundsMatch=%d resolver={%@}",
+                     self.coldLaunchTraceID, (long)presentationOrientation,
+                     (long)targetOrientation, sceneBoundsMatchTarget,
+                     CV3OrientationResolverTrace(settings));
     }
+
+    CV3LogToFile(@"[Strict] trace=%@ phase=settingsLayout.end modified=%d after={%@} resolver={%@}",
+                 self.coldLaunchTraceID, modified, CV3SceneSettingsFingerprint(settings),
+                 CV3OrientationResolverTrace(settings));
 
     return modified;
 }
@@ -1625,18 +1774,26 @@ static void CV3CollectVideoFullscreenLayers(CALayer *layer,
     id contents = nil;
     @try { contents = layer.contents; } @catch (__unused NSException *exception) {}
     [entries addObject:[NSString stringWithFormat:
-        @"%@:%@ frame=%@ bounds=%@ presFrame=%@ affine=%@ hidden=%d opacity=%.2f masks=%d gravity=%@ context=%@ contents=%@:%p children=%lu",
+        @"%@:%@ frame=%@ bounds=%@ position=%@ anchor=%@ presFrame=%@ presBounds=%@ affine=%@ hidden=%d opacity=%.2f masks=%d gravity=%@ contentsRect=%@ contentsScale=%.3f context=%@ contextAlt=%@ hostedLayer=%@ remoteLayer=%@ contents=%@:%p children=%lu",
         path,
         NSStringFromClass(layer.class),
         NSStringFromCGRect(layer.frame),
         NSStringFromCGRect(layer.bounds),
+        NSStringFromCGPoint(layer.position),
+        NSStringFromCGPoint(layer.anchorPoint),
         presentation ? NSStringFromCGRect(presentation.frame) : @"nil",
+        presentation ? NSStringFromCGRect(presentation.bounds) : @"nil",
         NSStringFromCGAffineTransform(layer.affineTransform),
         layer.hidden,
         layer.opacity,
         layer.masksToBounds,
         layer.contentsGravity ?: @"nil",
+        NSStringFromCGRect(layer.contentsRect),
+        layer.contentsScale,
         CV3VideoLayerValue(layer, @"contextId"),
+        CV3VideoLayerValue(layer, @"_contextId"),
+        CV3VideoLayerValue(layer, @"hostedLayer"),
+        CV3VideoLayerValue(layer, @"remoteLayer"),
         contents ? NSStringFromClass([contents class]) : @"nil",
         contents,
         (unsigned long)layer.sublayers.count]];
@@ -1648,6 +1805,33 @@ static void CV3CollectVideoFullscreenLayers(CALayer *layer,
                                         depth + 1,
                                         entries);
     }
+}
+
+static NSString *CV3SceneLayerManagerAudit(FBScene *scene) {
+    if (!scene) return @"scene=nil";
+    id manager = CV3InvokeObject(scene, @selector(layerManager));
+    if (!manager) manager = CV3SafeSettingValue(scene, @"_layerManager");
+    id rawLayers = CV3InvokeObject(manager, @selector(layers));
+    NSArray *layers = [rawLayers isKindOfClass:NSArray.class]
+        ? rawLayers
+        : ([rawLayers respondsToSelector:@selector(array)] ? [rawLayers array] : nil);
+    NSMutableArray<NSString *> *entries = [NSMutableArray array];
+    NSUInteger index = 0;
+    for (id layer in layers ?: @[]) {
+        NSMutableArray<NSString *> *values = [NSMutableArray array];
+        for (NSString *key in @[@"identifier", @"level", @"role", @"contextID", @"contextId",
+                                @"interfaceOrientation", @"orientation", @"frame", @"bounds",
+                                @"externalSceneID", @"keyboardLayer", @"isKeyboardLayer"]) {
+            [values addObject:[NSString stringWithFormat:@"%@=%@", key,
+                               CV3VideoLayerValue(layer, key)]];
+        }
+        [entries addObject:[NSString stringWithFormat:@"%lu:%@{%@}",
+                            (unsigned long)index++, NSStringFromClass([layer class]),
+                            [values componentsJoinedByString:@";"]]];
+    }
+    return [NSString stringWithFormat:@"manager=%@:%p layers=%lu [%@]",
+            manager ? NSStringFromClass([manager class]) : @"nil", manager,
+            (unsigned long)layers.count, [entries componentsJoinedByString:@" | "]];
 }
 
 static NSUInteger CV3SynchronizeHostedContextLayerGeometry(CALayer *layer,
@@ -1673,7 +1857,11 @@ static NSUInteger CV3SynchronizeHostedContextLayerGeometry(CALayer *layer,
 }
 
 - (void)synchronizeHostedContextLayerGeometry {
-    if (!self.hostView || self.isClosing || self.isStashed) return;
+    [self recordStrictSplitTrace:@"layerGeometrySync.entry" details:nil];
+    if (!self.hostView || self.isClosing || self.isStashed) {
+        [self recordStrictSplitTrace:@"layerGeometrySync.rejected" details:nil];
+        return;
+    }
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
@@ -1682,6 +1870,8 @@ static NSUInteger CV3SynchronizeHostedContextLayerGeometry(CALayer *layer,
     if (updated > 0) {
         [self.hostView.layer setNeedsLayout];
     }
+    [self recordStrictSplitTrace:@"layerGeometrySync.exit"
+                         details:[NSString stringWithFormat:@"updatedLayerHosts=%lu", (unsigned long)updated]];
 }
 
 - (void)recordVideoFullscreenTrace:(NSString *)phase requestedOrientation:(UIInterfaceOrientation)orientation {
@@ -1732,66 +1922,368 @@ static NSUInteger CV3SynchronizeHostedContextLayerGeometry(CALayer *layer,
                           [hostLayers componentsJoinedByString:@" | "]);
 }
 
+static NSString *CV3OrientationAxisNameForValue(UIInterfaceOrientation orientation) {
+    if (UIInterfaceOrientationIsLandscape(orientation)) return @"landscape";
+    if (UIInterfaceOrientationIsPortrait(orientation)) return @"portrait";
+    return @"unknown";
+}
+
+static NSString *CV3OrientationAxisNameForSize(CGSize size) {
+    if (size.width > size.height + 0.5) return @"landscape";
+    if (size.height > size.width + 0.5) return @"portrait";
+    return @"square";
+}
+
+static NSString *CV3OrientationResolverTrace(id settings) {
+    if (!settings) return @"settings=nil";
+
+    id resolver = nil;
+    NSInteger mode = NSIntegerMin;
+    @try {
+        SEL resolverGetter = NSSelectorFromString(@"interfaceOrientationMapResolver");
+        if ([settings respondsToSelector:resolverGetter]) {
+            resolver = ((id (*)(id, SEL))objc_msgSend)(settings, resolverGetter);
+        }
+        SEL modeGetter = NSSelectorFromString(@"interfaceOrientationMode");
+        if ([settings respondsToSelector:modeGetter]) {
+            mode = ((NSInteger (*)(id, SEL))objc_msgSend)(settings, modeGetter);
+        }
+    } @catch (__unused NSException *exception) {}
+
+    NSMutableArray<NSString *> *values = [NSMutableArray arrayWithObjects:
+        [NSString stringWithFormat:@"mode=%ld", (long)mode],
+        [NSString stringWithFormat:@"resolverClass=%@", resolver ? NSStringFromClass([resolver class]) : @"nil"],
+        nil];
+    for (NSString *key in @[@"targetOrientation", @"currentOrientation",
+                             @"sourceOrientation", @"interfaceOrientation"]) {
+        @try {
+            id value = [resolver valueForKey:key];
+            if (value) [values addObject:[NSString stringWithFormat:@"%@=%@", key, value]];
+        } @catch (__unused NSException *exception) {}
+    }
+    if (resolver) {
+        @try {
+            [values addObject:[NSString stringWithFormat:@"resolver=%@", resolver]];
+        } @catch (__unused NSException *exception) {}
+    }
+    return [values componentsJoinedByString:@" "];
+}
+
+- (void)recordSplitWindowOrientationTrace:(NSString *)phase
+                     requestedOrientation:(UIInterfaceOrientation)orientation
+                                   source:(NSString *)source {
+    id settings = self.targetScene ? CV3InvokeObject(self.targetScene, @selector(settings)) : nil;
+    UIInterfaceOrientation settingsOrientation = (UIInterfaceOrientation)CV3InvokeInteger(
+        settings, @selector(interfaceOrientation), UIInterfaceOrientationUnknown);
+    UIInterfaceOrientation sceneOrientation = self.windowScene
+        ? CV3TrustedInterfaceOrientation(self.windowScene)
+        : UIInterfaceOrientationUnknown;
+    NSString *requestedAxis = CV3OrientationAxisNameForValue(orientation);
+    NSString *windowAxis = CV3OrientationAxisNameForSize(self.bounds.size);
+    NSString *wrapperAxis = CV3OrientationAxisNameForSize(self.appContentWrapper.bounds.size);
+    NSString *hostAxis = CV3OrientationAxisNameForSize(self.hostView.bounds.size);
+    BOOL requestedWindowMismatch = ![requestedAxis isEqualToString:@"unknown"] &&
+        ![windowAxis isEqualToString:@"square"] &&
+        ![requestedAxis isEqualToString:windowAxis];
+    BOOL hostedWindowMismatch = CV3IsValidInterfaceOrientation(self.hostedContentOrientation) &&
+        ![CV3OrientationAxisNameForValue(self.hostedContentOrientation) isEqualToString:windowAxis];
+    BOOL settingsWindowMismatch = CV3IsValidInterfaceOrientation(settingsOrientation) &&
+        ![CV3OrientationAxisNameForValue(settingsOrientation) isEqualToString:windowAxis];
+    NSUInteger layerHostCount = 0;
+    NSMutableArray<CALayer *> *pending = [NSMutableArray array];
+    if (self.hostView.layer) [pending addObject:self.hostView.layer];
+    while (pending.count > 0) {
+        CALayer *layer = pending.lastObject;
+        [pending removeLastObject];
+        if ([NSStringFromClass(layer.class) isEqualToString:@"CALayerHost"]) layerHostCount++;
+        if (layer.sublayers.count > 0) [pending addObjectsFromArray:layer.sublayers];
+    }
+    CV3LogWindowOrientation(@"[WindowOrientationTrace] phase=%@ bundle=%@ source=%@ requested=%ld requestedAxis=%@ target=%ld hosted=%ld settings=%ld scene=%ld windowAxis=%@ wrapperAxis=%@ hostAxis=%@ window=%@ wrapper=%@ host=%@ mismatch.requestedWindow=%d mismatch.hostedWindow=%d mismatch.settingsWindow=%d layerHosts=%lu stashed=%d closing=%d orientationResolver={%@}",
+                            phase ?: @"unknown", self.bundleID ?: @"unknown", source ?: @"unknown",
+                            (long)orientation, requestedAxis, (long)self.targetOrientation,
+                            (long)self.hostedContentOrientation, (long)settingsOrientation,
+                            (long)sceneOrientation, windowAxis, wrapperAxis, hostAxis,
+                            NSStringFromCGSize(self.bounds.size),
+                            NSStringFromCGSize(self.appContentWrapper.bounds.size),
+                            NSStringFromCGSize(self.hostView.bounds.size),
+                            requestedWindowMismatch, hostedWindowMismatch, settingsWindowMismatch,
+                            (unsigned long)layerHostCount, self.isStashed, self.isClosing,
+                            CV3OrientationResolverTrace(settings));
+}
+
+- (void)recordStrictSplitTrace:(NSString *)phase details:(NSString *)details {
+    id settings = self.targetScene ? CV3InvokeObject(self.targetScene, @selector(settings)) : nil;
+    id clientSettings = self.targetScene
+        ? CV3InvokeObject(self.targetScene, NSSelectorFromString(@"clientSettings"))
+        : nil;
+    NSMutableArray<NSString *> *layers = [NSMutableArray array];
+    CV3CollectVideoFullscreenLayers(self.hostView.layer, @"host", 0, layers);
+    CGRect sceneBounds = self.windowScene ? self.windowScene.coordinateSpace.bounds : CGRectZero;
+    CGRect screenBounds = self.windowScene.screen ? self.windowScene.screen.bounds : UIScreen.mainScreen.bounds;
+    UIInterfaceOrientation sceneOrientation = self.windowScene
+        ? self.windowScene.interfaceOrientation
+        : UIInterfaceOrientationUnknown;
+    CGAffineTransform calculatedRotation = CV3HostedContentRotationInScene(self);
+    CGRect calculatedCanvas = [self currentHostedSceneBounds];
+    BOOL presentationContext = self.hostView &&
+        CV3InvokeObject(self.hostView, NSSelectorFromString(@"presentationContext")) != nil;
+    CV3LogToFile(@"[Strict] trace=%@ phase=%@ details={%@} bundle=%@ generation=%lu lifecycle=%@ "
+                 "flags={closing=%d stashed=%d moving=%d liveResize=%d awaitingFirst=%d focused=%d "
+                 "prefersLandscape=%d requiresLandscape=%d} orientations={scene=%ld target=%ld hosted=%ld "
+                 "lastLayout=%ld device=%ld} spaces={scene=%@ screen=%@ calculatedCanvas=%@ calculatedRotation=%@} "
+                 "settings={%@ resolver={%@}} clientSettings={%@} contentState=%ld sceneValid=%d "
+                 "views={window:%@ root:%@ wrapper:%@ clip:%@ proxy:%@ host:%@} "
+                 "hosting={attached=%d presentationContext=%d requester=%@ childViews=%lu childLayers=%lu} layers=[%@]",
+                 self.coldLaunchTraceID ?: @"unassigned", phase ?: @"unknown", details ?: @"none",
+                 self.bundleID ?: @"nil", (unsigned long)self.sceneHostGeneration,
+                 CV3HostLifecycleStateName(self.hostLifecycleState), self.isClosing, self.isStashed,
+                 self.isMovingWindow, self.isLiveResizing, self.awaitingInitialRenderableContent,
+                 self.isFocused, self.prefersLandscapePresentation, self.requiresLandscapeContent,
+                 (long)sceneOrientation, (long)self.targetOrientation,
+                 (long)self.hostedContentOrientation, (long)self.lastLayoutOrientation,
+                 (long)UIDevice.currentDevice.orientation, NSStringFromCGRect(sceneBounds),
+                 NSStringFromCGRect(screenBounds), NSStringFromCGRect(calculatedCanvas),
+                 NSStringFromCGAffineTransform(calculatedRotation), CV3SceneSettingsFingerprint(settings),
+                 CV3OrientationResolverTrace(settings), CV3SceneSettingsFingerprint(clientSettings),
+                 (long)CV3InvokeInteger(self.targetScene, @selector(contentState), NSIntegerMin),
+                 self.targetScene ? CV3InvokeBool(self.targetScene, @selector(isValid), YES) : NO,
+                 CV3DirectionTraceView(self), CV3DirectionTraceView(self.rootTransformContainer),
+                 CV3DirectionTraceView(self.appContentWrapper), CV3DirectionTraceView(self.clippingContainer),
+                 CV3DirectionTraceView(self.hostContainerProxy), CV3DirectionTraceView(self.hostView),
+                 self.hostView.superview == self.hostContainerProxy, presentationContext,
+                 self.sceneHostingRequester ?: @"nil", (unsigned long)self.hostView.subviews.count,
+                 (unsigned long)self.hostView.layer.sublayers.count,
+                 [layers componentsJoinedByString:@" | "]);
+}
+
+- (void)recordProducerGeometryTrace:(NSString *)phase {
+    id settings = self.targetScene ? CV3InvokeObject(self.targetScene, @selector(settings)) : nil;
+    id clientSettings = self.targetScene
+        ? CV3InvokeObject(self.targetScene, NSSelectorFromString(@"clientSettings"))
+        : nil;
+    NSMutableArray<NSString *> *layers = [NSMutableArray array];
+    CV3CollectVideoFullscreenLayers(self.hostView.layer, @"host", 0, layers);
+    CV3LogToFile(@"[ProducerGeometry] trace=%@ phase=%@ generation=%lu target=%@ "
+                 "sceneOrientation=%ld targetOrientation=%ld hostedOrientation=%ld clientAck=%ld "
+                 "sceneBounds=%@ screenBounds=%@ settings={%@} clientSettings={%@} "
+                 "window={%@} root={%@} wrapper={%@} clip={%@} proxy={%@} host={%@} layers=[%@]",
+                 self.coldLaunchTraceID ?: @"unassigned", phase ?: @"unknown",
+                 (unsigned long)self.sceneHostGeneration,
+                 CV3DiagnosticObjectFingerprint(self.targetScene),
+                 (long)(self.windowScene ? self.windowScene.interfaceOrientation : UIInterfaceOrientationUnknown),
+                 (long)self.targetOrientation, (long)self.hostedContentOrientation,
+                 (long)self.clientAcknowledgedOrientation,
+                 NSStringFromCGRect(self.windowScene ? self.windowScene.coordinateSpace.bounds : CGRectZero),
+                 NSStringFromCGRect(self.windowScene.screen ? self.windowScene.screen.bounds : UIScreen.mainScreen.bounds),
+                 CV3DiagnosticObjectFingerprint(settings),
+                 CV3DiagnosticObjectFingerprint(clientSettings),
+                 CV3DirectionTraceView(self), CV3DirectionTraceView(self.rootTransformContainer),
+                 CV3DirectionTraceView(self.appContentWrapper), CV3DirectionTraceView(self.clippingContainer),
+                 CV3DirectionTraceView(self.hostContainerProxy), CV3DirectionTraceView(self.hostView),
+                 [layers componentsJoinedByString:@" | "]);
+}
+
+- (void)recordSurfaceOrientationAudit:(NSString *)phase force:(BOOL)force {
+    if (self.isClosing) return;
+    id settings = CV3InvokeObject(self.targetScene, @selector(settings));
+    id clientSettings = CV3InvokeObject(self.targetScene, NSSelectorFromString(@"clientSettings"));
+    UIInterfaceOrientation sceneOrientation = self.windowScene
+        ? self.windowScene.interfaceOrientation : UIInterfaceOrientationUnknown;
+    UIInterfaceOrientation settingsOrientation = (UIInterfaceOrientation)CV3InvokeInteger(
+        settings, @selector(interfaceOrientation), UIInterfaceOrientationUnknown);
+    UIInterfaceOrientation clientOrientation = (UIInterfaceOrientation)CV3InvokeInteger(
+        clientSettings, @selector(interfaceOrientation), UIInterfaceOrientationUnknown);
+    CGAffineTransform decision = CV3HostedContentRotationInScene(self);
+    NSString *sceneAxis = CV3OrientationAxisNameForValue(sceneOrientation);
+    NSString *settingsAxis = CV3OrientationAxisNameForValue(settingsOrientation);
+    NSString *clientAxis = CV3OrientationAxisNameForValue(clientOrientation);
+    NSString *shellAxis = CV3OrientationAxisNameForSize(self.bounds.size);
+    NSString *hostAxis = CV3OrientationAxisNameForSize(self.hostView.bounds.size);
+    CALayer *hostLayer = self.hostView.layer;
+    CALayer *hostPresentation = hostLayer.presentationLayer;
+    NSString *modelAxis = CV3OrientationAxisNameForSize(hostLayer.bounds.size);
+    NSString *presentationAxis = CV3OrientationAxisNameForSize(
+        hostPresentation ? hostPresentation.bounds.size : CGSizeZero);
+    NSString *contextID = CV3HostedLayerContextID(hostLayer) ?: @"nil";
+    id hostManagerPublic = CV3InvokeObject(self.targetScene, @selector(hostManager));
+    id hostManagerPrivate = CV3SafeSettingValue(self.targetScene, @"_hostManager");
+    BOOL crossAxis = ![sceneAxis isEqualToString:@"unknown"] &&
+        ![clientAxis isEqualToString:@"unknown"] && ![sceneAxis isEqualToString:clientAxis];
+    BOOL identityDecision = CGAffineTransformIsIdentity(decision);
+    BOOL pixelOrientationUnverified = crossAxis && identityDecision;
+
+    NSString *signature = [NSString stringWithFormat:
+        @"bundle=%@ orientations={scene=%ld settings=%ld client=%ld target=%ld hosted=%ld ack=%ld mappedPresentation=%ld mappedHosted=%ld} "
+         "axes={scene=%@ settings=%@ client=%@ shell=%@ host=%@ model=%@ presentation=%@} "
+         "rotation={decision=%@ root=%@ proxy=%@ host=%@} "
+         "surface={contextId=%@ host=%p hostClass=%@ hostSubviews=%lu hostSublayers=%lu modelBounds=%@ presentationBounds=%@} "
+         "mapping={applied=%d resolver={%@}} manager={public=%@:%p private=%@:%p requester=%@ pendingRequester=%@} "
+         "verdict={crossAxis=%d identityDecision=%d pixelOrientationUnverified=%d} sceneLayers={%@}",
+        self.bundleID ?: @"nil", (long)sceneOrientation, (long)settingsOrientation,
+        (long)clientOrientation, (long)self.targetOrientation,
+        (long)self.hostedContentOrientation, (long)self.clientAcknowledgedOrientation,
+        (long)self.mappedPresentationOrientation, (long)self.mappedHostedOrientation,
+        sceneAxis, settingsAxis, clientAxis, shellAxis, hostAxis, modelAxis,
+        presentationAxis, NSStringFromCGAffineTransform(decision),
+        NSStringFromCGAffineTransform(self.rootTransformContainer.transform),
+        NSStringFromCGAffineTransform(self.hostContainerProxy.transform),
+        NSStringFromCGAffineTransform(self.hostView.transform), contextID, self.hostView,
+        self.hostView ? NSStringFromClass(self.hostView.class) : @"nil",
+        (unsigned long)self.hostView.subviews.count,
+        (unsigned long)self.hostView.layer.sublayers.count,
+        NSStringFromCGRect(hostLayer.bounds),
+        hostPresentation ? NSStringFromCGRect(hostPresentation.bounds) : @"nil",
+        self.crossOrientationMapApplied, CV3OrientationResolverTrace(settings),
+        hostManagerPublic ? NSStringFromClass([hostManagerPublic class]) : @"nil", hostManagerPublic,
+        hostManagerPrivate ? NSStringFromClass([hostManagerPrivate class]) : @"nil", hostManagerPrivate,
+        self.sceneHostingRequester ?: @"nil", self.pendingRepublishedRequester ?: @"nil",
+        crossAxis, identityDecision, pixelOrientationUnverified,
+        CV3SceneLayerManagerAudit(self.targetScene)];
+
+    CFTimeInterval now = CACurrentMediaTime();
+    BOOL changed = ![signature isEqualToString:self.lastSurfaceOrientationAuditSignature];
+    BOOL heartbeatDue = now - self.lastSurfaceOrientationAuditTime >= 1.0;
+    if (!force && !changed && !heartbeatDue) return;
+    self.lastSurfaceOrientationAuditSignature = signature;
+    self.lastSurfaceOrientationAuditTime = now;
+    CV3LogToFile(@"[SurfaceOrientationAudit] event=%@ phase=%@ %@",
+                 changed ? @"change" : @"heartbeat", phase ?: @"unknown", signature);
+}
+
 - (void)applyHostedContentOrientation:(UIInterfaceOrientation)orientation {
+    [self recordSurfaceOrientationAudit:@"orientation.request.before" force:YES];
+    [self recordStrictSplitTrace:@"orientation.request.received"
+                         details:[NSString stringWithFormat:@"requested=%ld", (long)orientation]];
     [self recordVideoFullscreenTrace:@"applyHosted.entry" requestedOrientation:orientation];
     if (!CV3IsValidInterfaceOrientation(orientation) || self.isClosing) {
+        [self recordStrictSplitTrace:@"orientation.request.rejected.invalidOrClosing"
+                             details:[NSString stringWithFormat:@"requested=%ld", (long)orientation]];
         [self recordVideoFullscreenTrace:@"applyHosted.rejected.invalidOrClosing" requestedOrientation:orientation];
         return;
     }
     if (self.requiresLandscapeContent && !UIInterfaceOrientationIsLandscape(orientation)) {
+        [self recordStrictSplitTrace:@"orientation.request.rejected.landscapeOnly"
+                             details:[NSString stringWithFormat:@"requested=%ld", (long)orientation]];
         [self recordVideoFullscreenTrace:@"applyHosted.rejected.landscapeOnly" requestedOrientation:orientation];
         return;
     }
-    if (self.hostedContentOrientation == orientation) {
+    UIInterfaceOrientation liveClientOrientation = CV3HostedClientOrientation(self);
+    BOOL liveClientMatchesRequest =
+        CV3IsValidInterfaceOrientation(liveClientOrientation) &&
+        liveClientOrientation == orientation;
+    if (self.hostedContentOrientation == orientation && liveClientMatchesRequest) {
+        [self recordStrictSplitTrace:@"orientation.request.shortCircuit.sameOrientation"
+                             details:[NSString stringWithFormat:@"requested=%ld", (long)orientation]];
         [self recordVideoFullscreenTrace:@"applyHosted.shortCircuit.sameOrientation" requestedOrientation:orientation];
         return;
     }
 
+    BOOL repairingClientDrift = self.hostedContentOrientation == orientation &&
+        CV3IsValidInterfaceOrientation(liveClientOrientation) &&
+        !liveClientMatchesRequest;
+    if (repairingClientDrift) {
+        [self recordStrictSplitTrace:@"orientation.request.repair.clientDrift"
+                             details:[NSString stringWithFormat:@"requested=%ld liveClient=%ld cachedAck=%ld",
+                                      (long)orientation, (long)liveClientOrientation,
+                                      (long)self.clientAcknowledgedOrientation]];
+        CV3LogToFile(@"[OrientationRepair] phase=requestRepair bundle=%@ requested=%ld liveClient=%ld cachedAck=%ld",
+                     self.bundleID ?: @"nil", (long)orientation,
+                     (long)liveClientOrientation, (long)self.clientAcknowledgedOrientation);
+    }
+
+    [self recordStrictSplitTrace:@"orientation.state.beforeMutation"
+                         details:[NSString stringWithFormat:@"requested=%ld", (long)orientation]];
+    [self recordProducerGeometryTrace:@"orientation.beforeMutation"];
+    self.clientAcknowledgedOrientation = UIInterfaceOrientationUnknown;
     self.hostedContentOrientation = orientation;
     self.prefersLandscapePresentation = UIInterfaceOrientationIsLandscape(orientation);
     self.targetOrientation = orientation;
     self.lastLayoutOrientation = orientation;
+    [self recordStrictSplitTrace:@"orientation.state.afterMutation"
+                         details:[NSString stringWithFormat:@"requested=%ld", (long)orientation]];
+    [self recordProducerGeometryTrace:@"orientation.afterMutation"];
     [self syncHostedSceneLayoutForce:YES];
+    [self recordStrictSplitTrace:@"orientation.afterSceneSync" details:nil];
+    [self recordProducerGeometryTrace:@"orientation.afterSceneSync"];
     [self refreshHostViewPresentation];
+    [self recordStrictSplitTrace:@"orientation.afterPresentationRefresh" details:nil];
+    [self recordProducerGeometryTrace:@"orientation.afterPresentationRefresh"];
     [self setNeedsLayout];
+    [self recordStrictSplitTrace:@"orientation.afterSetNeedsLayout" details:nil];
     [self layoutIfNeeded];
+    [self recordStrictSplitTrace:@"orientation.afterLayoutIfNeeded" details:nil];
+    [self recordProducerGeometryTrace:@"orientation.afterLayoutIfNeeded"];
     [self synchronizeHostedContextLayerGeometry];
+    [self recordStrictSplitTrace:@"orientation.afterLayerGeometrySync" details:nil];
     for (NSNumber *delay in @[@0.05, @0.15]) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                      (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             if (self.isClosing || self.isStashed ||
-                self.hostedContentOrientation != orientation) return;
+                self.hostedContentOrientation != orientation) {
+                [self recordStrictSplitTrace:@"orientation.delayedSync.cancelled"
+                                     details:[NSString stringWithFormat:@"delay=%.3f requested=%ld", delay.doubleValue, (long)orientation]];
+                return;
+            }
+            [self recordStrictSplitTrace:@"orientation.delayedSync.before"
+                                 details:[NSString stringWithFormat:@"delay=%.3f", delay.doubleValue]];
             [self synchronizeHostedContextLayerGeometry];
+            [self recordStrictSplitTrace:@"orientation.delayedSync.after"
+                                 details:[NSString stringWithFormat:@"delay=%.3f", delay.doubleValue]];
+            [self recordProducerGeometryTrace:[NSString stringWithFormat:@"orientation.delayed.%.0fms",
+                                               delay.doubleValue * 1000.0]];
         });
     }
     // Home bar placement belongs to the logical content container. Re-run it
     // after the scene orientation transaction, otherwise the bar keeps the
     // pre-hosting portrait edge while the shell is already landscape.
     [self layoutFloatingHomeBarForBounds:self.appContentWrapper.bounds];
+    [self recordStrictSplitTrace:@"orientation.request.completed"
+                         details:[NSString stringWithFormat:@"requested=%ld", (long)orientation]];
+    [self recordSurfaceOrientationAudit:@"orientation.request.completed" force:YES];
     [self recordVideoFullscreenTrace:@"applyHosted.completed" requestedOrientation:orientation];
     CV3LogToFile(@"[VideoBridge] 已更新托管内容方向=%ld: %@", (long)orientation, self.bundleID);
 }
 
 - (BOOL)syncHostedSceneLayoutForce:(BOOL)force {
-    if (!self.targetScene || self.isClosing || self.isStashed) return NO;
-    if (!force && (self.isMovingWindow || CACurrentMediaTime() < self.moveSceneSyncSuppressedUntil)) return NO;
+    [self recordStrictSplitTrace:@"sceneSync.entry"
+                         details:[NSString stringWithFormat:@"force=%d", force]];
+    if (!self.targetScene || self.isClosing || self.isStashed) {
+        [self recordStrictSplitTrace:@"sceneSync.rejected.lifecycle"
+                             details:[NSString stringWithFormat:@"force=%d", force]];
+        return NO;
+    }
+    if (!force && (self.isMovingWindow || CACurrentMediaTime() < self.moveSceneSyncSuppressedUntil)) {
+        [self recordStrictSplitTrace:@"sceneSync.rejected.movementGate" details:nil];
+        return NO;
+    }
 
     BOOL didUpdate = NO;
     @try {
         FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
+        CV3LogToFile(@"[Strict] trace=%@ phase=sceneSync.mutable.before force=%d fingerprint={%@}",
+                     self.coldLaunchTraceID, force, CV3SceneSettingsFingerprint(settings));
         didUpdate = [self applyForegroundSovereigntyToSettings:settings clearDeactivation:YES forceLayout:force];
+        CV3LogToFile(@"[Strict] trace=%@ phase=sceneSync.mutable.afterApply didUpdate=%d fingerprint={%@}",
+                     self.coldLaunchTraceID, didUpdate, CV3SceneSettingsFingerprint(settings));
         if (didUpdate) {
+            [self recordStrictSplitTrace:@"sceneSync.commit.begin"
+                                 details:[NSString stringWithFormat:@"force=%d outgoing={%@}", force, CV3SceneSettingsFingerprint(settings)]];
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
             [self.targetScene updateSettings:settings withTransitionContext:nil];
             [CATransaction commit];
+            [self recordStrictSplitTrace:@"sceneSync.commit.returned" details:nil];
+            [self beginHostPresentationRepublishIfNeeded:@"sceneSync.commit"];
             CV3LogToFile(@"[Layout] 已同步托管 Scene 方向=%ld frame=%@", (long)self.targetOrientation, NSStringFromCGRect(((FBSMutableSceneSettings *)settings).frame));
         }
     } @catch (NSException *e) {
+        [self recordStrictSplitTrace:@"sceneSync.exception" details:e.description];
         CV3LogToFile(@"[Error] syncHostedSceneLayoutForce 异常: %@", e);
     }
 
+    [self recordStrictSplitTrace:@"sceneSync.exit"
+                         details:[NSString stringWithFormat:@"didUpdate=%d", didUpdate]];
     return didUpdate;
 }
 
@@ -2231,6 +2723,10 @@ static NSUInteger CV3SynchronizeHostedContextLayerGeometry(CALayer *layer,
     UIView *homeBarContainer = self.appContentWrapper ?: self;
     [homeBarContainer addSubview:self.homeBarView];
     [self updateFloatingHomeBarAppearance];
+    CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=created bundle=%@ alpha=%.3f focused=%d stashed=%d frame=%@",
+                            self.bundleID, self.homeBarView.alpha, self.isFocused,
+                            self.isStashed, NSStringFromCGRect(self.homeBarView.frame));
+    [self scheduleFloatingHomeBarAutoHide];
 }
 
 - (NSInteger)preferredHomeBarPlacementForScreenFrame:(CGRect)frame {
@@ -2398,7 +2894,7 @@ static NSUInteger CV3SynchronizeHostedContextLayerGeometry(CALayer *layer,
     if (!self.homeBarView || !self.homeBarBlurView) return;
 
     CGFloat alpha = self.isFocused ? 1.0 : 0.84;
-    self.homeBarView.alpha = (self.isStashed || self.isClosing) ? 0.0 : alpha;
+    self.homeBarView.alpha = (self.isStashed || self.isClosing || self.homeBarAutoHidden) ? 0.0 : alpha;
 
     self.homeBarView.layer.shadowOpacity = self.isFocused ? 0.18 : 0.10;
     self.homeBarView.layer.shadowRadius = self.isFocused ? 16.0 : 10.0;
@@ -2409,6 +2905,107 @@ static NSUInteger CV3SynchronizeHostedContextLayerGeometry(CALayer *layer,
                              CGRectGetHeight(self.homeBarBlurView.bounds) / 2.0,
                              self.isFocused ? 0.74 : 0.44,
                              self.isFocused);
+}
+
+- (void)setFloatingHomeBarAutoHidden:(BOOL)hidden animated:(BOOL)animated {
+    if (!self.homeBarView) return;
+
+    BOOL previousHidden = self.homeBarAutoHidden;
+    CGFloat previousAlpha = self.homeBarView.alpha;
+    self.homeBarAutoHidden = hidden;
+    CGFloat targetAlpha = (hidden || self.isStashed || self.isClosing)
+        ? 0.0
+        : (self.isFocused ? 1.0 : 0.84);
+    BOOL shouldTraceVisibilityChange = previousHidden != hidden ||
+        fabs(previousAlpha - targetAlpha) >= 0.01;
+    if (shouldTraceVisibilityChange) {
+        CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=visibility.request bundle=%@ hidden=%d previousHidden=%d animated=%d alpha=%.3f target=%.3f focused=%d stashed=%d closing=%d",
+                                self.bundleID, hidden, previousHidden, animated,
+                                previousAlpha, targetAlpha, self.isFocused,
+                                self.isStashed, self.isClosing);
+    }
+
+    if (previousHidden == hidden && self.homeBarVisibilityAnimator) {
+        return;
+    }
+
+    if (self.homeBarVisibilityAnimator) {
+        [self.homeBarVisibilityAnimator stopAnimation:NO];
+        [self.homeBarVisibilityAnimator finishAnimationAtPosition:UIViewAnimatingPositionCurrent];
+        self.homeBarVisibilityAnimator = nil;
+    }
+
+    if (!animated || fabs(self.homeBarView.alpha - targetAlpha) < 0.01) {
+        self.homeBarView.alpha = targetAlpha;
+        if (shouldTraceVisibilityChange) {
+            CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=visibility.immediate bundle=%@ hidden=%d alpha=%.3f",
+                                    self.bundleID, hidden, self.homeBarView.alpha);
+        }
+        return;
+    }
+
+    NSTimeInterval duration = hidden ? 0.20 : 0.16;
+    UIViewPropertyAnimator *animator = [[UIViewPropertyAnimator alloc]
+        initWithDuration:duration
+        controlPoint1:CGPointMake(0.23, 1.0)
+        controlPoint2:CGPointMake(0.32, 1.0)
+        animations:^{
+            self.homeBarView.alpha = targetAlpha;
+        }];
+    self.homeBarVisibilityAnimator = animator;
+    __weak typeof(self) weakSelf = self;
+    __weak UIViewPropertyAnimator *weakAnimator = animator;
+    [animator addCompletion:^(__unused UIViewAnimatingPosition finalPosition) {
+        __strong typeof(weakSelf) self = weakSelf;
+        CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=visibility.completed bundle=%@ hidden=%d alpha=%.3f position=%ld",
+                                self.bundleID, self.homeBarAutoHidden,
+                                self.homeBarView.alpha, (long)finalPosition);
+        if (self.homeBarVisibilityAnimator == weakAnimator) {
+            self.homeBarVisibilityAnimator = nil;
+        }
+    }];
+    [animator startAnimation];
+}
+
+- (void)scheduleFloatingHomeBarAutoHide {
+    BOOL replacingActiveTimer = self.homeBarAutoHideTimer.isValid;
+    [self.homeBarAutoHideTimer invalidate];
+    self.homeBarAutoHideTimer = nil;
+    if (!self.homeBarView || self.isStashed || self.isClosing) return;
+
+    NSTimer *timer = [NSTimer timerWithTimeInterval:3.0
+                                             target:self
+                                           selector:@selector(homeBarAutoHideTimerFired:)
+                                           userInfo:nil
+                                            repeats:NO];
+    self.homeBarAutoHideTimer = timer;
+    [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+    if (!replacingActiveTimer) {
+        CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=timer.scheduled bundle=%@ idle=3.0 alpha=%.3f hidden=%d",
+                                self.bundleID, self.homeBarView.alpha, self.homeBarAutoHidden);
+    }
+}
+
+- (void)noteFloatingHomeBarInteraction {
+    if (!self.homeBarView || self.isStashed || self.isClosing) return;
+    CFTimeInterval now = CACurrentMediaTime();
+    if (self.homeBarAutoHidden || now - self.lastHomeBarInteractionTraceTime >= 0.5) {
+        CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=interaction.received bundle=%@ alpha=%.3f hidden=%d timer=%d",
+                                self.bundleID, self.homeBarView.alpha,
+                                self.homeBarAutoHidden, self.homeBarAutoHideTimer.isValid);
+        self.lastHomeBarInteractionTraceTime = now;
+    }
+    [self setFloatingHomeBarAutoHidden:NO animated:YES];
+    [self scheduleFloatingHomeBarAutoHide];
+}
+
+- (void)homeBarAutoHideTimerFired:(NSTimer *)timer {
+    if (timer != self.homeBarAutoHideTimer) return;
+    self.homeBarAutoHideTimer = nil;
+    if (self.isStashed || self.isClosing) return;
+    CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=timer.fired bundle=%@ alpha=%.3f hidden=%d",
+                            self.bundleID, self.homeBarView.alpha, self.homeBarAutoHidden);
+    [self setFloatingHomeBarAutoHidden:YES animated:YES];
 }
 
 - (void)layoutFloatingHomeBarForBounds:(CGRect)bounds {
@@ -3249,6 +3846,145 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 - (void)receptionTraceTimerFired:(NSTimer *)timer {
     (void)timer;
     [self recordReceptionTrace:@"timer" force:NO];
+    [self recordSurfaceOrientationAudit:@"timer" force:NO];
+
+    // Scene updates may replace the orientation resolver after the hosted
+    // Surface has already settled. Layer bounds still look full-size in that
+    // failure mode, while the producer renders into only the portrait-width
+    // portion of the landscape Surface. Audit the resolver's semantic pair and
+    // repair the Scene transaction with a bounded cadence.
+    if (!self.isClosing && !self.isStashed && self.targetScene) {
+        UIInterfaceOrientation presentationOrientation =
+            CV3HostedPresentationOrientation(self);
+        UIInterfaceOrientation requestedOrientation = self.hostedContentOrientation;
+        id liveSettings = CV3InvokeObject(self.targetScene, @selector(settings));
+        BOOL sceneBoundsMatchRequest =
+            CV3SceneSettingsBoundsMatchOrientation(liveSettings, requestedOrientation);
+        BOOL needsCrossOrientationMap =
+            CV3IsValidInterfaceOrientation(presentationOrientation) &&
+            CV3IsValidInterfaceOrientation(requestedOrientation) &&
+            UIInterfaceOrientationIsLandscape(presentationOrientation) !=
+                UIInterfaceOrientationIsLandscape(requestedOrientation) &&
+            !sceneBoundsMatchRequest;
+        id liveResolver = CV3OrientationMapResolverFromSettings(liveSettings);
+        BOOL resolverMatches = CV3OrientationMapResolverMatches(
+            liveResolver, presentationOrientation, requestedOrientation);
+        BOOL cachedPairMatches = self.crossOrientationMapApplied &&
+            self.mappedPresentationOrientation == presentationOrientation &&
+            self.mappedHostedOrientation == requestedOrientation;
+        if (needsCrossOrientationMap && (!resolverMatches || !cachedPairMatches)) {
+            CFTimeInterval mapNow = CACurrentMediaTime();
+            if (mapNow - self.lastOrientationMapRepairAt >= 1.0) {
+                self.lastOrientationMapRepairAt = mapNow;
+                CV3LogToFile(@"[OrientationMapRepair] phase=detected bundle=%@ presentation=%ld hosted=%ld cachedApplied=%d cachedPair=%ld->%ld resolverMatches=%d resolver={%@}",
+                             self.bundleID ?: @"nil", (long)presentationOrientation,
+                             (long)requestedOrientation, self.crossOrientationMapApplied,
+                             (long)self.mappedPresentationOrientation,
+                             (long)self.mappedHostedOrientation, resolverMatches,
+                             CV3OrientationResolverTrace(liveSettings));
+                BOOL repaired = [self syncHostedSceneLayoutForce:YES];
+                CV3LogToFile(@"[OrientationMapRepair] phase=committed bundle=%@ repaired=%d resolver={%@}",
+                             self.bundleID ?: @"nil", repaired,
+                             CV3OrientationResolverTrace(CV3InvokeObject(self.targetScene,
+                                                                         @selector(settings))));
+                [self setNeedsLayout];
+                [self layoutIfNeeded];
+            }
+        }
+    }
+
+    UIInterfaceOrientation hostedOrientation = self.hostedContentOrientation;
+    UIInterfaceOrientation liveClientOrientation = CV3HostedClientOrientation(self);
+    if (CV3IsValidInterfaceOrientation(self.pendingPortraitOrientation)) {
+        CFTimeInterval sampleTime = CACurrentMediaTime();
+        if (self.isClosing || self.isStashed || self.requiresLandscapeContent ||
+            sampleTime >= self.pendingPortraitDeadline) {
+            CV3LogToFile(@"[PortraitRestore] phase=cancelled bundle=%@ client=%ld closing=%d stashed=%d",
+                         self.bundleID, (long)liveClientOrientation, self.isClosing, self.isStashed);
+            self.pendingPortraitOrientation = UIInterfaceOrientationUnknown;
+            self.pendingPortraitStableSince = 0;
+        } else {
+            if (liveClientOrientation != self.pendingPortraitOrientation) {
+                self.pendingPortraitStableSince = 0;
+            } else if (self.pendingPortraitStableSince == 0) {
+                self.pendingPortraitStableSince = sampleTime;
+            } else if (sampleTime - self.pendingPortraitStableSince >= 0.5) {
+                UIInterfaceOrientation confirmed = self.pendingPortraitOrientation;
+                self.pendingPortraitOrientation = UIInterfaceOrientationUnknown;
+                self.pendingPortraitStableSince = 0;
+                self.hostedOrientationDriftFirstSeenAt = 0;
+                self.hostedOrientationDriftRepairApplied = NO;
+                CV3LogToFile(@"[PortraitRestore] phase=confirmed bundle=%@ requested=%ld client=%ld",
+                             self.bundleID, (long)confirmed, (long)liveClientOrientation);
+                [self applyHostedContentOrientation:confirmed];
+            }
+            // Do not reassert the old landscape request while checking an exit.
+            return;
+        }
+    }
+    BOOL hasClientDrift = !self.isClosing && !self.isStashed &&
+        CV3IsValidInterfaceOrientation(hostedOrientation) &&
+        CV3IsValidInterfaceOrientation(liveClientOrientation) &&
+        hostedOrientation != liveClientOrientation;
+    if (!hasClientDrift) {
+        BOOL driftWasActive = self.hostedOrientationDriftFirstSeenAt > 0.0;
+        if (driftWasActive) {
+            CV3LogToFile(@"[OrientationRepair] phase=driftCleared bundle=%@ hosted=%ld liveClient=%ld repairApplied=%d",
+                         self.bundleID ?: @"nil", (long)hostedOrientation,
+                         (long)liveClientOrientation, self.hostedOrientationDriftRepairApplied);
+        }
+        self.hostedOrientationDriftFirstSeenAt = 0.0;
+        self.hostedOrientationDriftClientOrientation = UIInterfaceOrientationUnknown;
+        self.hostedOrientationDriftRepairApplied = NO;
+
+        // The producer can recover from portrait back to the requested
+        // landscape orientation without changing hostedContentOrientation.
+        // In that transition the expected local transform becomes identity,
+        // but an ordinary same-orientation request is intentionally
+        // short-circuited. Re-layout exactly once when the observed drift
+        // clears so the stale 90-degree compensation is removed.
+        if (driftWasActive && !self.isClosing && !self.isStashed &&
+            CV3IsValidInterfaceOrientation(liveClientOrientation) &&
+            liveClientOrientation == hostedOrientation) {
+            CGAffineTransform expectedRotation = CV3HostedContentRotationInScene(self);
+            if (!CGAffineTransformEqualToTransform(self.rootTransformContainer.transform,
+                                                    expectedRotation)) {
+                CV3LogToFile(@"[OrientationRepair] phase=recoveryTransformSync bundle=%@ hosted=%ld liveClient=%ld rootBefore=%@ expected=%@",
+                             self.bundleID ?: @"nil", (long)hostedOrientation,
+                             (long)liveClientOrientation,
+                             NSStringFromCGAffineTransform(self.rootTransformContainer.transform),
+                             NSStringFromCGAffineTransform(expectedRotation));
+                [self setNeedsLayout];
+                [self layoutIfNeeded];
+                CV3LogToFile(@"[OrientationRepair] phase=recoveryTransformSynced bundle=%@ rootAfter=%@",
+                             self.bundleID ?: @"nil",
+                             NSStringFromCGAffineTransform(self.rootTransformContainer.transform));
+            }
+        }
+        return;
+    }
+
+    CFTimeInterval now = CACurrentMediaTime();
+    if (self.hostedOrientationDriftFirstSeenAt <= 0.0 ||
+        self.hostedOrientationDriftClientOrientation != liveClientOrientation) {
+        self.hostedOrientationDriftFirstSeenAt = now;
+        self.hostedOrientationDriftClientOrientation = liveClientOrientation;
+        self.hostedOrientationDriftRepairApplied = NO;
+        CV3LogToFile(@"[OrientationRepair] phase=driftObserved bundle=%@ hosted=%ld liveClient=%ld cachedAck=%ld",
+                     self.bundleID ?: @"nil", (long)hostedOrientation,
+                     (long)liveClientOrientation, (long)self.clientAcknowledgedOrientation);
+        return;
+    }
+
+    if (!self.hostedOrientationDriftRepairApplied &&
+        now - self.hostedOrientationDriftFirstSeenAt >= 0.5) {
+        self.hostedOrientationDriftRepairApplied = YES;
+        self.clientAcknowledgedOrientation = UIInterfaceOrientationUnknown;
+        CV3LogToFile(@"[OrientationRepair] phase=driftRepairTriggered bundle=%@ duration=%.3f hosted=%ld liveClient=%ld",
+                     self.bundleID ?: @"nil", now - self.hostedOrientationDriftFirstSeenAt,
+                     (long)hostedOrientation, (long)liveClientOrientation);
+        [self applyHostedContentOrientation:hostedOrientation];
+    }
 }
 
 + (CGRect)initialFrameForBundleID:(NSString *)bundleID
@@ -3624,8 +4360,23 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     if (!self.targetScene || !self.hostView) {
         return;
     }
-    
+
     @try {
+        // _setPresentationContext: is not an ordinary property setter. Each new
+        // context asks FrontBoard to publish another set of CALayerHost surfaces.
+        // Rebinding it during every portrait/landscape video transition leaves
+        // the previous surface alive, so a stale portrait layer can cover the
+        // correctly resized landscape host. Treat an existing context as the
+        // live hosting session and only restore the view's visibility here.
+        id existingContext = CV3TargetRespondsToSelector(self.hostView, @selector(presentationContext))
+            ? CV3InvokeObject(self.hostView, @selector(presentationContext))
+            : nil;
+        if (existingContext) {
+            self.hostView.alpha = 1.0;
+            self.hostView.hidden = NO;
+            return;
+        }
+
         // [Safety Restore] 恢复至 7 (1|2|4)，确保键盘可弹出。
         // 由于已解决布局死锁，恢复 2(Keyboard) 和 4(KeyboardBg) 是安全的。
         UIScenePresentationContext *context = [[CV3ClassNamed(@"UIScenePresentationContext") alloc] _initWithDefaultValues];
@@ -3653,6 +4404,206 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     } @catch (NSException *e) {
         CV3LogToFile(@"[Error] 热刷新渲染失败: %@", e);
     }
+}
+
+- (void)beginHostPresentationRepublishIfNeeded:(NSString *)reason {
+    if (!self.hostPresentationRepublishPending || self.pendingRepublishedHostView ||
+        !self.targetScene || !self.hostView || self.isClosing || self.isStashed) return;
+
+    self.hostPresentationRepublishPending = NO;
+    UIView *oldHost = self.hostView;
+    NSString *oldContextID = CV3HostedLayerContextID(oldHost.layer);
+    NSUInteger generation = ++self.hostPresentationRepublishGeneration;
+
+    @try {
+        id hostManager = CV3InvokeObject(self.targetScene, @selector(hostManager));
+        NSString *requester = [NSString stringWithFormat:@"com.xu.chevronv3.host.%@.orientation.%lu",
+                               self.bundleID, (unsigned long)generation];
+        SEL enableSelector = @selector(enableHostingForRequester:orderFront:);
+        if (!hostManager || !CV3TargetRespondsToSelector(hostManager, enableSelector)) {
+            CV3LogToFile(@"[HostRepublish] trace=%@ phase=manager.unavailable generation=%lu manager=%@ requester=%@",
+                         self.coldLaunchTraceID, (unsigned long)generation, hostManager, requester);
+            return;
+        }
+        ((void (*)(id, SEL, id, BOOL))objc_msgSend)(hostManager, enableSelector, requester, YES);
+        self.pendingRepublishedRequester = requester;
+        self.pendingRepublishedContextID = nil;
+        self.pendingRepublishedStableCount = 0;
+        CV3LogToFile(@"[HostRepublish] trace=%@ phase=manager.enabled generation=%lu reason=%@ requester=%@ oldHost=%p oldContextId=%@ resolver={%@}",
+                     self.coldLaunchTraceID, (unsigned long)generation, reason ?: @"unknown",
+                     requester, oldHost, oldContextID ?: @"nil",
+                     CV3OrientationResolverTrace(CV3InvokeObject(self.targetScene, @selector(settings))));
+        [self acquireRepublishedHostViewForGeneration:generation oldHost:oldHost
+                                         oldContextID:oldContextID retries:40];
+    } @catch (NSException *exception) {
+        CV3LogToFile(@"[HostRepublish] trace=%@ phase=manager.exception generation=%lu exception=%@",
+                     self.coldLaunchTraceID, (unsigned long)generation, exception);
+    }
+}
+
+- (void)acquireRepublishedHostViewForGeneration:(NSUInteger)generation
+                                        oldHost:(UIView *)oldHost
+                                   oldContextID:(NSString *)oldContextID
+                                        retries:(NSInteger)retries {
+    if (generation != self.hostPresentationRepublishGeneration || self.isClosing ||
+        self.pendingRepublishedRequester.length == 0) return;
+
+    UIView *newHost = nil;
+    id hostManager = CV3InvokeObject(self.targetScene, @selector(hostManager));
+    SEL selector = @selector(hostViewForRequester:enableAndOrderFront:);
+    @try {
+        if (CV3TargetRespondsToSelector(hostManager, selector)) {
+            newHost = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
+                hostManager, selector, self.pendingRepublishedRequester, YES);
+        }
+    } @catch (NSException *exception) {
+        CV3LogToFile(@"[HostRepublish] trace=%@ phase=manager.acquire.exception generation=%lu requester=%@ exception=%@",
+                     self.coldLaunchTraceID, (unsigned long)generation,
+                     self.pendingRepublishedRequester, exception);
+    }
+
+    if (newHost && newHost != oldHost) {
+        newHost.backgroundColor = UIColor.clearColor;
+        newHost.layer.cornerRadius = 0;
+        newHost.layer.masksToBounds = YES;
+        newHost.transform = CGAffineTransformIdentity;
+        newHost.frame = [self currentHostedSceneBounds];
+        newHost.accessibilityIdentifier = @"ChevronV3PendingHost";
+        [self.hostContainerProxy insertSubview:newHost belowSubview:oldHost];
+        [newHost setNeedsLayout];
+        [newHost layoutIfNeeded];
+        self.pendingRepublishedHostView = newHost;
+        CV3LogToFile(@"[HostRepublish] trace=%@ phase=manager.acquired generation=%lu requester=%@ oldHost=%p newHost=%p oldContextId=%@ newContextId=%@ frame=%@",
+                     self.coldLaunchTraceID, (unsigned long)generation,
+                     self.pendingRepublishedRequester, oldHost, newHost,
+                     oldContextID ?: @"nil", CV3HostedLayerContextID(newHost.layer) ?: @"nil",
+                     NSStringFromCGRect(newHost.frame));
+        [self pollRepublishedHostViewForGeneration:generation oldHost:oldHost
+                                      oldContextID:oldContextID retries:80];
+        return;
+    }
+
+    CV3LogToFile(@"[HostRepublish] trace=%@ phase=manager.acquire.wait generation=%lu requester=%@ retries=%ld result=%p sameAsOld=%d",
+                 self.coldLaunchTraceID, (unsigned long)generation,
+                 self.pendingRepublishedRequester, (long)retries, newHost, newHost == oldHost);
+    if (retries <= 0) {
+        SEL disableSelector = @selector(disableHostingForRequester:);
+        if (CV3TargetRespondsToSelector(hostManager, disableSelector)) {
+            ((void (*)(id, SEL, id))objc_msgSend)(hostManager, disableSelector,
+                                                  self.pendingRepublishedRequester);
+        }
+        self.pendingRepublishedRequester = nil;
+        CV3LogToFile(@"[HostRepublish] trace=%@ phase=manager.acquire.timeout generation=%lu keptOldHost=%p oldContextId=%@",
+                     self.coldLaunchTraceID, (unsigned long)generation, oldHost,
+                     oldContextID ?: @"nil");
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self acquireRepublishedHostViewForGeneration:generation oldHost:oldHost
+                                         oldContextID:oldContextID retries:retries - 1];
+    });
+}
+
+- (void)pollRepublishedHostViewForGeneration:(NSUInteger)generation
+                                     oldHost:(UIView *)oldHost
+                                oldContextID:(NSString *)oldContextID
+                                     retries:(NSInteger)retries {
+    UIView *newHost = self.pendingRepublishedHostView;
+    if (!newHost || generation != self.hostPresentationRepublishGeneration || self.isClosing) return;
+
+    NSString *newContextID = CV3HostedLayerContextID(newHost.layer);
+    BOOL hasRemoteContext = newContextID.length > 0;
+    BOOL sameProducerContext = oldContextID.length > 0 &&
+        [newContextID isEqualToString:oldContextID];
+    BOOL hasTree = newHost.layer.sublayers.count > 0 || newHost.subviews.count > 0;
+    BOOL mainLayer = CV3SceneHasRenderableMainLayer(self.targetScene);
+    CGRect expectedBounds = [self currentHostedSceneBounds];
+    CGRect presentedBounds = newHost.layer.presentationLayer
+        ? newHost.layer.presentationLayer.bounds : CGRectZero;
+    BOOL geometryReady = fabs(CGRectGetWidth(newHost.bounds) - CGRectGetWidth(expectedBounds)) <= 1.0 &&
+        fabs(CGRectGetHeight(newHost.bounds) - CGRectGetHeight(expectedBounds)) <= 1.0 &&
+        fabs(CGRectGetWidth(presentedBounds) - CGRectGetWidth(expectedBounds)) <= 1.0 &&
+        fabs(CGRectGetHeight(presentedBounds) - CGRectGetHeight(expectedBounds)) <= 1.0;
+
+    if (hasRemoteContext && hasTree && mainLayer && geometryReady) {
+        if ([self.pendingRepublishedContextID isEqualToString:newContextID]) {
+            self.pendingRepublishedStableCount += 1;
+        } else {
+            self.pendingRepublishedContextID = newContextID;
+            self.pendingRepublishedStableCount = 1;
+        }
+    } else {
+        self.pendingRepublishedStableCount = 0;
+    }
+
+    CV3LogToFile(@"[HostRepublish] trace=%@ phase=poll generation=%lu requester=%@ retries=%ld oldContextId=%@ newContextId=%@ sameProducerContext=%d tree=%d mainLayer=%d geometryReady=%d bounds=%@ presentedBounds=%@ expected=%@ stable=%lu",
+                 self.coldLaunchTraceID, (unsigned long)generation,
+                 self.pendingRepublishedRequester, (long)retries, oldContextID ?: @"nil",
+                 newContextID ?: @"nil", sameProducerContext, hasTree, mainLayer,
+                 geometryReady, NSStringFromCGRect(newHost.bounds),
+                 NSStringFromCGRect(presentedBounds), NSStringFromCGRect(expectedBounds),
+                 (unsigned long)self.pendingRepublishedStableCount);
+
+    if (self.pendingRepublishedStableCount >= 2) {
+        [UIView performWithoutAnimation:^{
+            newHost.accessibilityIdentifier = @"ChevronV3Host";
+            [self.hostContainerProxy bringSubviewToFront:newHost];
+            self.hostView = newHost;
+            self.pendingRepublishedHostView = nil;
+            [self setNeedsLayout];
+            [self layoutIfNeeded];
+            [oldHost removeFromSuperview];
+            if ([oldHost respondsToSelector:@selector(invalidate)]) {
+                CV3InvokeObject(oldHost, @selector(invalidate));
+            }
+        }];
+        NSString *oldRequester = self.sceneHostingRequester;
+        self.sceneHostingRequester = self.pendingRepublishedRequester;
+        self.pendingRepublishedRequester = nil;
+        if (oldRequester.length > 0 && ![oldRequester isEqualToString:self.sceneHostingRequester]) {
+            id hostManager = CV3InvokeObject(self.targetScene, @selector(hostManager));
+            SEL disableSelector = @selector(disableHostingForRequester:);
+            if (CV3TargetRespondsToSelector(hostManager, disableSelector)) {
+                ((void (*)(id, SEL, id))objc_msgSend)(hostManager, disableSelector, oldRequester);
+            }
+        }
+        CV3LogToFile(@"[HostRepublish] trace=%@ phase=swapped generation=%lu requester=%@ oldHost=%p newHost=%p oldContextId=%@ newContextId=%@ sameProducerContext=%d",
+                     self.coldLaunchTraceID, (unsigned long)generation,
+                     self.sceneHostingRequester, oldHost, newHost, oldContextID ?: @"nil",
+                     newContextID ?: @"nil", sameProducerContext);
+        [self recordStrictSplitTrace:@"hostRepublish.swapped"
+                             details:[NSString stringWithFormat:@"generation=%lu old=%@ new=%@",
+                                      (unsigned long)generation, oldContextID ?: @"nil",
+                                      newContextID ?: @"nil"]];
+        return;
+    }
+
+    if (retries <= 0) {
+        [newHost removeFromSuperview];
+        if ([newHost respondsToSelector:@selector(invalidate)]) CV3InvokeObject(newHost, @selector(invalidate));
+        self.pendingRepublishedHostView = nil;
+        self.pendingRepublishedContextID = nil;
+        self.pendingRepublishedStableCount = 0;
+        id hostManager = CV3InvokeObject(self.targetScene, @selector(hostManager));
+        SEL disableSelector = @selector(disableHostingForRequester:);
+        if (self.pendingRepublishedRequester.length > 0 &&
+            CV3TargetRespondsToSelector(hostManager, disableSelector)) {
+            ((void (*)(id, SEL, id))objc_msgSend)(hostManager, disableSelector,
+                                                  self.pendingRepublishedRequester);
+        }
+        self.pendingRepublishedRequester = nil;
+        CV3LogToFile(@"[HostRepublish] trace=%@ phase=timeout generation=%lu keptOldHost=%p oldContextId=%@",
+                     self.coldLaunchTraceID, (unsigned long)generation,
+                     oldHost, oldContextID ?: @"nil");
+        return;
+    }
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self pollRepublishedHostViewForGeneration:generation oldHost:oldHost
+                                      oldContextID:oldContextID retries:retries - 1];
+    });
 }
 
 - (UIView *)hostViewForScene:(FBScene *)scene {
@@ -3928,8 +4879,10 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 }
 
 - (void)recordColdLaunchMilestone:(NSString *)milestone details:(NSString *)details {
-    (void)milestone;
-    (void)details;
+    [self recordStrictSplitTrace:[@"coldLaunch." stringByAppendingString:milestone ?: @"unknown"]
+                         details:[NSString stringWithFormat:@"elapsedMs=%.1f %@",
+                                  (CACurrentMediaTime() - self.coldLaunchStartTime) * 1000.0,
+                                  details ?: @""]];
 }
 
 - (void)dismissLaunchSplashAnimated {
@@ -3977,6 +4930,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         
         if (needsUpdate) {
             [self.targetScene updateSettings:settings withTransitionContext:nil];
+            [self beginHostPresentationRepublishIfNeeded:@"foreground.commit"];
             
             // 确保内容状态强制为前台
             if ([self.targetScene respondsToSelector:@selector(_setContentState:)]) {
@@ -4567,7 +5521,12 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 }
 
 - (void)layoutSubviews {
-    if (self.isStashed || self.isInLayout) return; 
+    [self recordStrictSplitTrace:@"layout.entry" details:nil];
+    if (self.isStashed || self.isInLayout) {
+        [self recordStrictSplitTrace:@"layout.rejected"
+                             details:[NSString stringWithFormat:@"stashed=%d reentrant=%d", self.isStashed, self.isInLayout]];
+        return;
+    }
     self.isInLayout = YES;
 
     // Scene settings are asynchronous acknowledgements. They must not replace
@@ -4615,6 +5574,13 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     // the physical rotation; contentRotation is the local compensation below.
     self.baseRotationTransform = CV3RotationTransformForInterfaceOrientation(activeOrientation);
     self.transform = CGAffineTransformIdentity;
+    [self recordStrictSplitTrace:@"layout.orientationDecision"
+                         details:[NSString stringWithFormat:@"active=%ld scene=%ld client=%ld acknowledged=%ld wantsLandscape=%d shellWasLandscape=%d rotation=%@",
+                                  (long)activeOrientation, (long)sceneOrientation,
+                                  (long)CV3HostedClientOrientation(self),
+                                  (long)self.clientAcknowledgedOrientation,
+                                  wantsLandscape, shellIsLandscape,
+                                  NSStringFromCGAffineTransform(contentRotation)]];
     
     [super layoutSubviews];
     
@@ -4636,6 +5602,9 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     self.rootTransformContainer.bounds = CGRectMake(0, 0, logicalW, logicalH);
     self.rootTransformContainer.center = CGPointMake(fullW / 2.0, fullH / 2.0);
     self.rootTransformContainer.transform = contentRotation;
+    [self recordStrictSplitTrace:@"layout.rootGeometryApplied"
+                         details:[NSString stringWithFormat:@"logical=%.2fx%.2f physical=%.2fx%.2f swapsAxes=%d",
+                                  logicalW, logicalH, fullW, fullH, rotationSwapsAxes]];
 
     self.appContentWrapper.bounds = CGRectMake(0, 0, logicalW, logicalH);
     self.appContentWrapper.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
@@ -4733,9 +5702,14 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         // Preserve the Scene canvas. Enlarging only the host's bounds creates
         // empty space: the remote application still renders its original size.
         CGFloat uniformScale = MIN(logicalW / virtualW, logicalH / virtualH);
+        [self recordStrictSplitTrace:@"layout.hostDecision"
+                             details:[NSString stringWithFormat:@"virtual=%@ logical=%.2fx%.2f scale=%.6f",
+                                      NSStringFromCGRect(virtualBounds), logicalW, logicalH, uniformScale]];
         
         if (!self.liveResizeSnapshotView && !self.isMovingWindow) {
+            [self recordStrictSplitTrace:@"layout.sceneSync.begin" details:nil];
             [self syncHostedSceneLayoutForce:NO];
+            [self recordStrictSplitTrace:@"layout.sceneSync.end" details:nil];
         }
 
         self.hostContainerProxy.transform = CGAffineTransformIdentity;
@@ -4758,6 +5732,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
                 [content layoutIfNeeded];
             }
             [self synchronizeHostedContextLayerGeometry];
+            [self recordStrictSplitTrace:@"layout.hostGeometryApplied" details:nil];
         }
         self.hostContainerProxy.layer.anchorPoint = CGPointMake(0.5, 0.5);
         self.hostContainerProxy.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
@@ -4772,6 +5747,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     }
     
     self.isInLayout = NO;
+    [self recordStrictSplitTrace:@"layout.exit" details:nil];
     [self recordOrientationTrace:@"layoutSubviews.end" force:NO];
 }
 
@@ -5546,6 +6522,17 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     UIView *rootHit = [self.rootTransformContainer hitTest:pInRoot withEvent:event];
     if (!rootHit && ![self.rootTransformContainer pointInside:pInRoot withEvent:event]) return nil;
 
+    if (event.type == UIEventTypeTouches) {
+        // A hosted scene may consume the touch through its remote context
+        // without forwarding a stable Began phase to this UIWindow. The
+        // successful content hit itself is the reliable interaction signal.
+        CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=hitTest.content bundle=%@ hit=%@ point=%@ alpha=%.3f hidden=%d",
+                                self.bundleID, NSStringFromClass(rootHit.class),
+                                NSStringFromCGPoint(point), self.homeBarView.alpha,
+                                self.homeBarAutoHidden);
+        [self noteFloatingHomeBarInteraction];
+    }
+
     if (!self.isFocused) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [self setWindowFocused:YES];
@@ -5555,6 +6542,26 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 
     UIView *hit = [super hitTest:point withEvent:event];
     return hit ?: (self.clippingContainer ?: self.rootTransformContainer ?: self);
+}
+
+- (void)sendEvent:(UIEvent *)event {
+    if (event.type == UIEventTypeTouches && !self.isStashed && !self.isClosing) {
+        for (UITouch *touch in event.allTouches) {
+            if (touch.phase == UITouchPhaseBegan ||
+                touch.phase == UITouchPhaseMoved ||
+                touch.phase == UITouchPhaseStationary) {
+                if (touch.phase == UITouchPhaseBegan) {
+                    CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=sendEvent.touchBegan bundle=%@ alpha=%.3f hidden=%d timer=%d",
+                                            self.bundleID, self.homeBarView.alpha,
+                                            self.homeBarAutoHidden,
+                                            self.homeBarAutoHideTimer.isValid);
+                }
+                [self noteFloatingHomeBarInteraction];
+                break;
+            }
+        }
+    }
+    [super sendEvent:event];
 }
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
@@ -5918,6 +6925,10 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     }
     [self.receptionTraceTimer invalidate];
     self.receptionTraceTimer = nil;
+    [self.homeBarAutoHideTimer invalidate];
+    self.homeBarAutoHideTimer = nil;
+    [self.homeBarVisibilityAnimator stopAnimation:YES];
+    self.homeBarVisibilityAnimator = nil;
     
     CV3LogToFile(@"[Lifecycle] 正在关闭窗口(默认仅分离宿主，不强杀应用): %@", self.bundleID);
     [[NSNotificationCenter defaultCenter] removeObserver:self];
@@ -6015,6 +7026,10 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     [[UIDevice currentDevice] endGeneratingDeviceOrientationNotifications];
     [self.receptionTraceTimer invalidate];
     self.receptionTraceTimer = nil;
+    [self.homeBarAutoHideTimer invalidate];
+    self.homeBarAutoHideTimer = nil;
+    [self.homeBarVisibilityAnimator stopAnimation:YES];
+    self.homeBarVisibilityAnimator = nil;
     
     [self stopLiquidMotion];
     
