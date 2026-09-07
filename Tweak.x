@@ -705,9 +705,8 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
 @interface CV3RootViewController : UIViewController
 @end
 
-static NSFileHandle *CV3LogFileHandle = nil;
-static unsigned long long CV3LogFileBytes = 0;
 static void CV3LogStashAnimation(NSString *format, ...);
+static void CV3LogVideoFullscreen(NSString *format, ...);
 
 // Preserve existing call-site structure without emitting system or file logs.
 // The stash animation uses its own dedicated writer below.
@@ -789,61 +788,45 @@ static BOOL CV3ShouldForceSceneContentState(FBScene *scene, NSString *bundleID) 
     return YES;
 }
 
-static void CV3LogStashAnimation(NSString *format, ...) {
-    va_list args;
-    va_start(args, format);
-    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
-    va_end(args);
-
-    // All historical diagnostics are silent. Only the minimize/restore
-    // transition is allowed through this global logging surface.
-    if (![message hasPrefix:@"[StashAnimation]"]) return;
+static void CV3WriteFocusedDiagnostic(NSString *message) {
+    if (![message hasPrefix:@"[StashAnimation]"] &&
+        ![message hasPrefix:@"[DEBUG-VIDEOFULLSCREEN]"]) return;
 
     NSLog(@"[ChevronV3] %@", message);
 
     dispatch_async(CV3LogQueue(), ^{
         @try {
-            NSFileManager *fm = [NSFileManager defaultManager];
-            NSString *logPath = @"/var/mobile/Library/Caches/ChevronV3/StashAnimation.log";
-            NSString *parentDir = [logPath stringByDeletingLastPathComponent];
-            if (![fm fileExistsAtPath:parentDir]) {
-                [fm createDirectoryAtPath:parentDir withIntermediateDirectories:YES attributes:nil error:nil];
-            }
-
-            if (!CV3LogFileHandle) {
-                if (![fm fileExistsAtPath:logPath]) {
-                    [fm createFileAtPath:logPath contents:nil attributes:nil];
-                }
-                CV3LogFileBytes = [[fm attributesOfItemAtPath:logPath error:nil] fileSize];
-                CV3LogFileHandle = [NSFileHandle fileHandleForWritingAtPath:logPath];
-                [CV3LogFileHandle seekToEndOfFile];
-            }
-
             NSString *timestamp = [NSDateFormatter localizedStringFromDate:[NSDate date]
                                                                    dateStyle:NSDateFormatterShortStyle
                                                                    timeStyle:NSDateFormatterMediumStyle];
-            NSData *data = [[NSString stringWithFormat:@"[%@] %@\n", timestamp, message]
-                dataUsingEncoding:NSUTF8StringEncoding];
-            if (CV3LogFileBytes + data.length > 10 * 1024 * 1024) {
-                [CV3LogFileHandle closeFile];
-                CV3LogFileHandle = nil;
-                NSString *rotatedPath = [logPath stringByAppendingString:@".1"];
-                [fm removeItemAtPath:rotatedPath error:nil];
-                [fm moveItemAtPath:logPath toPath:rotatedPath error:nil];
-                [fm createFileAtPath:logPath contents:nil attributes:nil];
-                CV3LogFileHandle = [NSFileHandle fileHandleForWritingAtPath:logPath];
-                CV3LogFileBytes = 0;
+            NSString *entry = [NSString stringWithFormat:@"[%@] %@", timestamp, message];
+            NSUserDefaults *store = [[NSUserDefaults alloc] initWithSuiteName:@"com.xu.chevronv3.debug"];
+            NSMutableArray<NSString *> *entries = [[store stringArrayForKey:@"Entries"] mutableCopy];
+            if (!entries) entries = [NSMutableArray array];
+            [entries addObject:entry];
+            if (entries.count > 400) {
+                [entries removeObjectsInRange:NSMakeRange(0, entries.count - 400)];
             }
-            if (CV3LogFileHandle) {
-                [CV3LogFileHandle writeData:data];
-                CV3LogFileBytes += data.length;
-            }
-        } @catch (NSException *e) {
-            [CV3LogFileHandle closeFile];
-            CV3LogFileHandle = nil;
-            CV3LogFileBytes = 0;
-        }
+            [store setObject:entries forKey:@"Entries"];
+            [store synchronize];
+        } @catch (__unused NSException *exception) {}
     });
+}
+
+static void CV3LogStashAnimation(NSString *format, ...) {
+    va_list args;
+    va_start(args, format);
+    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+    CV3WriteFocusedDiagnostic(message);
+}
+
+static void CV3LogVideoFullscreen(NSString *format, ...) {
+    va_list args;
+    va_start(args, format);
+    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+    CV3WriteFocusedDiagnostic(message);
 }
 
 @implementation CV3RootViewController
@@ -938,6 +921,8 @@ static const char *CV3VideoOrientationNotification = "com.xu.chevronv3.video-ori
 static const char *CV3PlaybackTraceNotification = "com.xu.chevronv3.playback-trace";
 static int CV3VideoOrientationNotificationToken = -1;
 static int CV3PlaybackTraceNotificationToken = -1;
+static uint64_t CV3LastVideoOrientationDiagnosticState = 0;
+static CFTimeInterval CV3LastVideoOrientationDiagnosticTime = 0;
 static UIInterfaceOrientation CV3LastTrustedInterfaceOrientation = UIInterfaceOrientationPortrait;
 static UIInterfaceOrientation CV3LastPhysicalDeviceInterfaceOrientation = UIInterfaceOrientationPortrait;
 static BOOL CV3SuppressPresentationContextFanout = NO;
@@ -1637,6 +1622,8 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 - (void)applyCurrentTransformWithScale:(CGFloat)scale;
 - (void)handleTransitionGhosting;
 - (void)refreshHostViewPresentation;
+- (void)synchronizeHostedContextLayerGeometry;
+- (void)recordVideoFullscreenTrace:(NSString *)phase requestedOrientation:(UIInterfaceOrientation)orientation;
 - (UIView *)hostViewForScene:(FBScene *)scene;
 - (void)disableHostingForCurrentScene;
 - (BOOL)hostViewHasRenderableContent;
@@ -1921,13 +1908,42 @@ static void CV3RegisterVideoOrientationBridge(void) {
         uint64_t bundleHash = state & 0x00FFFFFFFFFFFFFFULL;
         if (!CV3IsValidInterfaceOrientation(orientation)) return;
 
+        CFTimeInterval now = CACurrentMediaTime();
+        if (state == CV3LastVideoOrientationDiagnosticState &&
+            now - CV3LastVideoOrientationDiagnosticTime < 0.30) {
+            return;
+        }
+        CV3LastVideoOrientationDiagnosticState = state;
+        CV3LastVideoOrientationDiagnosticTime = now;
+
+        CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=notification.received hash=%014llx requested=%ld windows=%lu",
+                              bundleHash,
+                              (long)orientation,
+                              (unsigned long)floatingWindows.count);
+
         for (CV3FloatingAppWindow *window in [floatingWindows copy]) {
             if (![window isKindOfClass:[CV3FloatingAppWindow class]] || window.isClosing) continue;
             if (CV3StableBundleHash(window.bundleID) != bundleHash) continue;
 
+            [window recordVideoFullscreenTrace:@"notification.matched.before" requestedOrientation:orientation];
             [window applyHostedContentOrientation:orientation];
+            [window recordVideoFullscreenTrace:@"notification.matched.after" requestedOrientation:orientation];
+            NSArray<NSNumber *> *delays = @[@0.05, @0.15, @0.40];
+            for (NSNumber *delay in delays) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                             (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    if (!window.isClosing) {
+                        [window recordVideoFullscreenTrace:[NSString stringWithFormat:@"notification.after.%.0fms", delay.doubleValue * 1000.0]
+                                      requestedOrientation:orientation];
+                    }
+                });
+            }
             return;
         }
+        CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=notification.unmatched hash=%014llx requested=%ld",
+                              bundleHash,
+                              (long)orientation);
     });
 
     if (status != NOTIFY_STATUS_OK) {
@@ -5097,6 +5113,7 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
 
 %ctor {
     @autoreleasepool {
+        CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=logger.ready version=1.0.18-47+fullscreen-exit-fix");
         CV3PublishHostGeneration();
         CV3RegisterVideoOrientationBridge();
         CV3RegisterPlaybackTraceBridge();

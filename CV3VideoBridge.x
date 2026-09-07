@@ -32,6 +32,7 @@ static volatile uint64_t CV3MetalDrawableRequestCount = 0;
 static volatile uint64_t CV3VideoPixelBufferCopyCount = 0;
 static volatile CFTimeInterval CV3LastMetalDrawableRequestTime = 0;
 static volatile CFTimeInterval CV3LastVideoPixelBufferCopyTime = 0;
+static CFTimeInterval CV3LandscapeReentrySuppressedUntil = 0;
 
 static void CV3AppendCanvasTrace(NSString *line) {
     (void)line;
@@ -642,6 +643,20 @@ static void CV3PostVideoOrientation(UIInterfaceOrientation orientation) {
 
     NSString *bundleID = [NSBundle mainBundle].bundleIdentifier;
     if (bundleID.length == 0 || [bundleID isEqualToString:@"com.apple.springboard"]) return;
+
+    CFTimeInterval now = CACurrentMediaTime();
+    BOOL leavingLandscape = UIInterfaceOrientationIsLandscape(CV3RequestedInterfaceOrientation) &&
+        UIInterfaceOrientationIsPortrait(orientation);
+    if (leavingLandscape) {
+        // Full-screen player dismissal commonly emits one stale landscape
+        // geometry/controller callback immediately after its portrait restore.
+        // Forwarding that callback makes the host reopen the just-dismissed
+        // full-screen presentation and can form a portrait/landscape loop.
+        CV3LandscapeReentrySuppressedUntil = now + 1.5;
+    } else if (UIInterfaceOrientationIsLandscape(orientation) &&
+               now < CV3LandscapeReentrySuppressedUntil) {
+        return;
+    }
     CV3RequestedInterfaceOrientation = orientation;
 
     if (CV3VideoOrientationNotificationToken < 0) {

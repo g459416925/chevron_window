@@ -1605,10 +1605,147 @@ void CV3ToggleExposeMode(void) {
     return modified;
 }
 
+static NSString *CV3VideoLayerValue(id object, NSString *key) {
+    if (!object || key.length == 0) return @"nil";
+    @try {
+        id value = [object valueForKey:key];
+        return value ? [value description] : @"nil";
+    } @catch (__unused NSException *exception) {
+        return @"n/a";
+    }
+}
+
+static void CV3CollectVideoFullscreenLayers(CALayer *layer,
+                                            NSString *path,
+                                            NSUInteger depth,
+                                            NSMutableArray<NSString *> *entries) {
+    if (!layer || depth > 12 || entries.count >= 64) return;
+
+    CALayer *presentation = layer.presentationLayer;
+    id contents = nil;
+    @try { contents = layer.contents; } @catch (__unused NSException *exception) {}
+    [entries addObject:[NSString stringWithFormat:
+        @"%@:%@ frame=%@ bounds=%@ presFrame=%@ affine=%@ hidden=%d opacity=%.2f masks=%d gravity=%@ context=%@ contents=%@:%p children=%lu",
+        path,
+        NSStringFromClass(layer.class),
+        NSStringFromCGRect(layer.frame),
+        NSStringFromCGRect(layer.bounds),
+        presentation ? NSStringFromCGRect(presentation.frame) : @"nil",
+        NSStringFromCGAffineTransform(layer.affineTransform),
+        layer.hidden,
+        layer.opacity,
+        layer.masksToBounds,
+        layer.contentsGravity ?: @"nil",
+        CV3VideoLayerValue(layer, @"contextId"),
+        contents ? NSStringFromClass([contents class]) : @"nil",
+        contents,
+        (unsigned long)layer.sublayers.count]];
+
+    NSUInteger index = 0;
+    for (CALayer *child in layer.sublayers ?: @[]) {
+        CV3CollectVideoFullscreenLayers(child,
+                                        [path stringByAppendingFormat:@".%lu", (unsigned long)index++],
+                                        depth + 1,
+                                        entries);
+    }
+}
+
+static NSUInteger CV3SynchronizeHostedContextLayerGeometry(CALayer *layer,
+                                                            NSUInteger depth) {
+    if (!layer || depth > 12) return 0;
+
+    NSUInteger updated = 0;
+    for (CALayer *child in layer.sublayers ?: @[]) {
+        if ([NSStringFromClass(child.class) isEqualToString:@"CALayerHost"]) {
+            CGRect expectedFrame = child.superlayer.bounds;
+            if (!CGRectEqualToRect(child.frame, expectedFrame) ||
+                !CGSizeEqualToSize(child.bounds.size, expectedFrame.size)) {
+                child.frame = expectedFrame;
+                child.bounds = CGRectMake(0, 0,
+                                          CGRectGetWidth(expectedFrame),
+                                          CGRectGetHeight(expectedFrame));
+                updated++;
+            }
+        }
+        updated += CV3SynchronizeHostedContextLayerGeometry(child, depth + 1);
+    }
+    return updated;
+}
+
+- (void)synchronizeHostedContextLayerGeometry {
+    if (!self.hostView || self.isClosing || self.isStashed) return;
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    NSUInteger updated = CV3SynchronizeHostedContextLayerGeometry(self.hostView.layer, 0);
+    [CATransaction commit];
+    if (updated > 0) {
+        [self.hostView.layer setNeedsLayout];
+    }
+}
+
+- (void)recordVideoFullscreenTrace:(NSString *)phase requestedOrientation:(UIInterfaceOrientation)orientation {
+    id settings = self.targetScene ? CV3InvokeObject(self.targetScene, @selector(settings)) : nil;
+    CGRect settingsFrame = CGRectZero;
+    @try {
+        if ([settings respondsToSelector:@selector(frame)]) {
+            settingsFrame = ((FBSMutableSceneSettings *)settings).frame;
+        }
+    } @catch (__unused NSException *exception) {}
+    NSInteger settingsOrientation = CV3InvokeInteger(settings,
+                                                      @selector(interfaceOrientation),
+                                                      NSIntegerMin);
+    NSInteger contentState = CV3InvokeInteger(self.targetScene,
+                                              @selector(contentState),
+                                              NSIntegerMin);
+    CALayer *hostLayer = self.hostView.layer;
+    CALayer *presentation = hostLayer.presentationLayer;
+    NSMutableArray<NSString *> *hostLayers = [NSMutableArray array];
+    CV3CollectVideoFullscreenLayers(hostLayer, @"host", 0, hostLayers);
+    CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=%@ bundle=%@ requested=%ld target=%ld hosted=%ld display=%ld prefersLandscape=%d requiresLandscape=%d stashed=%d windowFrame=%@ windowBounds=%@ rootBounds=%@ rootTransform=%@ wrapper=%@ clip=%@ proxy=%@ hostFrame=%@ hostBounds=%@ hostAttached=%d hostChildren=%lu layerFrame=%@ layerBounds=%@ presentationFrame=%@ settingsFrame=%@ settingsOrientation=%ld contentState=%ld hostLayers=[%@]",
+                          phase ?: @"unknown",
+                          self.bundleID ?: @"unknown",
+                          (long)orientation,
+                          (long)self.targetOrientation,
+                          (long)self.hostedContentOrientation,
+                          (long)CV3TrustedInterfaceOrientation(self.windowScene),
+                          self.prefersLandscapePresentation,
+                          self.requiresLandscapeContent,
+                          self.isStashed,
+                          NSStringFromCGRect(self.frame),
+                          NSStringFromCGRect(self.bounds),
+                          NSStringFromCGRect(self.rootTransformContainer.bounds),
+                          NSStringFromCGAffineTransform(self.rootTransformContainer.transform),
+                          NSStringFromCGRect(self.appContentWrapper.frame),
+                          NSStringFromCGRect(self.clippingContainer.frame),
+                          NSStringFromCGRect(self.hostContainerProxy.frame),
+                          NSStringFromCGRect(self.hostView.frame),
+                          NSStringFromCGRect(self.hostView.bounds),
+                          self.hostView.superview == self.hostContainerProxy,
+                          (unsigned long)(self.hostView.subviews.count + self.hostView.layer.sublayers.count),
+                          NSStringFromCGRect(hostLayer.frame),
+                          NSStringFromCGRect(hostLayer.bounds),
+                          presentation ? NSStringFromCGRect(presentation.frame) : @"nil",
+                          NSStringFromCGRect(settingsFrame),
+                          (long)settingsOrientation,
+                          (long)contentState,
+                          [hostLayers componentsJoinedByString:@" | "]);
+}
+
 - (void)applyHostedContentOrientation:(UIInterfaceOrientation)orientation {
-    if (!CV3IsValidInterfaceOrientation(orientation) || self.isClosing) return;
-    if (self.requiresLandscapeContent && !UIInterfaceOrientationIsLandscape(orientation)) return;
-    if (self.hostedContentOrientation == orientation) return;
+    [self recordVideoFullscreenTrace:@"applyHosted.entry" requestedOrientation:orientation];
+    if (!CV3IsValidInterfaceOrientation(orientation) || self.isClosing) {
+        [self recordVideoFullscreenTrace:@"applyHosted.rejected.invalidOrClosing" requestedOrientation:orientation];
+        return;
+    }
+    if (self.requiresLandscapeContent && !UIInterfaceOrientationIsLandscape(orientation)) {
+        [self recordVideoFullscreenTrace:@"applyHosted.rejected.landscapeOnly" requestedOrientation:orientation];
+        return;
+    }
+    if (self.hostedContentOrientation == orientation) {
+        [self recordVideoFullscreenTrace:@"applyHosted.shortCircuit.sameOrientation" requestedOrientation:orientation];
+        return;
+    }
 
     self.hostedContentOrientation = orientation;
     self.prefersLandscapePresentation = UIInterfaceOrientationIsLandscape(orientation);
@@ -1618,10 +1755,21 @@ void CV3ToggleExposeMode(void) {
     [self refreshHostViewPresentation];
     [self setNeedsLayout];
     [self layoutIfNeeded];
+    [self synchronizeHostedContextLayerGeometry];
+    for (NSNumber *delay in @[@0.05, @0.15]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (self.isClosing || self.isStashed ||
+                self.hostedContentOrientation != orientation) return;
+            [self synchronizeHostedContextLayerGeometry];
+        });
+    }
     // Home bar placement belongs to the logical content container. Re-run it
     // after the scene orientation transaction, otherwise the bar keeps the
     // pre-hosting portrait edge while the shell is already landscape.
     [self layoutFloatingHomeBarForBounds:self.appContentWrapper.bounds];
+    [self recordVideoFullscreenTrace:@"applyHosted.completed" requestedOrientation:orientation];
     CV3LogToFile(@"[VideoBridge] 已更新托管内容方向=%ld: %@", (long)orientation, self.bundleID);
 }
 
@@ -4609,6 +4757,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
                 content.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
                 [content layoutIfNeeded];
             }
+            [self synchronizeHostedContextLayerGeometry];
         }
         self.hostContainerProxy.layer.anchorPoint = CGPointMake(0.5, 0.5);
         self.hostContainerProxy.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
