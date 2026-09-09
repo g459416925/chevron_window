@@ -1141,8 +1141,15 @@ void CV3ToggleExposeMode(void) {
     return rotatedImage ?: image;
 }
 
+- (UIView *)stashAnimationSnapshotSourceView {
+    // Capture the same clipped surface the user currently sees. The hosted
+    // proxy uses the client's logical coordinate space and may remain portrait
+    // even while the floating surface is visibly landscape.
+    return self.clippingContainer ?: self.appContentWrapper ?: self.hostContainerProxy;
+}
+
 - (UIImage *)snapshotImageForRestoreAnimation {
-    UIView *view = self.hostContainerProxy ?: self.clippingContainer ?: self.appContentWrapper;
+    UIView *view = [self stashAnimationSnapshotSourceView];
     if (!view || CGRectIsEmpty(view.bounds)) return nil;
 
     UIGraphicsBeginImageContextWithOptions(view.bounds.size, NO, [UIScreen mainScreen].scale);
@@ -1157,9 +1164,16 @@ void CV3ToggleExposeMode(void) {
     UIInterfaceOrientation orientation = CV3IsValidInterfaceOrientation(self.targetOrientation)
         ? self.targetOrientation
         : CV3TrustedInterfaceOrientation(self.windowScene);
-    return [self imageByRotatingImage:image
-                      fromOrientation:UIInterfaceOrientationPortrait
-                        toOrientation:orientation];
+    // drawViewHierarchyInRect: already snapshots the selected visible surface
+    // in its current coordinate space. Rotating it from a hard-coded portrait
+    // source turns an already-landscape frame into a portrait genie image.
+    CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=capture phase=snapshot view=%@ bounds=%@ image=%@ content_orientation=%ld",
+                 self.stashAnimationTraceID ?: @"pending",
+                 NSStringFromClass(view.class),
+                 NSStringFromCGRect(view.bounds),
+                 image ? NSStringFromCGSize(image.size) : @"nil",
+                 (long)orientation);
+    return image;
 }
 
 - (void)updateStashedRestoreSnapshotForOrientation:(UIInterfaceOrientation)orientation {
@@ -5400,14 +5414,14 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     stashCenter.y = MIN(MAX(stashCenter.y, minCenterY), maxCenterY);
     CGRect targetFrame = CGRectMake(stashCenter.x - stashHalf, stashCenter.y - stashHalf, kCV3StashIconSize, kCV3StashIconSize);
     CGRect targetFrameInWindow = CGRectOffset(targetFrame, -initialFrame.origin.x, -initialFrame.origin.y);
-    UIView *snapshotSourceView = self.hostContainerProxy ?: self.clippingContainer ?: self.appContentWrapper;
+    UIView *snapshotSourceView = [self stashAnimationSnapshotSourceView];
     CGRect snapshotStartFrame = [self convertRect:snapshotSourceView.bounds fromView:snapshotSourceView];
+    self.stashAnimationTraceID = NSUUID.UUID.UUIDString;
+    self.stashAnimationTraceStartTime = CACurrentMediaTime();
     self.stashedRestoreSnapshotImage = [self snapshotImageForRestoreAnimation];
     self.stashedRestoreSnapshotOrientation = self.targetOrientation;
     UIImage *genieImage = self.stashedRestoreSnapshotImage;
 
-    self.stashAnimationTraceID = NSUUID.UUID.UUIDString;
-    self.stashAnimationTraceStartTime = CACurrentMediaTime();
     CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=minimize phase=begin bundle=%@ source=%@ target=%@ device_orientation=%ld content_orientation=%ld snapshot=%d",
                  self.stashAnimationTraceID,
                  self.bundleID ?: @"unknown",
@@ -6507,7 +6521,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         self.resizeHandle.alpha = 1.0;
         self.homeBarView.alpha = 1.0;
 
-        UIView *snapshotSourceView = self.hostContainerProxy ?: self.clippingContainer ?: self.appContentWrapper;
+        UIView *snapshotSourceView = [self stashAnimationSnapshotSourceView];
         CGRect endFrameInWindow = [self convertRect:snapshotSourceView.bounds fromView:snapshotSourceView];
         CGRect startFrameInWindow = CGRectOffset(iconFrame, -targetFrame.origin.x, -targetFrame.origin.y);
         UIImage *genieImage = self.stashedRestoreSnapshotImage ?: [self snapshotImageForRestoreAnimation];
