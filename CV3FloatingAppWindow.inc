@@ -3987,6 +3987,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 
 - (void)receptionTraceTimerFired:(NSTimer *)timer {
     (void)timer;
+    [self refreshContentVisibilityGate];
     [self recordReceptionTrace:@"timer" force:NO];
     [self recordSurfaceOrientationAudit:@"timer" force:NO];
 
@@ -4287,6 +4288,11 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         // refreshed as soon as its Scene transaction lands. The container must
         // remain visible because some clients publish no canvas notification.
         self.awaitingInitialRenderableContent = YES;
+        // UIWindow starts life hidden before makeKeyAndVisible. That UIKit
+        // construction state is not a user/system request to keep it hidden.
+        self.requestedWindowHidden = NO;
+        self.contentVisibilityGateEnabled = YES;
+        [self refreshContentVisibilityGate];
         [self clearOuterWindowShadow];
         [self syncWindowShadowForCurrentState];
 
@@ -4440,20 +4446,25 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 }
 
 - (void)setHidden:(BOOL)hidden {
+    self.requestedWindowHidden = hidden;
     if (self.isSuppressedByLockScreen) {
         [super setHidden:YES];
+        [self refreshContentVisibilityGate];
         return;
     }
 
     // Keep a visible hosted window attached during ordinary workspace transitions.
     if (hidden && !self.isStashed && !self.isClosing) {
+        self.requestedWindowHidden = NO;
         CV3LogToFile(@"[Visibility] 拦截系统隐藏请求: %@", self.bundleID);
         [super setHidden:NO];
         [self attachToCurrentActiveScene];
+        [self refreshContentVisibilityGate];
         return;
     }
     CV3LogToFile(@"[Visibility] 窗口 Hidden 状态变更 -> %d: %@", hidden, self.bundleID);
     [super setHidden:hidden];
+    [self refreshContentVisibilityGate];
     [self recordReceptionTrace:hidden ? @"window.hidden" : @"window.visible" force:YES];
 }
 
@@ -4821,8 +4832,34 @@ static void CV3CollectReceptionLayers(CALayer *layer,
                  reason ?: @"Unknown");
 }
 
+- (void)refreshContentVisibilityGate {
+    if (!self.contentVisibilityGateEnabled) return;
+    // The requested visibility is independent of the effective hidden state.
+    // Reading self.hidden here would feed our previous gate result back into it.
+    BOOL blocked = !self.isStashed && (self.isClosing ||
+        self.awaitingInitialRenderableContent ||
+        self.hostLifecycleState != CV3HostLifecycleStateLive ||
+        !CV3InvokeBool(self.targetScene, @selector(isValid), NO) ||
+        ![self hostViewHasRenderableContent]);
+    BOOL effectiveHidden = self.requestedWindowHidden || self.isSuppressedByLockScreen ||
+        self.isClosing || blocked;
+    BOOL changed = self.windowPresentationBlocked != blocked || self.hidden != effectiveHidden;
+    self.windowPresentationBlocked = blocked;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    if (self.hidden != effectiveHidden) [super setHidden:effectiveHidden];
+    [CATransaction commit];
+    if (changed) {
+        CV3LogToFile(@"[Recovery] phase=contentVisibility bundle=%@ blocked=%d generation=%lu stashed=%d context=%@ requestedHidden=%d effectiveHidden=%d windowHidden=%d layerHidden=%d",
+            self.bundleID, blocked, (unsigned long)self.sceneHostGeneration,
+            self.isStashed, CV3HostedLayerContextID(self.hostView.layer) ?: @"nil",
+            self.requestedWindowHidden, effectiveHidden, self.hidden, self.layer.hidden);
+    }
+}
+
 - (void)detachHostedSceneForReason:(NSString *)reason clearScene:(BOOL)clearScene {
     [self setHostLifecycleState:CV3HostLifecycleStateReleasing reason:reason];
+    [self refreshContentVisibilityGate];
     CV3ReleaseKeyboardHostingForWindow(self);
     [self disableHostingForCurrentScene];
     UIView *hostView = self.hostView;
@@ -4976,6 +5013,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
             [self recordOrientationTrace:@"firstFrame.afterRevealRequest" force:YES];
             [self recordColdLaunchMilestone:@"FIRST_FRAME_REVEAL_REQUESTED" details:nil];
         }
+        [self refreshContentVisibilityGate];
         CV3LogToFile(@"[SceneHost] 渲染层已就绪: %@", self.bundleID);
         CV3LogToFile(@"[HostGeometry] bundle=%@ shell=%@ canvas=%@ host=%@ children=%@ displayOrientation=%ld contentOrientation=%ld mapped=%d",
                      self.bundleID, NSStringFromCGRect(self.bounds),
@@ -5381,6 +5419,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 
     self.preStashFrame = self.frame;
     self.isStashed = YES;
+    [self refreshContentVisibilityGate];
     [self.hostedSession setActive:NO];
     CV3ReleaseKeyboardHostingForWindow(self);
     self.stashedSide = isNearLeft ? 1 : 2;
@@ -6261,6 +6300,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 
         [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:UIViewAnimationOptionCurveEaseInOut animations:^{
             self.isStashed = NO;
+            [self refreshContentVisibilityGate];
             self.stashedSide = 0;
             self.stashGrabber.alpha = 0;
             self.clippingContainer.alpha = 1.0;
@@ -6434,6 +6474,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         self.stashGrabber.alpha = 0.0;
 
         self.isStashed = NO; // 先解除 Stash 标志，以便下面 updateSettings 时能被识别为前台
+        [self refreshContentVisibilityGate];
         [self.hostedSession setActive:YES];
         CV3CascadeUpdateSovereigntyAssertions(); // 级联刷新所有窗口前台优先级断言
 

@@ -1691,6 +1691,10 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, assign) BOOL prefersLandscapePresentation;
 @property (nonatomic, assign) BOOL requiresLandscapeContent;
 @property (nonatomic, assign) BOOL awaitingInitialRenderableContent;
+@property (nonatomic, assign) BOOL contentVisibilityGateEnabled;
+@property (nonatomic, assign) BOOL windowPresentationBlocked;
+@property (nonatomic, assign) BOOL requestedWindowHidden;
+- (void)refreshContentVisibilityGate;
 @property (nonatomic, assign) CFTimeInterval coldLaunchStartTime;
 @property (nonatomic, copy) NSString *coldLaunchTraceID;
 @property (nonatomic, assign) BOOL coldLaunchSceneFoundRecorded;
@@ -2068,6 +2072,7 @@ static BOOL CV3PhysicalPointInside(UIWindow *selfWindow, CGPoint point, UIEvent 
 
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
     if (![self isKindOfClass:[CV3FloatingAppWindow class]]) return %orig;
+    if (((CV3FloatingAppWindow *)self).windowPresentationBlocked) return NO;
     
     // Z-order 点击透传退避算法：如果点击落在更顶层窗口的有效判定区内，则下层主动退避，交由上层响应
     if (floatingWindows && floatingWindows.count > 1) {
