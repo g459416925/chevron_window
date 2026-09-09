@@ -35,6 +35,7 @@ static volatile uint64_t CV3VideoPixelBufferCopyCount = 0;
 static volatile CFTimeInterval CV3LastMetalDrawableRequestTime = 0;
 static volatile CFTimeInterval CV3LastVideoPixelBufferCopyTime = 0;
 static CFTimeInterval CV3LandscapeReentrySuppressedUntil = 0;
+static uint64_t CV3OrientationRequestRevision = 0;
 static CFTimeInterval CV3LastHostedInteractionPostTime = 0;
 
 typedef NS_ENUM(uint8_t, CV3VideoOrientationSource) {
@@ -534,6 +535,7 @@ static void CV3RefreshHostedState(int token) {
         }
         NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
         if (!CV3ApplicationIsChevronHosted) {
+            ++CV3OrientationRequestRevision;
             CV3PlaybackTransitionGraceDeadline = 0;
             CV3RequestedInterfaceOrientation = UIInterfaceOrientationUnknown;
             CV3VideoOrientationOwner = nil;
@@ -717,6 +719,7 @@ static void CV3PostVideoOrientation(UIInterfaceOrientation orientation,
     if (bundleID.length == 0 || [bundleID isEqualToString:@"com.apple.springboard"]) return;
 
     CFTimeInterval now = CACurrentMediaTime();
+    uint64_t revision = ++CV3OrientationRequestRevision;
     CV3AppendCanvasTrace([NSString stringWithFormat:
         @"[OrientationRequest] requested=%ld previous=%ld source=%u hosted=%d owner=%@ suppressionRemaining=%.3f",
         (long)orientation, (long)CV3RequestedInterfaceOrientation, (unsigned int)source,
@@ -732,6 +735,34 @@ static void CV3PostVideoOrientation(UIInterfaceOrientation orientation,
         CV3LandscapeReentrySuppressedUntil = now + 1.5;
     } else if (UIInterfaceOrientationIsLandscape(orientation) &&
                now < CV3LandscapeReentrySuppressedUntil) {
+        // Suppression must not permanently lose a real re-entry. Recheck live
+        // geometry at the deadline; any newer request invalidates this callback.
+        CFTimeInterval deadline = CV3LandscapeReentrySuppressedUntil;
+        CV3AppendCanvasTrace([NSString stringWithFormat:
+            @"[OrientationReentry] phase=deferred revision=%llu requested=%ld source=%u remainingMs=%.3f",
+            (unsigned long long)revision, (long)orientation, (unsigned int)source,
+            (deadline - now) * 1000.0]);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+            (int64_t)((deadline - now + 0.02) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (revision != CV3OrientationRequestRevision || !CV3ApplicationIsChevronHosted) return;
+            UIViewController *owner = CV3VideoOrientationOwner;
+            UIWindow *window = owner.viewIfLoaded.window;
+            UIInterfaceOrientation current = UIInterfaceOrientationUnknown;
+            @try {
+                if (owner) current = CV3InterfaceOrientationForMask(
+                    owner.supportedInterfaceOrientations,
+                    owner.preferredInterfaceOrientationForPresentation);
+            } @catch (__unused NSException *exception) {}
+            CGSize size = window.bounds.size;
+            BOOL confirmed = window && !window.hidden && window.alpha > 0.01 &&
+                !owner.isBeingDismissed && !owner.isMovingFromParentViewController &&
+                size.height > 0 && size.width > size.height && current == orientation;
+            CV3AppendCanvasTrace([NSString stringWithFormat:
+                @"[OrientationReentry] phase=%@ revision=%llu requested=%ld current=%ld owner=%@ window=%@",
+                confirmed ? @"confirmed" : @"discarded", (unsigned long long)revision,
+                (long)orientation, (long)current, NSStringFromClass(owner.class), NSStringFromCGSize(size)]);
+            if (confirmed) CV3PostVideoOrientation(orientation, source);
+        });
         return;
     }
     CV3RequestedInterfaceOrientation = orientation;
