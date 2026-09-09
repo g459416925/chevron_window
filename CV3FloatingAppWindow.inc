@@ -4908,6 +4908,13 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         return;
     }
 
+    if (!CV3InvokeBool(self.targetScene, @selector(isValid), YES)) {
+        CV3LogToFile(@"[Recovery] phase=closeInvalidScene bundle=%@ reason=%@ mainLayer=%d",
+                     self.bundleID, reason ?: @"Heartbeat", hasMainLayer);
+        [self closeWindow];
+        return;
+    }
+
     self.hostContentFailureCount += 1;
     if (self.hostContentFailureCount < 2) return;
 
@@ -6093,6 +6100,15 @@ static void CV3CollectReceptionLayers(CALayer *layer,
                     [self attemptToHostSceneWithRetries:retries - 1 delay:nextDelay generation:generation];
                 } else {
                     CV3LogToFile(@"[Error] targetScene not found after launch for %@", self.bundleID);
+                    // A live window whose display recovery exhausted all probes
+                    // has no content to retain. Cold starts use their own policy.
+                    if (self.hostContentRecoveryInFlight && !self.hostView && !self.isStashed) {
+                        self.hostContentRecoveryInFlight = NO;
+                        CV3LogToFile(@"[Recovery] phase=closeEmptyRecovery bundle=%@ generation=%lu elapsedMs=%.1f",
+                                     self.bundleID, (unsigned long)generation,
+                                     (CACurrentMediaTime() - self.lastHostContentRecoveryAt) * 1000.0);
+                        [self closeWindow];
+                    }
                 }
             }
         } @catch (NSException *e) {
