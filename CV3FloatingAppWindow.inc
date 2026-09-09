@@ -143,11 +143,15 @@ static BOOL CV3SceneAndDisplayAxesDiffer(UIWindow *window) {
     return window ? CV3SceneAndDisplayAxesDifferForScene(window.windowScene) : NO;
 }
 
+static BOOL CV3LandscapeGameNeedsSceneCompensation(CV3FloatingAppWindow *window) {
+    return window.prefersLandscapePresentation && window.requiresLandscapeContent &&
+        CV3SceneAndDisplayAxesDiffer(window);
+}
+
 static BOOL CV3ShellShouldBeLandscape(CV3FloatingAppWindow *window,
                                       UIInterfaceOrientation presentationOrientation) {
     BOOL presentationLandscape = UIInterfaceOrientationIsLandscape(presentationOrientation);
-    BOOL landscapeClientNeedsSceneAxisCompensation = window.prefersLandscapePresentation &&
-        window.requiresLandscapeContent && CV3SceneAndDisplayAxesDiffer(window);
+    BOOL landscapeClientNeedsSceneAxisCompensation = CV3LandscapeGameNeedsSceneCompensation(window);
     return landscapeClientNeedsSceneAxisCompensation ? !presentationLandscape : presentationLandscape;
 }
 
@@ -200,6 +204,25 @@ static CGAffineTransform CV3HostedContentRotationInScene(CV3FloatingAppWindow *w
             CV3LogToFile(@"[OrientationRepair] phase=clientAckInvalidated bundle=%@ liveClient=%ld cachedAck=%ld requested=%ld",
                          window.bundleID ?: @"nil", (long)clientOrientation,
                          (long)staleAcknowledgement, (long)window.hostedContentOrientation);
+        }
+    }
+    if (CV3LandscapeGameNeedsSceneCompensation(window)) {
+        // The producer is already landscape; compensate only the outer Scene's
+        // mapping to the display. Derive the sign from UIKit, not device rotation.
+        id<UICoordinateSpace> sceneSpace = window.windowScene.coordinateSpace;
+        id<UICoordinateSpace> displaySpace = window.windowScene.screen.coordinateSpace;
+        CGPoint origin = [sceneSpace convertPoint:CGPointZero fromCoordinateSpace:displaySpace];
+        CGPoint x = [sceneSpace convertPoint:CGPointMake(1, 0) fromCoordinateSpace:displaySpace];
+        CGPoint y = [sceneSpace convertPoint:CGPointMake(0, 1) fromCoordinateSpace:displaySpace];
+        CGFloat xLength = hypot(x.x - origin.x, x.y - origin.y);
+        CGFloat yLength = hypot(y.x - origin.x, y.y - origin.y);
+        if (isfinite(xLength) && isfinite(yLength) && xLength > 0 && yLength > 0) {
+            CGAffineTransform compensation = CGAffineTransformMake(
+                (x.x - origin.x) / xLength, (x.y - origin.y) / xLength,
+                (y.x - origin.x) / yLength, (y.y - origin.y) / yLength, 0, 0);
+            if (fabs(compensation.b) > 0.5 && fabs(compensation.c) > 0.5) {
+                return compensation;
+            }
         }
     }
     if (window.clientAcknowledgedOrientation == window.hostedContentOrientation) {
@@ -1426,6 +1449,7 @@ void CV3ToggleExposeMode(void) {
 - (void)applySceneRotationContext:(CV3SceneRotationContext)context force:(BOOL)force {
     if (!CV3IsValidInterfaceOrientation(context.orientation) || self.isClosing) return;
     [self recordOrientationTrace:@"applySceneRotationContext.begin" force:YES];
+    UIInterfaceOrientation incomingOrientation = context.orientation;
 
     // A landscape-only client owns the initial presentation orientation. The
     // display Scene may still report portrait while the app is being hosted;
@@ -1442,7 +1466,13 @@ void CV3ToggleExposeMode(void) {
     BOOL orientationChanged = (self.lastLayoutOrientation != context.orientation);
     BOOL rotationChanged = !CGAffineTransformEqualToTransform(self.baseRotationTransform, context.transform);
 
-    CV3LastTrustedInterfaceOrientation = context.orientation;
+    // Window-local content overrides must not become the shared display direction.
+    if (force || orientationChanged || rotationChanged) {
+        CV3LogToFile(@"[OrientationSource] bundle=%@ incoming=%ld effective=%ld trustedDisplay=%ld hosted=%ld scene=%ld localOverride=%d",
+            self.bundleID, (long)incomingOrientation, (long)context.orientation,
+            (long)CV3LastTrustedInterfaceOrientation, (long)self.hostedContentOrientation,
+            (long)self.windowScene.interfaceOrientation, incomingOrientation != context.orientation);
+    }
     self.targetOrientation = context.orientation;
 
     if (self.isStashed) {
@@ -1607,7 +1637,8 @@ void CV3ToggleExposeMode(void) {
     // rootTransformContainer. Asking the host for 932x430 at the same time
     // stretches only the container; the producer's valid 430-wide Surface then
     // occupies the left half and leaves the remainder transparent.
-    CGSize canvasSize = localRotationSwapsAxes
+    // Display compensation rotates the shell, not the producer's canvas.
+    CGSize canvasSize = localRotationSwapsAxes && !CV3LandscapeGameNeedsSceneCompensation(self)
         ? CV3CanonicalApplicationSceneFrame(sceneSettings).size
         : CV3HostedCanvasSizeForOrientation(hostedOrientation, sceneSettings);
     return CGRectMake(0, 0, canvasSize.width, canvasSize.height);
@@ -5701,6 +5732,12 @@ static void CV3CollectReceptionLayers(CALayer *layer,
                                   (long)self.clientAcknowledgedOrientation,
                                   wantsLandscape, shellIsLandscape,
                                   NSStringFromCGAffineTransform(contentRotation)]];
+    if (CV3LandscapeGameNeedsSceneCompensation(self)) {
+        CV3LogToFile(@"[GameSceneCompensation] bundle=%@ scene=%@ display=%@ rotation=%@ canvas=%@",
+            self.bundleID, NSStringFromCGRect(self.windowScene.coordinateSpace.bounds),
+            NSStringFromCGRect(self.windowScene.screen.coordinateSpace.bounds),
+            NSStringFromCGAffineTransform(contentRotation), NSStringFromCGRect([self currentHostedSceneBounds]));
+    }
     
     [super layoutSubviews];
     
