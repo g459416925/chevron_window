@@ -841,6 +841,7 @@ static BOOL CV3ShouldForceSceneContentState(FBScene *scene, NSString *bundleID) 
 static void CV3WriteFocusedDiagnostic(NSString *message) {
     BOOL relevant = [message hasPrefix:@"[SplitTrace] [Error]"] ||
         [message hasPrefix:@"[SplitTrace] [Recovery]"] ||
+        [message hasPrefix:@"[StashAnimation]"] ||
         [message containsString:@"phase=settingsLayout.orientationMap"] ||
         [message containsString:@"phase=settingsLayout.end modified=1"] ||
         ([message hasPrefix:@"[SplitTrace] [SurfaceOrientationAudit]"] &&
