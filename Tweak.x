@@ -839,17 +839,19 @@ static BOOL CV3ShouldForceSceneContentState(FBScene *scene, NSString *bundleID) 
 }
 
 static void CV3WriteFocusedDiagnostic(NSString *message) {
-    if (![message hasPrefix:@"[StashAnimation]"] &&
-        ![message hasPrefix:@"[DEBUG-VIDEOFULLSCREEN]"] &&
-        ![message hasPrefix:@"[HomeBarTrace]"] &&
-        ![message hasPrefix:@"[WindowOrientationTrace]"] &&
-        ![message hasPrefix:@"[SplitTrace]"]) return;
+    BOOL relevant = [message hasPrefix:@"[SplitTrace] [Error]"] ||
+        [message hasPrefix:@"[SplitTrace] [Recovery]"] ||
+        [message containsString:@"phase=settingsLayout.orientationMap"] ||
+        [message containsString:@"phase=settingsLayout.end modified=1"] ||
+        ([message hasPrefix:@"[SplitTrace] [SurfaceOrientationAudit]"] &&
+         [message containsString:@"event=change"]);
+    if (!relevant) return;
+    if (message.length > 2048) message = [message substringToIndex:2048];
 
     // Capture the event before logging or queueing can delay persistence.
     NSDate *eventDate = [NSDate date];
     CFTimeInterval eventMono = CACurrentMediaTime();
     BOOL eventOnMain = NSThread.isMainThread;
-    NSLog(@"[ChevronV3] %@", message);
 
     dispatch_async(CV3LogQueue(), ^{
         @try {
@@ -876,26 +878,30 @@ static void CV3WriteFocusedDiagnostic(NSString *message) {
                withIntermediateDirectories:YES
                                 attributes:nil
                                      error:nil];
+            NSData *line = [[entry stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
+            unsigned long long size = [[manager attributesOfItemAtPath:path error:nil] fileSize];
+            if (size + line.length > 1024 * 1024) {
+                NSString *previous = [path stringByAppendingString:@".previous"];
+                [manager removeItemAtPath:previous error:nil];
+                [manager moveItemAtPath:path toPath:previous error:nil];
+                if (size > 1024 * 1024) {
+                    NSFileHandle *old = [NSFileHandle fileHandleForReadingAtPath:previous];
+                    [old seekToFileOffset:size - 1024 * 1024];
+                    NSData *tail = [old readDataToEndOfFile];
+                    [old closeFile];
+                    [tail writeToFile:previous atomically:YES];
+                }
+            }
             if (![manager fileExistsAtPath:path]) {
                 [manager createFileAtPath:path contents:nil attributes:nil];
             }
             NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
             if (handle) {
                 [handle seekToEndOfFile];
-                NSData *line = [[entry stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
                 [handle writeData:line];
                 [handle closeFile];
             }
 
-            NSUserDefaults *store = [[NSUserDefaults alloc] initWithSuiteName:@"com.xu.chevronv3.debug"];
-            NSMutableArray<NSString *> *entries = [[store stringArrayForKey:@"Entries"] mutableCopy];
-            if (!entries) entries = [NSMutableArray array];
-            [entries addObject:entry];
-            if (entries.count > 2000) {
-                [entries removeObjectsInRange:NSMakeRange(0, entries.count - 2000)];
-            }
-            [store setObject:entries forKey:@"Entries"];
-            [store synchronize];
         } @catch (__unused NSException *exception) {}
     });
 }

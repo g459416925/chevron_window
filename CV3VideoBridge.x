@@ -48,26 +48,32 @@ typedef NS_ENUM(uint8_t, CV3VideoOrientationSource) {
 };
 
 static void CV3AppendCanvasTrace(NSString *line) {
-    if (line.length == 0) return;
+    if (![line hasPrefix:@"[ReceptionTrace][Client]"] ||
+        (![line containsString:@"phase=hosted."] &&
+         ![line containsString:@"phase=lifecycle.notification."])) return;
+    if (line.length > 2048) line = [line substringToIndex:2048];
     static dispatch_queue_t traceQueue;
     static NSString *tracePath;
-    static NSUInteger traceBytes;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         traceQueue = dispatch_queue_create("com.xu.chevronv3.client-trace", DISPATCH_QUEUE_SERIAL);
         NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-        tracePath = [documents stringByAppendingPathComponent:
-            [NSString stringWithFormat:@"ChevronV3-Client-%@.log", NSUUID.UUID.UUIDString]];
-        NSLog(@"[ChevronV3][ClientTrace] path=%@", tracePath);
+        tracePath = [documents stringByAppendingPathComponent:@"ChevronV3-Client-Scene.log"];
     });
     NSString *entry = [NSString stringWithFormat:@"%@ pid=%d bundle=%@ mono=%.6f eventUnix=%.6f %@\n",
         NSDate.date, NSProcessInfo.processInfo.processIdentifier,
         NSBundle.mainBundle.bundleIdentifier, CACurrentMediaTime(), NSDate.date.timeIntervalSince1970, line];
     dispatch_async(traceQueue, ^{
         // Preserve full records on disk; unified logging truncates long layer traces.
-        if (traceBytes >= 8 * 1024 * 1024) return;
         NSData *data = [entry dataUsingEncoding:NSUTF8StringEncoding];
         @try {
+            NSFileManager *manager = NSFileManager.defaultManager;
+            unsigned long long size = [[manager attributesOfItemAtPath:tracePath error:nil] fileSize];
+            if (size + data.length > 1024 * 1024) {
+                NSString *previous = [tracePath stringByAppendingString:@".previous"];
+                [manager removeItemAtPath:previous error:nil];
+                [manager moveItemAtPath:tracePath toPath:previous error:nil];
+            }
             if (![NSFileManager.defaultManager fileExistsAtPath:tracePath]) {
                 [NSFileManager.defaultManager createFileAtPath:tracePath contents:nil attributes:nil];
             }
@@ -76,14 +82,9 @@ static void CV3AppendCanvasTrace(NSString *line) {
                 [handle seekToEndOfFile];
                 [handle writeData:data];
                 [handle closeFile];
-                traceBytes += data.length;
             }
         } @catch (NSException *exception) {
             NSLog(@"[ChevronV3][ClientTrace] writeError=%@", exception.name);
-        }
-        for (NSUInteger offset = 0; offset < entry.length; offset += 700) {
-            NSLog(@"[ChevronV3][ClientTrace] part=%lu %@", (unsigned long)(offset / 700),
-                [entry substringWithRange:NSMakeRange(offset, MIN((NSUInteger)700, entry.length - offset))]);
         }
     });
 }

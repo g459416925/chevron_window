@@ -1760,13 +1760,19 @@ void CV3ToggleExposeMode(void) {
                      self.coldLaunchTraceID, (long)presentationOrientation,
                      (long)targetOrientation, mapModified,
                      CV3OrientationResolverTrace(settings));
-    } else if (self.hasCapturedOrientationMapBaseline ||
-               CV3OrientationMapResolverMatches(currentOrientationResolver,
-                                                presentationOrientation,
-                                                targetOrientation)) {
-        // Effective Scene bounds already own the requested orientation. A
-        // canonical cross-axis resolver rotates those pixels a second time.
-        modified |= CV3RestoreCrossOrientationMapOnSettings(settings, nil, 0, YES);
+    } else if (self.hasCapturedOrientationMapBaseline) {
+        // Matching orientations do not establish ownership of a system resolver.
+        // Restore the captured baseline only while our mapping is still active.
+        BOOL ownsCurrentMapping = self.crossOrientationMapApplied &&
+            self.activeOrientationMapResolver &&
+            (currentOrientationResolver == self.activeOrientationMapResolver ||
+             CV3OrientationMapResolverMatches(currentOrientationResolver,
+                 self.mappedPresentationOrientation, self.mappedHostedOrientation));
+        if (ownsCurrentMapping) {
+            modified |= CV3RestoreCrossOrientationMapOnSettings(settings,
+                self.originalOrientationMapResolver, self.originalInterfaceOrientationMode,
+                self.hasOriginalInterfaceOrientationMode);
+        }
         self.originalOrientationMapResolver = nil;
         self.activeOrientationMapResolver = nil;
         self.hasOriginalInterfaceOrientationMode = NO;
@@ -1775,8 +1781,8 @@ void CV3ToggleExposeMode(void) {
         self.mappedPresentationOrientation = UIInterfaceOrientationUnknown;
         self.mappedHostedOrientation = UIInterfaceOrientationUnknown;
         self.hostPresentationRepublishPending = NO;
-        CV3LogToFile(@"[Strict] trace=%@ phase=settingsLayout.orientationMap cleared presentation=%ld hosted=%ld boundsMatch=%d resolver={%@}",
-                     self.coldLaunchTraceID, (long)presentationOrientation,
+        CV3LogToFile(@"[Strict] trace=%@ phase=settingsLayout.orientationMap released owned=%d presentation=%ld hosted=%ld boundsMatch=%d resolver={%@}",
+                     self.coldLaunchTraceID, ownsCurrentMapping, (long)presentationOrientation,
                      (long)targetOrientation, sceneBoundsMatchTarget,
                      CV3OrientationResolverTrace(settings));
     }
