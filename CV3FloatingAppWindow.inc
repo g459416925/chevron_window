@@ -6001,51 +6001,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 
     [self layoutFloatingHomeBarForBounds:self.appContentWrapper.bounds];
 
-    CGAffineTransform jellyTransform = CGAffineTransformIdentity;
-    CGFloat pushFactor = 0;
-    NSInteger pushAxis = 0; // 1: X, 2: Y
-    // Collision squash is a transient drag affordance. Applying it to static
-    // overlapping windows leaves a permanent non-uniform scale on the rotated
-    // root, which distorts landscape content after an orientation change.
-    if (self.isMovingWindow && floatingWindows && floatingWindows.count > 1) {
-        for (CV3FloatingAppWindow *other in floatingWindows) {
-            if (other == self || other.isStashed || ![other isKindOfClass:[CV3FloatingAppWindow class]]) continue;
-            
-            CGFloat dx = self.center.x - other.center.x;
-            CGFloat dy = self.center.y - other.center.y;
-            CGFloat distance = sqrt(dx * dx + dy * dy);
-            
-            CGFloat threshold = (self.bounds.size.width + other.bounds.size.width) / 2.0 + 15.0;
-            if (distance < threshold && distance > 0.1) {
-                CGFloat overlap = threshold - distance;
-                pushFactor = MIN(0.07, (overlap / threshold) * 0.25);
-                pushAxis = (fabs(dx) > fabs(dy)) ? 1 : 2;
-                break; // 每次只对最贴近的一个进行判定
-            }
-        }
-    }
-    
-    if (pushFactor > 0.001) {
-        self.collisionReleaseValue = pushFactor;
-        self.collisionReleaseAxis = pushAxis;
-        self.collisionReleaseTime = 0;
-        
-        CGFloat scaleX = (pushAxis == 1) ? (1.0 - pushFactor) : 1.0;
-        CGFloat scaleY = (pushAxis == 2) ? (1.0 - pushFactor) : 1.0;
-        jellyTransform = CGAffineTransformMakeScale(scaleX, scaleY);
-    } else {
-        if (self.collisionReleaseValue > 0.001) {
-            self.collisionReleaseValue = 0;
-            self.collisionReleaseTime = 0;
-            CGAffineTransform releaseTransform = self.rootTransformContainer.transform;
-            // 优化：解耦 layoutSubviews 递归 pass，改用平滑 Spring 过渡复位
-            [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.75 initialSpringVelocity:0.5 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
-                self.rootTransformContainer.transform = releaseTransform;
-            } completion:nil];
-        }
-    }
-    self.rootTransformContainer.transform = CGAffineTransformConcat(self.rootTransformContainer.transform, jellyTransform);
-
     // 4. 更新子组件布局 (基于直立的逻辑坐标系)
     self.clippingContainer.bounds = CGRectMake(0, 0, logicalW, logicalH);
     self.clippingContainer.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
