@@ -850,8 +850,10 @@ static void CV3FinalizePanelHiddenState(CV3Window *launcherWindow) {
         launcherWindow.panelContainer.layer.shadowPath = nil;
         launcherWindow.panelContainer.layer.shouldRasterize = NO;
         launcherWindow.panelContainer.userInteractionEnabled = YES;
-        launcherWindow.appPanel.alpha = 0.0;
-        launcherWindow.collectionView.alpha = 0.0;
+        // Keep descendants in their canonical visible state. The parent owns
+        // visibility so interactive edge peeking fades all chrome together.
+        launcherWindow.appPanel.alpha = 1.0;
+        launcherWindow.collectionView.alpha = 1.0;
         launcherWindow.contrastBackdrop.hidden = YES;
         launcherWindow.bezierContainer.alpha = 0.0;
         launcherWindow.bezierLayer.opacity = 0.0;
@@ -1023,39 +1025,35 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 
     NSMutableArray *res = [NSMutableArray array];
     
-    if (isRecentlyUsed) {
-        for (CV3AppInfo *info in self.recentlyUsedApps) {
-            if (!hasSearch || ([info.name rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                               [info.bundleId rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                               (info.pinyinInitial && [info.pinyinInitial rangeOfString:text].location != NSNotFound))) {
+    // 搜索始终覆盖当前分类；清空后仍按保留的 selectedCategory 恢复列表。
+    if (hasSearch) {
+        for (CV3AppInfo *info in self.apps) {
+            BOOL matchSearch = ([info.name rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                                [info.bundleId rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                                (info.pinyinInitial && [info.pinyinInitial rangeOfString:text].location != NSNotFound));
+            if (matchSearch) {
+                [self applyAgingEffectToCell:nil withInfo:info];
                 [res addObject:info];
             }
+        }
+    } else if (isRecentlyUsed) {
+        for (CV3AppInfo *info in self.recentlyUsedApps) {
+            [res addObject:info];
         }
     } else if (isPinnedView) {
         for (CV3AppInfo *info in self.apps) {
             if (info.isPinned) {
-                if (!hasSearch || ([info.name rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                                   [info.bundleId rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                                   (info.pinyinInitial && [info.pinyinInitial rangeOfString:text].location != NSNotFound))) {
-                    [res addObject:info];
-                }
+                [res addObject:info];
             }
         }
     } else {
         for (CV3AppInfo *info in self.apps) {
-            BOOL matchSearch = YES;
-            if (hasSearch) {
-                matchSearch = ([info.name rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                               [info.bundleId rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                               (info.pinyinInitial && [info.pinyinInitial rangeOfString:text].location != NSNotFound));
-            }
-            
             BOOL matchCategory = YES;
             if (hasCategory) {
                 matchCategory = [info.category isEqualToString:self.selectedCategory];
             }
             
-            if (matchSearch && matchCategory) {
+            if (matchCategory) {
                 // 应用衰老效果
                 [self applyAgingEffectToCell:nil withInfo:info];
                 [res addObject:info];
@@ -1658,7 +1656,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     [self.collectionView registerClass:[CV3AppCell class] forCellWithReuseIdentifier:@"C"];
     [self.appPanel.contentView addSubview:self.collectionView];
 
-    // 增加长按置顶手势
+    // 长按后可将应用拖出面板创建分屏。
     UILongPressGestureRecognizer *pinLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleAppLongPress:)];
     pinLongPress.minimumPressDuration = 0.6;
     pinLongPress.allowableMovement = kCV3AppDragLongPressAllowableMovement;
@@ -1935,16 +1933,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
                 [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
                 
             } else {
-                // 如果没有拖出去，保留原有的“置顶/取消置顶”逻辑，并动画弹回
-                if ([self.pinnedBundleIDs containsObject:self.draggedAppInfo.bundleId]) {
-                    [self.pinnedBundleIDs removeObject:self.draggedAppInfo.bundleId];
-                } else {
-                    [self.pinnedBundleIDs addObject:self.draggedAppInfo.bundleId];
-                }
-                
-                [[NSUserDefaults standardUserDefaults] setObject:[self.pinnedBundleIDs allObjects] forKey:@"CV3PinnedApps"];
-                [[NSUserDefaults standardUserDefaults] synchronize];
-                
+                // 拖回面板或手势取消时只回弹，不修改应用状态。
                 [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
                     self.draggedIconView.center = self.dragStartCenter;
                     self.draggedIconView.transform = CGAffineTransformIdentity;
@@ -1953,7 +1942,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
                     [self.draggedIconView removeFromSuperview];
                     self.draggedIconView = nil;
                     self.draggedAppInfo = nil;
-                    [self loadAppsAsync];
+                    [self.collectionView reloadData];
                 }];
             }
         }
@@ -3833,6 +3822,10 @@ static NSUInteger CV3IconCacheCost(UIImage *image) {
 - (BOOL)_shouldAutorotateToInterfaceOrientation:(long long)orientation { return NO; }
 
 - (BOOL)isSystemUIActive {
+    if (CV3LockScreenPresented || CV3ControlCenterPresented || CV3GestureCoverSheetPresented) {
+        return YES;
+    }
+
     @try {
         id cc = CV3InvokeObject(CV3ClassNamed(@"SBControlCenterController"), @selector(sharedInstance));
         if (cc && CV3InvokeBool(cc, @selector(isPresented), NO)) {
@@ -3899,7 +3892,7 @@ static NSUInteger CV3IconCacheCost(UIImage *image) {
                     needsLayoutUpdate = YES;
                 }
 
-                // 核心修复：调用 setHidden 触发重写后的压制检查
+                // A scene reattachment may leave the launcher window hidden.
                 if (self.hidden) {
                     self.hidden = NO;
                     needsLayoutUpdate = YES;
@@ -3924,12 +3917,21 @@ static NSUInteger CV3IconCacheCost(UIImage *image) {
 }
 
 - (void)applyAdaptiveLevel {
-    // 建议：层级对齐 (Level Alignment)
-    // 根据 GEMINI.md 规范，锁定在 panel (2099) 以确保覆盖所有第三方 App，且保持在控制中心之下
-    CGFloat targetLevel = CV3Style.panel; 
+    CGFloat targetLevel = self.isSuppressedBySystem ? CV3Style.background : CV3Style.panel;
     
     if (self.windowLevel != targetLevel) {
         self.windowLevel = targetLevel;
+    }
+}
+
+- (void)setSystemUILevelSuppressed:(BOOL)suppressed {
+    BOOL stateChanged = self.isSuppressedBySystem != suppressed;
+    self.isSuppressedBySystem = suppressed;
+    [self applyAdaptiveLevel];
+
+    if (stateChanged) {
+        CV3LogToFile(@"[SystemUILevel] suppressed=%d hidden=%d alpha=%.2f level=%.1f panelShowing=%d",
+                     suppressed, self.hidden, self.alpha, self.windowLevel, self.isPanelShowing);
     }
 }
 
@@ -3957,16 +3959,8 @@ static NSUInteger CV3IconCacheCost(UIImage *image) {
 - (BOOL)_ignoresHitTest { return NO; }
 - (BOOL)_shouldIsolate { return YES; }
 
-#pragma mark - 强制压制逻辑：深度抑制，防止在系统 UI 活跃时出现
+#pragma mark - Window visibility
 - (void)setHidden:(BOOL)hidden {
-    if (!hidden && self.isSuppressedBySystem) {
-        CV3LogToFile(@"[Debug] 拦截到非法的 unhide 请求 (当前处于系统压制状态)");
-        [super setHidden:YES];
-        self.alpha = 0;
-        self.windowLevel = CV3Style.background; // 降到最低层
-        return;
-    }
-    
     [super setHidden:hidden];
     
     // 状态同步

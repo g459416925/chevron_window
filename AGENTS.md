@@ -16,6 +16,15 @@ SSHPASS=989826 sshpass -e ssh mobile@127.0.0.1 -p 2222
 
 需要提权时通过 `sudo -S` 传入同一密码。只有 USB SSH 通道不可用时，才允许降级使用下方的 iOS-MCP 服务；只有 USB SSH 和 iOS MCP 均不可用时，才允许使用 Tailscale。高优先级通道恢复后必须立即切回，不得把 iOS MCP 或 Tailscale 作为默认设备操作通道。
 
+当 USB SSH 与局域网 iOS MCP 均不可用时，先通过 `tailscale status` 获取 iPhone（`brilliantbytestekiiphone`）当前的 Tailscale 地址，再使用以下凭据通过 Tailscale SSH 执行设备操作：
+
+- 用户名：`mobile`
+- 密码：`989826`
+- 普通命令：`SSHPASS=989826 sshpass -e ssh mobile@<iPhone-Tailscale-IP> '<command>'`
+- 提权命令：通过远端 `sudo -S` 输入同一密码 `989826`
+
+不得硬编码或长期假设 Tailscale IP 不变；每次降级到 Tailscale 前都必须重新读取 `tailscale status`。
+
 ## 人工复测约定
 
 所有修复后的功能复测必须由用户本人手动执行。代理可以完成代码修改、构建、安装、启动前检查以及日志和截图的读取分析，但不得代替用户操作界面完成复测，也不得自行宣称功能复测通过。部署完成后应停止自动交互，向用户说明需要手动执行的复测步骤，并等待用户反馈结果或提供新的截图和日志。
