@@ -4471,9 +4471,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 
         [self loadAppScene];
         
-        // Auto-focus on creation
-        [self setWindowFocused:YES];
-
         // 核心修复：监听 Scene 变更与系统通知，确保窗口持久存在
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(attachToCurrentActiveScene) name:UISceneDidActivateNotification object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(enforceSceneForegroundState) name:UISceneDidEnterBackgroundNotification object:nil];
@@ -5352,14 +5349,43 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 - (void)promoteFloatingWindowInZOrder {
     if (self.isClosing) return;
 
-    [self makeKeyAndVisible];
-    self.windowLevel = CV3Style.floatingApp;
-
-    // Z-order 层级重排：将当前窗口移至 floatingWindows 数组末尾，使命中测试优先处理它。
+    // Keep the model order and UIWindowServer order in sync. Reordering only
+    // floatingWindows is insufficient when every UIWindow has the same level.
     if (floatingWindows && [floatingWindows containsObject:self]) {
         [floatingWindows removeObject:self];
         [floatingWindows addObject:self];
     }
+
+    NSMutableArray<CV3FloatingAppWindow *> *orderedWindows = [NSMutableArray array];
+    for (id object in [floatingWindows copy]) {
+        if (![object isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+        CV3FloatingAppWindow *window = (CV3FloatingAppWindow *)object;
+        if (window.isClosing) continue;
+        [orderedWindows addObject:window];
+    }
+
+    NSMutableArray<NSString *> *order = [NSMutableArray array];
+    NSUInteger windowCount = orderedWindows.count;
+    [orderedWindows enumerateObjectsUsingBlock:^(CV3FloatingAppWindow *window,
+                                                  NSUInteger index,
+                                                  BOOL *stop) {
+        // Use whole-number levels because the rotated SpringBoard compositor
+        // can collapse tiny fractional differences. The top window remains at
+        // 999 and every peer is strictly lower, preserving the system UI band.
+        NSUInteger distanceFromTop = windowCount - index - 1;
+        CGFloat levelOffset = MIN((CGFloat)distanceFromTop, 90.0);
+        window.windowLevel = CV3Style.floatingApp - levelOffset;
+        [order addObject:[NSString stringWithFormat:@"%@=%.2f%@",
+                          window.bundleID ?: @"nil",
+                          window.windowLevel,
+                          window == self ? @"*" : @""]];
+    }];
+
+    [self makeKeyAndVisible];
+    CV3LogToFile(@"[ZOrder] phase=promote target=%@ focused=%d order=[%@]",
+                 self.bundleID ?: @"nil",
+                 self.isFocused,
+                 [order componentsJoinedByString:@", "]);
 }
 
 - (void)updateResizeHandleAppearance {
@@ -6831,6 +6857,15 @@ static void CV3CollectReceptionLayers(CALayer *layer,
                                             self.bundleID, self.homeBarView.alpha,
                                             self.homeBarAutoHidden,
                                             self.homeBarAutoHideTimer.isValid);
+                    BOOL modelTopmost = floatingWindows.count > 0 && floatingWindows.lastObject == self;
+                    if (!self.isFocused || !modelTopmost) {
+                        CV3LogToFile(@"[ZOrder] phase=touch.promote bundle=%@ focused=%d modelTopmost=%d level=%.2f",
+                                     self.bundleID ?: @"nil",
+                                     self.isFocused,
+                                     modelTopmost,
+                                     self.windowLevel);
+                        [self setWindowFocused:YES];
+                    }
                 }
                 [self noteFloatingHomeBarInteraction];
                 break;

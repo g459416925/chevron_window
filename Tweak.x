@@ -844,6 +844,7 @@ static void CV3WriteFocusedDiagnostic(NSString *message) {
         [message hasPrefix:@"[StashAnimation]"] ||
         [message hasPrefix:@"[SplitTrace] [SystemUILevel]"] ||
         [message hasPrefix:@"[SplitTrace] [NotificationSplit]"] ||
+        [message hasPrefix:@"[SplitTrace] [ZOrder]"] ||
         ([message hasPrefix:@"[DEBUG-VIDEOFULLSCREEN]"] &&
          ([message containsString:@"phase=notification.received"] ||
           [message containsString:@"phase=notification.ignored"] ||
@@ -4995,7 +4996,90 @@ static BOOL CV3FocusHostedLaunchTargetFromObject(id request, NSString *source) {
 }
 %end
 
+static CV3FloatingAppWindow *CV3TopmostFloatingWindowAtScenePoint(CGPoint scenePoint,
+                                                                  UIWindowScene *scene,
+                                                                  UIEvent *event,
+                                                                  NSMutableArray<NSString *> *diagnostics) {
+    if (!floatingWindows || floatingWindows.count == 0) return nil;
+
+    for (id object in [[floatingWindows reverseObjectEnumerator] allObjects]) {
+        if (![object isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+        CV3FloatingAppWindow *window = (CV3FloatingAppWindow *)object;
+        if (window.isClosing || window.isStashed || window.hidden || window.alpha <= 0.01) continue;
+
+        CGPoint localPoint;
+        if (scene) {
+            localPoint = [window convertPoint:scenePoint fromCoordinateSpace:scene.coordinateSpace];
+        } else {
+            localPoint = [window convertPoint:scenePoint fromWindow:nil];
+        }
+        BOOL hit = CV3PhysicalPointInside(window, localPoint, event);
+        if (diagnostics) {
+            [diagnostics addObject:[NSString stringWithFormat:
+                @"%@{hit=%d local=%@ frame=%@ bounds=%@ rootBounds=%@ rootTransform=%@}",
+                window.bundleID ?: @"nil",
+                hit,
+                NSStringFromCGPoint(localPoint),
+                NSStringFromCGRect(window.frame),
+                NSStringFromCGRect(window.bounds),
+                NSStringFromCGRect(window.rootTransformContainer.bounds),
+                NSStringFromCGAffineTransform(window.rootTransformContainer.transform)]];
+        }
+        if (hit) return window;
+    }
+    return nil;
+}
+
+static void CV3PromoteFloatingWindowForGlobalTouch(UIEvent *event) {
+    if (event.type != UIEventTypeTouches || !floatingWindows || floatingWindows.count < 2) return;
+
+    for (UITouch *touch in event.allTouches) {
+        if (touch.phase != UITouchPhaseBegan) continue;
+
+        UIWindow *sourceWindow = touch.window;
+        CGPoint point = [touch locationInView:sourceWindow];
+        UIWindowScene *scene = sourceWindow.windowScene;
+        if (scene) {
+            point = [scene.coordinateSpace convertPoint:point fromCoordinateSpace:sourceWindow];
+        } else if (sourceWindow) {
+            point = [sourceWindow convertPoint:point toWindow:nil];
+        }
+
+        NSMutableArray<NSString *> *hitDiagnostics = [NSMutableArray array];
+        CV3FloatingAppWindow *target = CV3TopmostFloatingWindowAtScenePoint(point,
+                                                                            scene,
+                                                                            event,
+                                                                            hitDiagnostics);
+        BOOL modelTopmost = target && floatingWindows.lastObject == target;
+        CV3LogToFile(@"[ZOrder] phase=globalTouch.hitTest target=%@ sourceWindow=%@ scenePoint=%@ sceneBounds=%@ orientation=%ld candidates=[%@]",
+                     target.bundleID ?: @"nil",
+                     sourceWindow ? NSStringFromClass(sourceWindow.class) : @"nil",
+                     NSStringFromCGPoint(point),
+                     NSStringFromCGRect(scene ? scene.coordinateSpace.bounds : CGRectZero),
+                     (long)(scene ? scene.interfaceOrientation : UIInterfaceOrientationUnknown),
+                     [hitDiagnostics componentsJoinedByString:@", "]);
+        if (target && (!target.isFocused || !modelTopmost)) {
+            CV3LogToFile(@"[ZOrder] phase=globalTouch.promote target=%@ sourceWindow=%@ point=%@ frame=%@ sceneBounds=%@ orientation=%ld focused=%d modelTopmost=%d",
+                         target.bundleID ?: @"nil",
+                         sourceWindow ? NSStringFromClass(sourceWindow.class) : @"nil",
+                         NSStringFromCGPoint(point),
+                         NSStringFromCGRect(target.frame),
+                         NSStringFromCGRect(scene ? scene.coordinateSpace.bounds : CGRectZero),
+                         (long)(scene ? scene.interfaceOrientation : UIInterfaceOrientationUnknown),
+                         target.isFocused,
+                         modelTopmost);
+            [target setWindowFocused:YES];
+        }
+        break;
+    }
+}
+
 %hook SpringBoard
+- (void)sendEvent:(UIEvent *)event {
+    CV3PromoteFloatingWindowForGlobalTouch(event);
+    %orig(event);
+}
+
 - (BOOL)launchApplicationWithIdentifier:(NSString *)identifier suspended:(BOOL)suspended {
     if (!suspended && CV3FocusHostedFloatingWindowForBundleID(identifier,
                                                                @"SpringBoard.launchApplication")) return YES;
@@ -5545,10 +5629,10 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
 
 %ctor {
     @autoreleasepool {
-        CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=logger.ready version=1.0.18-76+orientation-map-repair");
-        CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=logger.ready version=1.0.18-76+orientation-map-repair");
-        CV3LogWindowOrientation(@"[WindowOrientationTrace] phase=logger.ready version=1.0.18-76+orientation-map-repair");
-        CV3LogToFile(@"[Strict] phase=logger.ready version=1.0.18-76+orientation-map-repair path=/rootfs/var/mobile/Documents/ChevronV3_SplitTrace.log");
+        CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=logger.ready version=1.0.18-77+landscape-hit-map");
+        CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=logger.ready version=1.0.18-77+landscape-hit-map");
+        CV3LogWindowOrientation(@"[WindowOrientationTrace] phase=logger.ready version=1.0.18-77+landscape-hit-map");
+        CV3LogToFile(@"[Strict] phase=logger.ready version=1.0.18-77+landscape-hit-map path=/rootfs/var/mobile/Documents/ChevronV3_SplitTrace.log");
         CV3PublishHostGeneration();
         CV3RegisterVideoOrientationBridge();
         CV3RegisterPlaybackTraceBridge();

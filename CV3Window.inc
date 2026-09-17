@@ -716,9 +716,8 @@ static BOOL CV3OpenBundleInFloatingWindow(NSString *bundleID, NSString *reason) 
     if (CV3LockScreenPresented) {
         [floatingWindow setHidden:YES];
     } else {
-        [floatingWindow makeKeyAndVisible];
+        [floatingWindow setWindowFocused:YES];
     }
-    floatingWindow.windowLevel = CV3Style.floatingApp;
     if (!CV3LockScreenPresented) CV3RefreshFloatingHomeBarAfterPresentation(floatingWindow);
     CV3UpdateFloatingBackdrop(scene);
     [[NSNotificationCenter defaultCenter] postNotificationName:CV3FloatingWindowsDidChangeNotification object:nil];
@@ -1910,8 +1909,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
                         // The phone may remain portrait while a landscape-only
                         // game owns a landscape floating canvas.
                         [floatingWindows addObject:floatingWindow];
-                        [floatingWindow makeKeyAndVisible];
-                        floatingWindow.windowLevel = CV3Style.floatingApp;
+                        [floatingWindow setWindowFocused:YES];
                         CV3RefreshFloatingHomeBarAfterPresentation(floatingWindow);
                         CV3UpdateFloatingBackdrop(self.windowScene);
                         [[NSNotificationCenter defaultCenter] postNotificationName:CV3FloatingWindowsDidChangeNotification object:nil];
