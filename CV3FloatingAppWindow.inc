@@ -124,6 +124,68 @@ static CGRect CV3DisplayBoundsForWindow(UIWindow *window) {
     return [UIScreen mainScreen].bounds;
 }
 
+// Resolve the minimized icon's final stack slot before the genie animation
+// starts. The old path animated to the window center and only then reflowed the
+// stack, which made the icon visibly jump when another icon occupied that side.
+static CGRect CV3StackedStashFrameForWindow(CV3FloatingAppWindow *window,
+                                            CGRect proposedFrame) {
+    if (!window || !window.isStashed || window.stashedSide == 0) return proposedFrame;
+
+    NSMutableArray<CV3FloatingAppWindow *> *sameSideWindows = [NSMutableArray array];
+    for (id obj in floatingWindows) {
+        if (![obj isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+        CV3FloatingAppWindow *candidate = (CV3FloatingAppWindow *)obj;
+        if (candidate.isStashed && candidate.stashedSide == window.stashedSide) {
+            [sameSideWindows addObject:candidate];
+        }
+    }
+    if (sameSideWindows.count <= 1) return proposedFrame;
+
+    [sameSideWindows sortUsingComparator:^NSComparisonResult(CV3FloatingAppWindow *a,
+                                                               CV3FloatingAppWindow *b) {
+        CGFloat aCenterY = CGRectIsEmpty(a.preStashFrame)
+            ? CGRectGetMidY(a.frame) : CGRectGetMidY(a.preStashFrame);
+        CGFloat bCenterY = CGRectIsEmpty(b.preStashFrame)
+            ? CGRectGetMidY(b.frame) : CGRectGetMidY(b.preStashFrame);
+        if (aCenterY < bCenterY) return NSOrderedAscending;
+        if (aCenterY > bCenterY) return NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+
+    NSInteger stackIndex = [sameSideWindows indexOfObject:window];
+    if (stackIndex == NSNotFound) return proposedFrame;
+
+    CGRect screen = CV3DisplayBoundsForWindow(window);
+    UIEdgeInsets safeArea = [window currentSafeAreaInsets];
+    CGFloat minY = safeArea.top;
+    CGFloat maxY = screen.size.height - safeArea.bottom - kCV3StashIconSize;
+    if (maxY < minY) maxY = minY;
+
+    CGFloat desiredTop = CGFLOAT_MAX;
+    for (CV3FloatingAppWindow *candidate in sameSideWindows) {
+        CGFloat centerY = CGRectIsEmpty(candidate.preStashFrame)
+            ? CGRectGetMidY(candidate.frame) : CGRectGetMidY(candidate.preStashFrame);
+        desiredTop = MIN(desiredTop, centerY - kCV3StashIconSize * 0.5);
+    }
+    if (desiredTop == CGFLOAT_MAX) desiredTop = proposedFrame.origin.y;
+
+    CGFloat availableHeight = MAX(0.0, maxY - minY);
+    CGFloat defaultStackOffset = kCV3StashIconSize + 8.0;
+    CGFloat maxFittingOffset = availableHeight / (CGFloat)(sameSideWindows.count - 1);
+    CGFloat stackOffset = MIN(defaultStackOffset,
+                              MAX(kCV3StashIconSize * 0.72, maxFittingOffset));
+    CGFloat stackHeight = kCV3StashIconSize +
+        stackOffset * MAX(0, (NSInteger)sameSideWindows.count - 1);
+    CGFloat maxTop = screen.size.height - safeArea.bottom - stackHeight;
+    if (maxTop < minY) maxTop = minY;
+    CGFloat anchoredTop = MIN(MAX(desiredTop, minY), maxTop);
+
+    CGRect result = proposedFrame;
+    result.size = CGSizeMake(kCV3StashIconSize, kCV3StashIconSize);
+    result.origin.y = MIN(MAX(anchoredTop + stackIndex * stackOffset, minY), maxY);
+    return result;
+}
+
 // SpringBoard can keep a portrait UIWindowScene coordinate space while the
 // physical display is already landscape. In that state CoreAnimation maps the
 // Scene to the display by swapping its axes. A landscape floating shell must
@@ -3545,6 +3607,7 @@ static NSString *CV3OrientationResolverTrace(id settings) {
                 [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
                 if (commandSignal > 0.0) {
                     CV3ExitExposeModeIfNeeded(nil, NO);
+                    CV3LogToFile(@"[FullscreenLaunch] phase=trigger source=homeBar bundle=%@", self.bundleID);
                     [self activateHostedAppFullscreenAndClose];
                 } else {
                     CV3ToggleExposeMode();
@@ -3683,20 +3746,65 @@ static NSString *CV3OrientationResolverTrace(id settings) {
 }
 
 - (void)activateHostedAppFullscreenAndClose {
-    if (self.isClosing || self.bundleID.length == 0) return;
+    if (self.isClosing || self.fullscreenLaunchPending || self.bundleID.length == 0) return;
 
     CV3ExitExposeModeIfNeeded(nil, NO);
-    CV3StashPeerWindowsForFullscreen(self);
-
     NSString *bundleID = [self.bundleID copy];
-    [self closeWindow];
+    self.fullscreenLaunchPending = YES;
+    CV3BeginFullscreenLaunchBypass(bundleID);
+    CV3LogToFile(@"[FullscreenLaunch] phase=request.begin bundle=%@ windows=%lu",
+                 bundleID, (unsigned long)floatingWindows.count);
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        __block BOOL opened = NO;
+        __block BOOL usedFallback = NO;
         @try {
-            [[CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace] openApplicationWithBundleID:bundleID];
+            id workspace = [CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace];
+            if (workspace && [workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
+                opened = ((BOOL (*)(id, SEL, id))objc_msgSend)(workspace,
+                                                               @selector(openApplicationWithBundleID:),
+                                                               bundleID);
+            }
         } @catch (NSException *e) {
-            CV3LogToFile(@"[HomeBar] 打开全屏应用失败 %@: %@", bundleID, e);
+            CV3LogToFile(@"[FullscreenLaunch] phase=request.primaryException bundle=%@ exception=%@",
+                         bundleID, e);
         }
+
+        CV3LogToFile(@"[FullscreenLaunch] phase=request.primaryResult bundle=%@ accepted=%d",
+                     bundleID, opened);
+        if (!opened) {
+            usedFallback = YES;
+            dispatch_sync(dispatch_get_main_queue(), ^{
+                @try {
+                    UIApplication *application = [UIApplication sharedApplication];
+                    if ([application respondsToSelector:@selector(launchApplicationWithIdentifier:suspended:)]) {
+                        opened = [application launchApplicationWithIdentifier:bundleID suspended:NO];
+                    }
+                } @catch (NSException *e) {
+                    CV3LogToFile(@"[FullscreenLaunch] phase=request.fallbackException bundle=%@ exception=%@",
+                                 bundleID, e);
+                }
+            });
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (opened && !self.isClosing) {
+                CV3LogToFile(@"[FullscreenLaunch] phase=request.accepted bundle=%@ fallback=%d",
+                             bundleID, usedFallback);
+                CV3StashPeerWindowsForFullscreen(self);
+                self.preserveSceneForegroundOnClose = YES;
+                [self closeWindow];
+                CV3LogToFile(@"[FullscreenLaunch] phase=teardown.completed bundle=%@ fallback=%d",
+                             bundleID, usedFallback);
+            } else {
+                self.fullscreenLaunchPending = NO;
+                CV3LogToFile(@"[FullscreenLaunch] phase=request.failed bundle=%@ fallback=%d closing=%d",
+                             bundleID, usedFallback, self.isClosing);
+                UINotificationFeedbackGenerator *feedback = [[UINotificationFeedbackGenerator alloc] init];
+                [feedback notificationOccurred:UINotificationFeedbackTypeError];
+            }
+            CV3EndFullscreenLaunchBypass(bundleID);
+        });
     });
 }
 
@@ -3929,54 +4037,10 @@ static NSString *CV3OrientationResolverTrace(id settings) {
 
 - (void)handleFullscreenMenuAction:(id)sender {
     [self dismissMultitaskingMenu];
-    CV3ExitExposeModeIfNeeded(self, YES);
-
-    if (self.isFullscreenMode && !CGRectIsEmpty(self.preFullscreenFrame)) {
-        CGRect restoreFrame = self.preFullscreenFrame;
-        self.isFullscreenMode = NO;
-        self.isCompactMode = NO;
-        
-        // 视窗变小，初态注入扩张视差 1.05x
-        self.appContentWrapper.transform = CGAffineTransformMakeScale(CV3Style.transitionParallaxShrink, CV3Style.transitionParallaxShrink);
-        
-        [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.86 initialSpringVelocity:0.0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
-            self.frame = restoreFrame;
-            [self setNeedsLayout];
-            [self layoutIfNeeded];
-            
-            // 视差过渡至标准物理尺寸
-            self.appContentWrapper.transform = CGAffineTransformIdentity;
-        } completion:^(BOOL finished) {
-            [self syncHostedSceneLayoutForce:YES];
-            [self syncWindowBoundsToClient];
-        }];
-        return;
-    }
-
-    if (!self.isFullscreenMode) {
-        CV3StashPeerWindowsForFullscreen(self);
-        self.preFullscreenFrame = self.frame;
-        self.isFullscreenMode = YES;
-        self.isCompactMode = NO;
-    }
-
-    CGRect targetFrame = self.windowScene ? self.windowScene.coordinateSpace.bounds : [UIScreen mainScreen].bounds;
-    
-    // 视窗变大，初态注入收缩视差 0.93x
-    self.appContentWrapper.transform = CGAffineTransformMakeScale(CV3Style.transitionParallaxExpand, CV3Style.transitionParallaxExpand);
-    
-    [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.86 initialSpringVelocity:0.0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
-        self.transform = CGAffineTransformIdentity;
-        self.frame = targetFrame;
-        [self setNeedsLayout];
-        [self layoutIfNeeded];
-        
-        // 视差过渡至标准物理尺寸
-        self.appContentWrapper.transform = CGAffineTransformIdentity;
-    } completion:^(BOOL finished) {
-        [self syncHostedSceneLayoutForce:YES];
-        [self syncWindowBoundsToClient];
-    }];
+    CV3ExitExposeModeIfNeeded(nil, NO);
+    CV3LogToFile(@"[FullscreenLaunch] phase=trigger source=windowChrome bundle=%@", self.bundleID);
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
+    [self activateHostedAppFullscreenAndClose];
 }
 
 - (void)handleCloseMenuAction:(id)sender {
@@ -5579,8 +5643,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     if (maxCenterY < minCenterY) maxCenterY = minCenterY;
     stashCenter.x = MIN(MAX(stashCenter.x, minCenterX), maxCenterX);
     stashCenter.y = MIN(MAX(stashCenter.y, minCenterY), maxCenterY);
-    CGRect targetFrame = CGRectMake(stashCenter.x - stashHalf, stashCenter.y - stashHalf, kCV3StashIconSize, kCV3StashIconSize);
-    CGRect targetFrameInWindow = CGRectOffset(targetFrame, -initialFrame.origin.x, -initialFrame.origin.y);
+    CGRect proposedTargetFrame = CGRectMake(stashCenter.x - stashHalf, stashCenter.y - stashHalf, kCV3StashIconSize, kCV3StashIconSize);
     UIView *snapshotSourceView = [self stashAnimationSnapshotSourceView];
     CGRect snapshotStartFrame = [self convertRect:snapshotSourceView.bounds fromView:snapshotSourceView];
     self.stashAnimationTraceID = NSUUID.UUID.UUIDString;
@@ -5589,21 +5652,25 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     self.stashedRestoreSnapshotOrientation = self.targetOrientation;
     UIImage *genieImage = self.stashedRestoreSnapshotImage;
 
-    CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=minimize phase=begin bundle=%@ source=%@ target=%@ device_orientation=%ld content_orientation=%ld snapshot=%d",
+    self.preStashFrame = initialFrame;
+    self.isStashed = YES;
+    self.stashedSide = isNearLeft ? 1 : 2;
+    CGRect targetFrame = CV3StackedStashFrameForWindow(self, proposedTargetFrame);
+    CGRect targetFrameInWindow = CGRectOffset(targetFrame, -initialFrame.origin.x, -initialFrame.origin.y);
+
+    CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=minimize phase=begin bundle=%@ source=%@ proposed=%@ target=%@ device_orientation=%ld content_orientation=%ld snapshot=%d",
                  self.stashAnimationTraceID,
                  self.bundleID ?: @"unknown",
                  NSStringFromCGRect(initialFrame),
+                 NSStringFromCGRect(proposedTargetFrame),
                  NSStringFromCGRect(targetFrame),
                  (long)CV3TrustedInterfaceOrientation(self.windowScene),
                  (long)self.targetOrientation,
                  genieImage != nil);
 
-    self.preStashFrame = self.frame;
-    self.isStashed = YES;
     [self refreshContentVisibilityGate];
     [self.hostedSession setActive:NO];
     CV3ReleaseKeyboardHostingForWindow(self);
-    self.stashedSide = isNearLeft ? 1 : 2;
     [self promoteFloatingWindowInZOrder];
     CV3CascadeUpdateSovereigntyAssertions(); // 级联刷新所有窗口前台优先级断言
 
@@ -6515,30 +6582,10 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         }
     }
 
-    NSInteger stackIndex = [sameSideStashedWindows indexOfObject:self];
-    if (stackIndex == NSNotFound) stackIndex = 0;
-    
     if (sameSideStashedWindows.count > 1) {
         // 建议：Prism Stacking (棱镜堆叠视觉)
         // ... (保持原有的图标堆叠视觉逻辑) ...
     }
-
-    CGRect screen = CV3DisplayBoundsForWindow(self);
-    UIEdgeInsets safeArea = [self currentSafeAreaInsets];
-    CGFloat minY = safeArea.top;
-    CGFloat maxY = screen.size.height - safeArea.bottom - kCV3StashIconSize;
-    if (maxY < minY) maxY = minY;
-
-    [sameSideStashedWindows sortUsingComparator:^NSComparisonResult(CV3FloatingAppWindow *a, CV3FloatingAppWindow *b) {
-        CGFloat aCenterY = CGRectIsEmpty(a.preStashFrame) ? CGRectGetMidY(a.frame) : CGRectGetMidY(a.preStashFrame);
-        CGFloat bCenterY = CGRectIsEmpty(b.preStashFrame) ? CGRectGetMidY(b.frame) : CGRectGetMidY(b.preStashFrame);
-        if (aCenterY < bCenterY) return NSOrderedAscending;
-        if (aCenterY > bCenterY) return NSOrderedDescending;
-        return NSOrderedSame;
-    }];
-
-    stackIndex = [sameSideStashedWindows indexOfObject:self];
-    if (stackIndex == NSNotFound) stackIndex = 0;
 
     // A single icon has no stacking conflict. Its frame was already clamped
     // using the same safe area when the hide transition began; recalculating it
@@ -6549,29 +6596,11 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         return;
     }
 
-    CGFloat desiredTop = CGFLOAT_MAX;
-    for (CV3FloatingAppWindow *win in sameSideStashedWindows) {
-        CGFloat centerY = CGRectIsEmpty(win.preStashFrame) ? CGRectGetMidY(win.frame) : CGRectGetMidY(win.preStashFrame);
-        desiredTop = MIN(desiredTop, centerY - kCV3StashIconSize * 0.5);
+    CGRect currentFrame = CV3StackedStashFrameForWindow(self, self.frame);
+    if (CGRectEqualToRect(currentFrame, self.frame)) {
+        [self normalizeStashedGrabberLayout];
+        return;
     }
-    if (desiredTop == CGFLOAT_MAX) desiredTop = self.frame.origin.y;
-
-    CGFloat defaultStackOffset = kCV3StashIconSize + 8.0;
-    CGFloat availableHeight = MAX(0.0, maxY - minY);
-    CGFloat stackOffset = defaultStackOffset;
-    if (sameSideStashedWindows.count > 1) {
-        CGFloat maxFittingOffset = availableHeight / (CGFloat)(sameSideStashedWindows.count - 1);
-        stackOffset = MIN(defaultStackOffset, MAX(kCV3StashIconSize * 0.72, maxFittingOffset));
-    }
-
-    CGFloat stackHeight = kCV3StashIconSize + stackOffset * MAX(0, (NSInteger)sameSideStashedWindows.count - 1);
-    CGFloat maxTop = screen.size.height - safeArea.bottom - stackHeight;
-    if (maxTop < minY) maxTop = minY;
-    CGFloat anchoredTop = MIN(MAX(desiredTop, minY), maxTop);
-
-    CGRect currentFrame = self.frame;
-    currentFrame.size = CGSizeMake(kCV3StashIconSize, kCV3StashIconSize);
-    currentFrame.origin.y = MIN(MAX(anchoredTop + stackIndex * stackOffset, minY), maxY);
 
     [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0 options:0 animations:^{
         self.frame = currentFrame;
@@ -7316,8 +7345,13 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         if (sceneValid) {
             @try {
                 FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
-                if ([settings respondsToSelector:@selector(setForeground:)]) [settings setForeground:NO];
-                if ([settings respondsToSelector:@selector(setBackgrounded:)]) [settings setBackgrounded:YES];
+                BOOL preserveForeground = self.preserveSceneForegroundOnClose;
+                if ([settings respondsToSelector:@selector(setForeground:)]) {
+                    [settings setForeground:preserveForeground];
+                }
+                if ([settings respondsToSelector:@selector(setBackgrounded:)]) {
+                    [settings setBackgrounded:!preserveForeground];
+                }
                 if (self.crossOrientationMapApplied) {
                     CV3RestoreCrossOrientationMapOnSettings(settings,
                                                             self.originalOrientationMapResolver,
@@ -7330,7 +7364,11 @@ static void CV3CollectReceptionLayers(CALayer *layer,
                     self.crossOrientationMapApplied = NO;
                 }
                 [self.targetScene updateSettings:settings withTransitionContext:nil];
-                CV3LogToFile(@"[Aggressive] 已将 Scene 设置为后台状态: %@", self.bundleID);
+                if (preserveForeground) {
+                    CV3LogToFile(@"[FullscreenLaunch] phase=sceneHandoff.preserved bundle=%@", self.bundleID);
+                } else {
+                    CV3LogToFile(@"[Aggressive] 已将 Scene 设置为后台状态: %@", self.bundleID);
+                }
             } @catch (NSException *e) {
                 CV3LogToFile(@"[Error] Reset scene settings failed: %@", e);
             }
