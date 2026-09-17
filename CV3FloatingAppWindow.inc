@@ -148,11 +148,27 @@ static BOOL CV3LandscapeGameNeedsSceneCompensation(CV3FloatingAppWindow *window)
         CV3SceneAndDisplayAxesDiffer(window);
 }
 
+static BOOL CV3HostedLandscapeNeedsSceneCompensation(CV3FloatingAppWindow *window) {
+    return window && window.prefersLandscapePresentation &&
+        UIInterfaceOrientationIsLandscape(window.hostedContentOrientation) &&
+        CV3SceneAndDisplayAxesDiffer(window);
+}
+
 static BOOL CV3ShellShouldBeLandscape(CV3FloatingAppWindow *window,
                                       UIInterfaceOrientation presentationOrientation) {
-    BOOL presentationLandscape = UIInterfaceOrientationIsLandscape(presentationOrientation);
-    BOOL landscapeClientNeedsSceneAxisCompensation = CV3LandscapeGameNeedsSceneCompensation(window);
-    return landscapeClientNeedsSceneAxisCompensation ? !presentationLandscape : presentationLandscape;
+    UIInterfaceOrientation contentOrientation =
+        window && CV3IsValidInterfaceOrientation(window.hostedContentOrientation)
+            ? window.hostedContentOrientation
+            : presentationOrientation;
+    BOOL contentLandscape = UIInterfaceOrientationIsLandscape(contentOrientation);
+    // UIWindow bounds live in the SpringBoard Scene coordinate space. When the
+    // physical screen has rotated but that Scene remains portrait, the shell's
+    // axes must be inverted for every hosted App, not only landscape-only games.
+    // Example: on a landscape display, portrait content is wide in Scene points;
+    // landscape content is tall in Scene points and becomes wide after display
+    // mapping. Failing to invert here leaves video fullscreen portrait-shaped.
+    BOOL sceneAndDisplayAxesDiffer = CV3SceneAndDisplayAxesDiffer(window);
+    return sceneAndDisplayAxesDiffer ? !contentLandscape : contentLandscape;
 }
 
 static UIInterfaceOrientation CV3HostedClientOrientation(CV3FloatingAppWindow *window) {
@@ -206,9 +222,11 @@ static CGAffineTransform CV3HostedContentRotationInScene(CV3FloatingAppWindow *w
                          (long)staleAcknowledgement, (long)window.hostedContentOrientation);
         }
     }
-    if (CV3LandscapeGameNeedsSceneCompensation(window)) {
+    if (CV3HostedLandscapeNeedsSceneCompensation(window)) {
         // The producer is already landscape; compensate only the outer Scene's
-        // mapping to the display. Derive the sign from UIKit, not device rotation.
+        // mapping to the display. This is required for both landscape-only games
+        // and video Apps that enter landscape after their floating window was
+        // created. Derive the sign from UIKit, not device rotation.
         id<UICoordinateSpace> sceneSpace = window.windowScene.coordinateSpace;
         id<UICoordinateSpace> displaySpace = window.windowScene.screen.coordinateSpace;
         CGPoint origin = [sceneSpace convertPoint:CGPointZero fromCoordinateSpace:displaySpace];
@@ -1152,10 +1170,29 @@ void CV3ToggleExposeMode(void) {
     UIView *view = [self stashAnimationSnapshotSourceView];
     if (!view || CGRectIsEmpty(view.bounds)) return nil;
 
-    UIGraphicsBeginImageContextWithOptions(view.bounds.size, NO, [UIScreen mainScreen].scale);
+    CGRect visibleFrame = [self convertRect:view.bounds fromView:view];
+    if (CGRectIsEmpty(visibleFrame)) return nil;
+
+    CGPoint localOrigin = view.bounds.origin;
+    CGPoint windowOrigin = [view convertPoint:localOrigin toView:self];
+    CGPoint windowX = [view convertPoint:CGPointMake(localOrigin.x + 1.0, localOrigin.y) toView:self];
+    CGPoint windowY = [view convertPoint:CGPointMake(localOrigin.x, localOrigin.y + 1.0) toView:self];
+    CGFloat a = windowX.x - windowOrigin.x;
+    CGFloat b = windowX.y - windowOrigin.y;
+    CGFloat c = windowY.x - windowOrigin.x;
+    CGFloat d = windowY.y - windowOrigin.y;
+    CGAffineTransform localToSnapshot = CGAffineTransformMake(
+        a, b, c, d,
+        windowOrigin.x - CGRectGetMinX(visibleFrame) - a * localOrigin.x - c * localOrigin.y,
+        windowOrigin.y - CGRectGetMinY(visibleFrame) - b * localOrigin.x - d * localOrigin.y);
+
+    // Draw in the window's visible coordinate space. Capturing view.bounds
+    // alone omits rootTransformContainer's physical-orientation rotation.
+    UIGraphicsBeginImageContextWithOptions(visibleFrame.size, NO, [UIScreen mainScreen].scale);
+    CGContextRef context = UIGraphicsGetCurrentContext();
+    if (context) CGContextConcatCTM(context, localToSnapshot);
     BOOL didDraw = [view drawViewHierarchyInRect:view.bounds afterScreenUpdates:NO];
     if (!didDraw) {
-        CGContextRef context = UIGraphicsGetCurrentContext();
         if (context) [view.layer renderInContext:context];
     }
     UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
@@ -1164,13 +1201,12 @@ void CV3ToggleExposeMode(void) {
     UIInterfaceOrientation orientation = CV3IsValidInterfaceOrientation(self.targetOrientation)
         ? self.targetOrientation
         : CV3TrustedInterfaceOrientation(self.windowScene);
-    // drawViewHierarchyInRect: already snapshots the selected visible surface
-    // in its current coordinate space. Rotating it from a hard-coded portrait
-    // source turns an already-landscape frame into a portrait genie image.
-    CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=capture phase=snapshot view=%@ bounds=%@ image=%@ content_orientation=%ld",
+    CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=capture phase=snapshot view=%@ local_bounds=%@ visible_frame=%@ transform=%@ image=%@ content_orientation=%ld",
                  self.stashAnimationTraceID ?: @"pending",
                  NSStringFromClass(view.class),
                  NSStringFromCGRect(view.bounds),
+                 NSStringFromCGRect(visibleFrame),
+                 NSStringFromCGAffineTransform(localToSnapshot),
                  image ? NSStringFromCGSize(image.size) : @"nil",
                  (long)orientation);
     return image;
@@ -1652,7 +1688,7 @@ void CV3ToggleExposeMode(void) {
     // stretches only the container; the producer's valid 430-wide Surface then
     // occupies the left half and leaves the remainder transparent.
     // Display compensation rotates the shell, not the producer's canvas.
-    CGSize canvasSize = localRotationSwapsAxes && !CV3LandscapeGameNeedsSceneCompensation(self)
+    CGSize canvasSize = localRotationSwapsAxes && !CV3HostedLandscapeNeedsSceneCompensation(self)
         ? CV3CanonicalApplicationSceneFrame(sceneSettings).size
         : CV3HostedCanvasSizeForOrientation(hostedOrientation, sceneSettings);
     return CGRectMake(0, 0, canvasSize.width, canvasSize.height);
@@ -1946,13 +1982,19 @@ static NSUInteger CV3SynchronizeHostedContextLayerGeometry(CALayer *layer,
     CALayer *presentation = hostLayer.presentationLayer;
     NSMutableArray<NSString *> *hostLayers = [NSMutableArray array];
     CV3CollectVideoFullscreenLayers(hostLayer, @"host", 0, hostLayers);
-    CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=%@ bundle=%@ requested=%ld target=%ld hosted=%ld display=%ld prefersLandscape=%d requiresLandscape=%d stashed=%d windowFrame=%@ windowBounds=%@ rootBounds=%@ rootTransform=%@ wrapper=%@ clip=%@ proxy=%@ hostFrame=%@ hostBounds=%@ hostAttached=%d hostChildren=%lu layerFrame=%@ layerBounds=%@ presentationFrame=%@ settingsFrame=%@ settingsOrientation=%ld contentState=%ld hostLayers=[%@]",
+    CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=%@ bundle=%@ requested=%ld target=%ld hosted=%ld client=%ld display=%ld physical=%ld scene=%ld axesDiffer=%d sceneBounds=%@ screenBounds=%@ prefersLandscape=%d requiresLandscape=%d stashed=%d windowFrame=%@ windowBounds=%@ rootBounds=%@ rootTransform=%@ wrapper=%@ clip=%@ proxy=%@ hostFrame=%@ hostBounds=%@ hostAttached=%d hostChildren=%lu layerFrame=%@ layerBounds=%@ presentationFrame=%@ settingsFrame=%@ settingsOrientation=%ld contentState=%ld hostLayers=[%@]",
                           phase ?: @"unknown",
                           self.bundleID ?: @"unknown",
                           (long)orientation,
                           (long)self.targetOrientation,
                           (long)self.hostedContentOrientation,
+                          (long)CV3HostedClientOrientation(self),
                           (long)CV3TrustedInterfaceOrientation(self.windowScene),
+                          (long)CV3LastPhysicalDeviceInterfaceOrientation,
+                          (long)self.windowScene.interfaceOrientation,
+                          CV3SceneAndDisplayAxesDiffer(self),
+                          NSStringFromCGRect(self.windowScene.coordinateSpace.bounds),
+                          NSStringFromCGRect(self.windowScene.screen.bounds),
                           self.prefersLandscapePresentation,
                           self.requiresLandscapeContent,
                           self.isStashed,

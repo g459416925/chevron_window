@@ -842,6 +842,17 @@ static void CV3WriteFocusedDiagnostic(NSString *message) {
     BOOL relevant = [message hasPrefix:@"[SplitTrace] [Error]"] ||
         [message hasPrefix:@"[SplitTrace] [Recovery]"] ||
         [message hasPrefix:@"[StashAnimation]"] ||
+        [message hasPrefix:@"[SplitTrace] [SystemUILevel]"] ||
+        ([message hasPrefix:@"[DEBUG-VIDEOFULLSCREEN]"] &&
+         ([message containsString:@"phase=notification.received"] ||
+          [message containsString:@"phase=notification.ignored"] ||
+          [message containsString:@"phase=notification.suppressed"] ||
+          [message containsString:@"phase=notification.unmatched"] ||
+          [message containsString:@"phase=notification.matched.before"] ||
+          [message containsString:@"phase=notification.matched.after"] ||
+          [message containsString:@"phase=applyHosted.entry"] ||
+          [message containsString:@"phase=applyHosted.shortCircuit"] ||
+          [message containsString:@"phase=applyHosted.completed"])) ||
         [message containsString:@"phase=settingsLayout.orientationMap"] ||
         [message containsString:@"phase=settingsLayout.end modified=1"] ||
         ([message hasPrefix:@"[SplitTrace] [SurfaceOrientationAudit]"] &&
@@ -1045,6 +1056,9 @@ static BOOL CV3SwitcherWindowVisible = NO;
 static BOOL CV3MainSwitcherVisible = NO;
 static BOOL CV3LockScreenPresented = NO;
 static BOOL CV3GestureCoverSheetPresented = NO;
+static BOOL CV3ControlCenterPresented = NO;
+static BOOL CV3CoverSheetManagerPresented = NO;
+static BOOL CV3CoverSheetControllerPresented = NO;
 static __weak UIViewController *CV3GestureCoverSheetController;
 static const char *CV3HostGenerationNotification = "com.xu.chevronv3.host-generation";
 static uint32_t CV3HostGeneration = 0;
@@ -2596,6 +2610,8 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 - (void)refreshGlassAccentSurfaces;
 - (void)applyGlassAccentToCategoryButton:(UIButton *)button selected:(BOOL)selected suggested:(BOOL)suggested;
 - (void)applySceneRotationContext:(CV3SceneRotationContext)context force:(BOOL)force;
+- (BOOL)isSystemUIActive;
+- (void)setSystemUILevelSuppressed:(BOOL)suppressed;
 @end
 
 static NSCache *cv3IconCache = nil; 
@@ -4771,7 +4787,7 @@ static BOOL CV3FocusHostedLaunchTargetFromObject(id request, NSString *source) {
     %orig;
     CV3LockScreenPresented = YES;
     CV3ExitExposeModeIfNeeded(nil, NO);
-    if (sharedWindow) sharedWindow.hidden = YES;
+    if (sharedWindow) [sharedWindow setSystemUILevelSuppressed:YES];
     if (floatingWindows) {
         for (CV3FloatingAppWindow *win in [floatingWindows copy]) {
             if ([win isKindOfClass:[CV3FloatingAppWindow class]]) {
@@ -4784,7 +4800,9 @@ static BOOL CV3FocusHostedLaunchTargetFromObject(id request, NSString *source) {
 - (void)lockScreenViewControllerDidDismiss {
     %orig;
     CV3LockScreenPresented = NO;
-    if (sharedWindow) sharedWindow.hidden = NO;
+    if (sharedWindow && ![sharedWindow isSystemUIActive]) {
+        [sharedWindow setSystemUILevelSuppressed:NO];
+    }
     if (floatingWindows) {
         for (CV3FloatingAppWindow *win in [floatingWindows copy]) {
             if (![win isKindOfClass:[CV3FloatingAppWindow class]]) continue;
@@ -4795,14 +4813,14 @@ static BOOL CV3FocusHostedLaunchTargetFromObject(id request, NSString *source) {
 }
 %end
 
-#pragma mark - Fix: Auto-hide when Control Center or Notification Center is active
+#pragma mark - Keep the launcher below Control Center and Notification Center
 %hook SBControlCenterController
 - (void)_willPresent {
     %orig;
+    CV3ControlCenterPresented = YES;
     CV3ExitExposeModeIfNeeded(nil, NO);
     if (sharedWindow) {
-        sharedWindow.isSuppressedBySystem = YES;
-        sharedWindow.hidden = YES;
+        [sharedWindow setSystemUILevelSuppressed:YES];
     }
     // 控制中心弹出时，分屏不消失
     if (floatingWindows) {
@@ -4813,22 +4831,26 @@ static BOOL CV3FocusHostedLaunchTargetFromObject(id request, NSString *source) {
 }
 - (void)_didDismiss {
     %orig;
-    if (sharedWindow) {
-        sharedWindow.isSuppressedBySystem = NO;
-        sharedWindow.hidden = NO;
+    CV3ControlCenterPresented = NO;
+    if (sharedWindow && ![sharedWindow isSystemUIActive]) {
+        [sharedWindow setSystemUILevelSuppressed:NO];
     }
 }
 %end
 
 %hook SBCoverSheetPresentationManager
 - (void)setCoverSheetPresented:(BOOL)arg1 animated:(BOOL)arg2 {
-    CV3GestureCoverSheetPresented = arg1;
+    CV3CoverSheetManagerPresented = arg1;
+    CV3GestureCoverSheetPresented = CV3CoverSheetManagerPresented || CV3CoverSheetControllerPresented;
     CV3LogToFile(@"[EdgeSystemEnvironment] source=coverSheetManager presented=%d", arg1);
     %orig;
     if (arg1) CV3ExitExposeModeIfNeeded(nil, NO);
     if (sharedWindow) {
-        sharedWindow.isSuppressedBySystem = arg1;
-        sharedWindow.hidden = arg1;
+        if (arg1 || [sharedWindow isSystemUIActive]) {
+            [sharedWindow setSystemUILevelSuppressed:YES];
+        } else {
+            [sharedWindow setSystemUILevelSuppressed:NO];
+        }
     }
     // 通知中心/下拉盖板时不隐藏分屏
     if (arg1 && floatingWindows) {
@@ -4845,27 +4867,27 @@ static BOOL CV3FocusHostedLaunchTargetFromObject(id request, NSString *source) {
 %hook CSCoverSheetViewController
 - (void)viewWillAppear:(BOOL)animated {
     CV3GestureCoverSheetController = self;
-    CV3GestureCoverSheetPresented = YES;
+    CV3CoverSheetControllerPresented = YES;
+    CV3GestureCoverSheetPresented = CV3CoverSheetManagerPresented || CV3CoverSheetControllerPresented;
     CV3LogToFile(@"[EdgeSystemEnvironment] source=coverSheetWillAppear presented=1");
     %orig;
     CV3ExitExposeModeIfNeeded(nil, NO);
     if (sharedWindow) {
-        sharedWindow.isSuppressedBySystem = YES;
-        sharedWindow.hidden = YES;
+        [sharedWindow setSystemUILevelSuppressed:YES];
     }
 }
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
     if (CV3GestureCoverSheetController == self) {
         CV3GestureCoverSheetController = nil;
-        CV3GestureCoverSheetPresented = NO;
+        CV3CoverSheetControllerPresented = NO;
+        CV3GestureCoverSheetPresented = CV3CoverSheetManagerPresented || CV3CoverSheetControllerPresented;
     }
     CV3LogToFile(@"[EdgeSystemEnvironment] source=coverSheetDidDisappear presented=%d", CV3GestureCoverSheetPresented);
     if (sharedWindow) {
         // 只有当没有其他系统 UI 活跃时才解除压制
         if (![sharedWindow isSystemUIActive]) {
-            sharedWindow.isSuppressedBySystem = NO;
-            sharedWindow.hidden = NO;
+            [sharedWindow setSystemUILevelSuppressed:NO];
         }
     }
 }
