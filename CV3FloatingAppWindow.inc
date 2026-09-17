@@ -105,6 +105,7 @@ static const CGFloat kCV3ExposeCardCornerRadius = 22.0;
 static const CGFloat kCV3ExposeCardShadowOpacity = 0.22;
 static const CGFloat kCV3ExposeCardShadowRadius = 20.0;
 static const CGFloat kCV3ExposeCardSelectedScale = 1.03;
+static const NSInteger kCV3ExposeRotationSnapshotTag = 0x43563352;
 static const CGFloat kCV3FloatingDefaultWidthRatio = 0.45;
 
 static CGRect CV3DisplayBoundsForWindow(UIWindow *window) {
@@ -683,6 +684,48 @@ static void CV3LayoutExposeLiveContent(CV3FloatingAppWindow *win) {
     liveContent.transform = CGAffineTransformMakeScale(scale, scale);
 }
 
+static void CV3FreezeExposeCardsForRotation(void) {
+    NSUInteger frozenCount = 0;
+    for (CV3FloatingAppWindow *window in globalExposeWindows) {
+        UIView *cardView = window.exposeOverlayView;
+        UIView *contentContainer = window.exposeLiveContentContainer;
+        if (!cardView || !contentContainer) continue;
+
+        UIView *existingSnapshot = [cardView viewWithTag:kCV3ExposeRotationSnapshotTag];
+        if (!existingSnapshot) {
+            CV3LayoutExposeLiveContent(window);
+            UIView *snapshot = [contentContainer snapshotViewAfterScreenUpdates:NO];
+            if (!snapshot) continue;
+            snapshot.tag = kCV3ExposeRotationSnapshotTag;
+            snapshot.frame = cardView.bounds;
+            snapshot.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            snapshot.userInteractionEnabled = NO;
+            snapshot.layer.cornerRadius = kCV3ExposeCardCornerRadius;
+            snapshot.layer.masksToBounds = YES;
+            [cardView addSubview:snapshot];
+        }
+        contentContainer.hidden = YES;
+        frozenCount++;
+    }
+    CV3LogToFile(@"[ExposeRotation] phase=freeze cards=%lu", (unsigned long)frozenCount);
+}
+
+static void CV3ThawExposeCardsAfterRotation(void) {
+    NSUInteger thawedCount = 0;
+    for (CV3FloatingAppWindow *window in globalExposeWindows) {
+        UIView *cardView = window.exposeOverlayView;
+        UIView *contentContainer = window.exposeLiveContentContainer;
+        if (!cardView || !contentContainer) continue;
+
+        CV3LayoutExposeLiveContent(window);
+        contentContainer.hidden = NO;
+        UIView *snapshot = [cardView viewWithTag:kCV3ExposeRotationSnapshotTag];
+        [snapshot removeFromSuperview];
+        thawedCount++;
+    }
+    CV3LogToFile(@"[ExposeRotation] phase=thaw cards=%lu", (unsigned long)thawedCount);
+}
+
 static void CV3RestoreExposeLiveContent(CV3FloatingAppWindow *win, BOOL preserveCardImage) {
     UIView *cardView = win.exposeOverlayView;
     UIView *contentContainer = win.exposeLiveContentContainer;
@@ -888,6 +931,15 @@ static void CV3UpdateExposeForSceneRotation(CV3SceneRotationContext context, BOO
         CV3UpdateExposeSelectionForViewportCenter();
         globalExposeBackdrop.userInteractionEnabled = YES;
 
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!isGlobalExposeActive ||
+                rotationGeneration != globalExposeRotationGeneration) return;
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            CV3ThawExposeCardsAfterRotation();
+            [CATransaction commit];
+        });
+
         NSMutableArray<NSString *> *frames = [NSMutableArray array];
         for (CV3FloatingAppWindow *window in globalExposeWindows) {
             if (window.exposeOverlayView) {
@@ -905,6 +957,7 @@ static void CV3UpdateExposeForSceneRotation(CV3SceneRotationContext context, BOO
 
     if (layoutAxisChanged) {
         globalExposeBackdrop.userInteractionEnabled = NO;
+        CV3FreezeExposeCardsForRotation();
         CV3LogToFile(@"[ExposeRotation] phase=defer generation=%lu fromLandscape=%d toLandscape=%d physicalScene=%@ backdropScene=%@ content=%@",
                      (unsigned long)rotationGeneration, globalExposeIsLandscape,
                      context.isLandscape, NSStringFromCGRect(sceneBounds),
