@@ -5905,7 +5905,10 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     CGAffineTransform jellyTransform = CGAffineTransformIdentity;
     CGFloat pushFactor = 0;
     NSInteger pushAxis = 0; // 1: X, 2: Y
-    if (floatingWindows && floatingWindows.count > 1) {
+    // Collision squash is a transient drag affordance. Applying it to static
+    // overlapping windows leaves a permanent non-uniform scale on the rotated
+    // root, which distorts landscape content after an orientation change.
+    if (self.isMovingWindow && floatingWindows && floatingWindows.count > 1) {
         for (CV3FloatingAppWindow *other in floatingWindows) {
             if (other == self || other.isStashed || ![other isKindOfClass:[CV3FloatingAppWindow class]]) continue;
             
@@ -6410,6 +6413,8 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         } completion:^(BOOL finished) {
             self.moveSceneSyncSuppressedUntil = CACurrentMediaTime() + 0.8;
             self.isMovingWindow = NO;
+            [self setNeedsLayout];
+            [self layoutIfNeeded];
             [self layoutFloatingHomeBarForBounds:self.appContentWrapper.bounds];
             // The drag phase applies a velocity-dependent peak shadow. UIKit's
             // position spring can interrupt the separate shadow animation, so

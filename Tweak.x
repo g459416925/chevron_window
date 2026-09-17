@@ -5629,10 +5629,10 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
 
 %ctor {
     @autoreleasepool {
-        CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=logger.ready version=1.0.18-77+landscape-hit-map");
-        CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=logger.ready version=1.0.18-77+landscape-hit-map");
-        CV3LogWindowOrientation(@"[WindowOrientationTrace] phase=logger.ready version=1.0.18-77+landscape-hit-map");
-        CV3LogToFile(@"[Strict] phase=logger.ready version=1.0.18-77+landscape-hit-map path=/rootfs/var/mobile/Documents/ChevronV3_SplitTrace.log");
+        CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=logger.ready version=1.0.18-78+rotation-aspect-repair");
+        CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=logger.ready version=1.0.18-78+rotation-aspect-repair");
+        CV3LogWindowOrientation(@"[WindowOrientationTrace] phase=logger.ready version=1.0.18-78+rotation-aspect-repair");
+        CV3LogToFile(@"[Strict] phase=logger.ready version=1.0.18-78+rotation-aspect-repair path=/rootfs/var/mobile/Documents/ChevronV3_SplitTrace.log");
         CV3PublishHostGeneration();
         CV3RegisterVideoOrientationBridge();
         CV3RegisterPlaybackTraceBridge();
