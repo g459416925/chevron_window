@@ -1780,9 +1780,6 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, assign) BOOL hasCapturedBaseline;
 @property (nonatomic, assign) CGFloat baseRoll;
 @property (nonatomic, assign) CGFloat basePitch;
-@property (nonatomic, assign) NSTimeInterval collisionReleaseTime;
-@property (nonatomic, assign) CGFloat collisionReleaseValue;
-@property (nonatomic, assign) NSInteger collisionReleaseAxis;
 @property (nonatomic, strong) UIImage *stashedRestoreSnapshotImage;
 @property (nonatomic, assign) UIInterfaceOrientation stashedRestoreSnapshotOrientation;
 @property (nonatomic, copy) NSString *stashAnimationTraceID;
