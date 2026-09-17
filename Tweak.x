@@ -4359,6 +4359,113 @@ static void CV3RemoveCompactSystemApertureOutline(UIWindow *window) {
     [CATransaction commit];
 }
 
+static void CV3ArrangeFloatingWindowsAfterRotation(BOOL animated) {
+    if (!floatingWindows || floatingWindows.count < 2) return;
+
+    NSMutableArray<CV3FloatingAppWindow *> *windows = [NSMutableArray array];
+    for (id object in [floatingWindows copy]) {
+        if (![object isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+        CV3FloatingAppWindow *window = (CV3FloatingAppWindow *)object;
+        if (window.isClosing || window.isStashed || window.hidden || window.alpha <= 0.01) continue;
+        [windows addObject:window];
+    }
+    if (windows.count < 2) return;
+
+    CV3FloatingAppWindow *referenceWindow = windows.lastObject;
+    CGRect displayBounds = CV3DisplayBoundsForWindow(referenceWindow);
+    UIEdgeInsets safeArea = [referenceWindow currentSafeAreaInsets];
+    CGFloat padding = CV3Style.safeAreaBreath;
+    CGRect available = UIEdgeInsetsInsetRect(displayBounds,
+        UIEdgeInsetsMake(safeArea.top + padding,
+                         safeArea.left + padding,
+                         safeArea.bottom + padding,
+                         safeArea.right + padding));
+    if (CGRectGetWidth(available) <= 1.0 || CGRectGetHeight(available) <= 1.0) return;
+
+    CGFloat maxWidth = 1.0;
+    CGFloat maxHeight = 1.0;
+    for (CV3FloatingAppWindow *window in windows) {
+        maxWidth = MAX(maxWidth, CGRectGetWidth(window.bounds));
+        maxHeight = MAX(maxHeight, CGRectGetHeight(window.bounds));
+    }
+
+    const CGFloat spacing = 12.0;
+    NSUInteger count = windows.count;
+    NSUInteger bestColumns = 1;
+    CGFloat bestScore = CGFLOAT_MAX;
+    BOOL windowsArePortrait = maxHeight > maxWidth;
+    for (NSUInteger columns = 1; columns <= count; columns++) {
+        NSUInteger rows = (count + columns - 1) / columns;
+        CGFloat cellWidth = (CGRectGetWidth(available) - spacing * (columns - 1)) / columns;
+        CGFloat cellHeight = (CGRectGetHeight(available) - spacing * (rows - 1)) / rows;
+        if (cellWidth <= 1.0 || cellHeight <= 1.0) continue;
+
+        CGFloat widthOverlapRatio = MAX(0.0, maxWidth - cellWidth) / maxWidth;
+        CGFloat heightOverlapRatio = MAX(0.0, maxHeight - cellHeight) / maxHeight;
+        CGFloat score = widthOverlapRatio + heightOverlapRatio;
+        // For equal-overlap layouts, place portrait windows in columns and
+        // landscape windows in rows so their short edges meet.
+        score += windowsArePortrait
+            ? (CGFloat)(count - columns) * 0.0001
+            : (CGFloat)(columns - 1) * 0.0001;
+        if (score < bestScore) {
+            bestScore = score;
+            bestColumns = columns;
+        }
+    }
+
+    NSUInteger rows = (count + bestColumns - 1) / bestColumns;
+    CGFloat cellWidth = (CGRectGetWidth(available) - spacing * (bestColumns - 1)) / bestColumns;
+    CGFloat cellHeight = (CGRectGetHeight(available) - spacing * (rows - 1)) / rows;
+    NSMutableArray<NSValue *> *targetFrames = [NSMutableArray arrayWithCapacity:count];
+    NSMutableArray<NSString *> *traceFrames = [NSMutableArray arrayWithCapacity:count];
+
+    for (NSUInteger index = 0; index < count; index++) {
+        NSUInteger row = index / bestColumns;
+        NSUInteger column = index % bestColumns;
+        NSUInteger firstIndexInRow = row * bestColumns;
+        NSUInteger itemsInRow = MIN(bestColumns, count - firstIndexInRow);
+        CGFloat rowWidth = cellWidth * itemsInRow + spacing * (itemsInRow - 1);
+        CGFloat rowStartX = CGRectGetMidX(available) - rowWidth * 0.5;
+        CGPoint center = CGPointMake(rowStartX + column * (cellWidth + spacing) + cellWidth * 0.5,
+                                     CGRectGetMinY(available) + row * (cellHeight + spacing) + cellHeight * 0.5);
+        CV3FloatingAppWindow *window = windows[index];
+        CGRect proposed = CGRectMake(center.x - CGRectGetWidth(window.bounds) * 0.5,
+                                     center.y - CGRectGetHeight(window.bounds) * 0.5,
+                                     CGRectGetWidth(window.bounds),
+                                     CGRectGetHeight(window.bounds));
+        CGRect target = [window safeAreaClampedFrame:proposed preferredCenter:center preserveSize:YES];
+        [targetFrames addObject:[NSValue valueWithCGRect:target]];
+        [traceFrames addObject:[NSString stringWithFormat:@"%@=%@",
+                                window.bundleID ?: @"nil", NSStringFromCGRect(target)]];
+    }
+
+    void (^applyLayout)(void) = ^{
+        [windows enumerateObjectsUsingBlock:^(CV3FloatingAppWindow *window, NSUInteger index, BOOL *stop) {
+            CGRect target = targetFrames[index].CGRectValue;
+            window.center = CGPointMake(CGRectGetMidX(target), CGRectGetMidY(target));
+        }];
+    };
+    if (animated) {
+        [UIView animateWithDuration:0.55
+                              delay:0
+             usingSpringWithDamping:0.78
+              initialSpringVelocity:0.35
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                         animations:applyLayout
+                         completion:nil];
+    } else {
+        applyLayout();
+    }
+    CV3LogToFile(@"[RotationLayout] count=%lu grid=%lux%lu available=%@ score=%.4f frames=[%@]",
+                 (unsigned long)count,
+                 (unsigned long)bestColumns,
+                 (unsigned long)rows,
+                 NSStringFromCGRect(available),
+                 bestScore,
+                 [traceFrames componentsJoinedByString:@", "]);
+}
+
 static void CV3ApplySceneRotationContextToProject(CV3SceneRotationContext context, NSString *reason, BOOL force) {
     if (!CV3IsValidInterfaceOrientation(context.orientation)) return;
 
@@ -4409,6 +4516,7 @@ static void CV3ApplySceneRotationContextToProject(CV3SceneRotationContext contex
             [sharedWindow applySceneRotationContext:context force:force];
         }
 
+        BOOL floatingOrientationChanged = NO;
         if (floatingWindows) {
             for (CV3FloatingAppWindow *win in [floatingWindows copy]) {
                 if (![win isKindOfClass:[CV3FloatingAppWindow class]] || win.isClosing) continue;
@@ -4417,9 +4525,14 @@ static void CV3ApplySceneRotationContextToProject(CV3SceneRotationContext contex
                 [win applySceneRotationContext:context force:force];
                 if (previousOrientation != context.orientation ||
                     !CGAffineTransformEqualToTransform(previousRotation, win.baseRotationTransform)) {
+                    floatingOrientationChanged = YES;
                     [win attachToCurrentActiveScene];
                 }
             }
+        }
+
+        if (floatingOrientationChanged) {
+            CV3ArrangeFloatingWindowsAfterRotation(YES);
         }
 
         CV3UpdateExposeForSceneRotation(context, YES);
@@ -5629,10 +5742,10 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
 
 %ctor {
     @autoreleasepool {
-        CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=logger.ready version=1.0.18-78+rotation-aspect-repair");
-        CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=logger.ready version=1.0.18-78+rotation-aspect-repair");
-        CV3LogWindowOrientation(@"[WindowOrientationTrace] phase=logger.ready version=1.0.18-78+rotation-aspect-repair");
-        CV3LogToFile(@"[Strict] phase=logger.ready version=1.0.18-78+rotation-aspect-repair path=/rootfs/var/mobile/Documents/ChevronV3_SplitTrace.log");
+        CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=logger.ready version=1.0.18-79+rotation-window-layout");
+        CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=logger.ready version=1.0.18-79+rotation-window-layout");
+        CV3LogWindowOrientation(@"[WindowOrientationTrace] phase=logger.ready version=1.0.18-79+rotation-window-layout");
+        CV3LogToFile(@"[Strict] phase=logger.ready version=1.0.18-79+rotation-window-layout path=/rootfs/var/mobile/Documents/ChevronV3_SplitTrace.log");
         CV3PublishHostGeneration();
         CV3RegisterVideoOrientationBridge();
         CV3RegisterPlaybackTraceBridge();
