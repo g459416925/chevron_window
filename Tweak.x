@@ -845,6 +845,8 @@ static void CV3WriteFocusedDiagnostic(NSString *message) {
         [message hasPrefix:@"[SplitTrace] [SystemUILevel]"] ||
         [message hasPrefix:@"[SplitTrace] [NotificationSplit]"] ||
         [message hasPrefix:@"[SplitTrace] [ZOrder]"] ||
+        [message hasPrefix:@"[SplitTrace] [RotationLayout]"] ||
+        [message hasPrefix:@"[SplitTrace] [ExposeRotation]"] ||
         ([message hasPrefix:@"[DEBUG-VIDEOFULLSCREEN]"] &&
          ([message containsString:@"phase=notification.received"] ||
           [message containsString:@"phase=notification.ignored"] ||
