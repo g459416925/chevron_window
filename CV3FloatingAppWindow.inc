@@ -476,6 +476,7 @@ static NSArray<CV3FloatingAppWindow *> *globalExposeWindows = nil;
 static CGFloat globalExposeScrollOffset = 0.0;
 static NSInteger globalExposeSelectedIndex = 0;
 static BOOL globalExposeIsLandscape = NO;
+static NSUInteger globalExposeRotationGeneration = 0;
 static void CV3ExitExposeModeSelectingWindow(CV3FloatingAppWindow *selectedWindow, BOOL focusSelected);
 
 static BOOL CV3WindowIsExpandedForExpose(id object) {
@@ -842,6 +843,10 @@ static void CV3UpdateExposeForSceneRotation(CV3SceneRotationContext context, BOO
 
     CGRect sceneBounds = context.sceneBounds;
     if (CGRectIsEmpty(sceneBounds)) sceneBounds = [UIScreen mainScreen].bounds;
+    CGRect backdropSceneBounds = globalExposeBackdrop.windowScene.coordinateSpace.bounds;
+    if (CGRectIsEmpty(backdropSceneBounds)) {
+        backdropSceneBounds = CV3DisplayBoundsForWindow(globalExposeBackdrop);
+    }
 
     CGFloat shortSide = MIN(sceneBounds.size.width, sceneBounds.size.height);
     CGFloat longSide = MAX(sceneBounds.size.width, sceneBounds.size.height);
@@ -849,26 +854,66 @@ static void CV3UpdateExposeForSceneRotation(CV3SceneRotationContext context, BOO
         ? CGSizeMake(longSide, shortSide)
         : CGSizeMake(shortSide, longSide);
 
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    globalExposeBackdrop.frame = sceneBounds;
-    for (UIView *subview in globalExposeBackdrop.subviews) {
-        if (subview != globalExposeContentView) subview.frame = globalExposeBackdrop.bounds;
-    }
-    globalExposeContentView.bounds = CGRectMake(0, 0, layoutSize.width, layoutSize.height);
-    globalExposeContentView.center = CGPointMake(CGRectGetMidX(globalExposeBackdrop.bounds),
-                                                 CGRectGetMidY(globalExposeBackdrop.bounds));
-    BOOL backingBoundsLandscape = CGRectGetWidth(globalExposeBackdrop.bounds) > CGRectGetHeight(globalExposeBackdrop.bounds);
-    globalExposeContentView.transform = (backingBoundsLandscape == context.isLandscape)
-        ? CGAffineTransformIdentity
-        : context.transform;
-    [CATransaction commit];
-
     BOOL layoutAxisChanged = (globalExposeIsLandscape != context.isLandscape);
-    globalExposeIsLandscape = context.isLandscape;
-    if (layoutAxisChanged) globalExposeScrollOffset = 0.0;
-    CV3LayoutExposeWindowsAnimated(animated);
-    CV3UpdateExposeSelectionForViewportCenter();
+    NSUInteger rotationGeneration = ++globalExposeRotationGeneration;
+    void (^commitLayout)(void) = ^{
+        if (!isGlobalExposeActive || !globalExposeBackdrop || !globalExposeContentView ||
+            rotationGeneration != globalExposeRotationGeneration) return;
+
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        // The trusted rotation context comes from SpringBoard's physical
+        // display Scene. Expose is hosted by the floating-window Scene, whose
+        // coordinate space can remain portrait while the display is landscape.
+        // Never assign the physical Scene bounds as this window's local frame.
+        globalExposeBackdrop.frame = backdropSceneBounds;
+        for (UIView *subview in globalExposeBackdrop.subviews) {
+            if (subview != globalExposeContentView) subview.frame = globalExposeBackdrop.bounds;
+        }
+        globalExposeContentView.bounds = CGRectMake(0, 0, layoutSize.width, layoutSize.height);
+        globalExposeContentView.center = CGPointMake(CGRectGetMidX(globalExposeBackdrop.bounds),
+                                                     CGRectGetMidY(globalExposeBackdrop.bounds));
+        BOOL backingBoundsLandscape = CGRectGetWidth(globalExposeBackdrop.bounds) > CGRectGetHeight(globalExposeBackdrop.bounds);
+        globalExposeContentView.transform = (backingBoundsLandscape == context.isLandscape)
+            ? CGAffineTransformIdentity
+            : context.transform;
+        [CATransaction commit];
+
+        globalExposeIsLandscape = context.isLandscape;
+        if (layoutAxisChanged) globalExposeScrollOffset = 0.0;
+        // The coordinate-space swap and every card frame must become visible in
+        // one display pass. Animating the child frames while SpringBoard is
+        // still rotating the parent Scene briefly places cards off-screen.
+        CV3LayoutExposeWindowsAnimated(layoutAxisChanged ? NO : animated);
+        CV3UpdateExposeSelectionForViewportCenter();
+        globalExposeBackdrop.userInteractionEnabled = YES;
+
+        NSMutableArray<NSString *> *frames = [NSMutableArray array];
+        for (CV3FloatingAppWindow *window in globalExposeWindows) {
+            if (window.exposeOverlayView) {
+                [frames addObject:[NSString stringWithFormat:@"%@=%@",
+                    window.bundleID ?: @"nil", NSStringFromCGRect(window.exposeOverlayView.frame)]];
+            }
+        }
+        CV3LogToFile(@"[ExposeRotation] phase=commit generation=%lu landscape=%d physicalScene=%@ backdropScene=%@ content=%@ transform=%@ cards=[%@]",
+                     (unsigned long)rotationGeneration, context.isLandscape,
+                     NSStringFromCGRect(sceneBounds), NSStringFromCGRect(backdropSceneBounds),
+                     NSStringFromCGSize(layoutSize),
+                     NSStringFromCGAffineTransform(globalExposeContentView.transform),
+                     [frames componentsJoinedByString:@", "]);
+    };
+
+    if (layoutAxisChanged) {
+        globalExposeBackdrop.userInteractionEnabled = NO;
+        CV3LogToFile(@"[ExposeRotation] phase=defer generation=%lu fromLandscape=%d toLandscape=%d physicalScene=%@ backdropScene=%@ content=%@",
+                     (unsigned long)rotationGeneration, globalExposeIsLandscape,
+                     context.isLandscape, NSStringFromCGRect(sceneBounds),
+                     NSStringFromCGRect(backdropSceneBounds), NSStringFromCGSize(layoutSize));
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.42 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), commitLayout);
+    } else {
+        commitLayout();
+    }
 }
 
 static void CV3ExitExposeModeSelectingWindow(CV3FloatingAppWindow *selectedWindow, BOOL focusSelected) {
@@ -880,6 +925,7 @@ static void CV3ExitExposeModeSelectingWindow(CV3FloatingAppWindow *selectedWindo
     }
 
     isGlobalExposeActive = NO;
+    globalExposeRotationGeneration++;
     NSArray *windowsSnapshot = [globalExposeWindows copy] ?: @[];
     UIWindow *backdrop = globalExposeBackdrop;
     globalExposeWindows = nil;
