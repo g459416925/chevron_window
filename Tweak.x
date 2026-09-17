@@ -843,6 +843,7 @@ static void CV3WriteFocusedDiagnostic(NSString *message) {
         [message hasPrefix:@"[SplitTrace] [Recovery]"] ||
         [message hasPrefix:@"[StashAnimation]"] ||
         [message hasPrefix:@"[SplitTrace] [SystemUILevel]"] ||
+        [message hasPrefix:@"[SplitTrace] [NotificationSplit]"] ||
         ([message hasPrefix:@"[DEBUG-VIDEOFULLSCREEN]"] &&
          ([message containsString:@"phase=notification.received"] ||
           [message containsString:@"phase=notification.ignored"] ||
@@ -3681,7 +3682,6 @@ static BOOL CV3DeviceIsLocked(void) {
 }
 
 static BOOL CV3HandleUnlockedBannerTap(id primaryObject, id secondaryObject, NSString *source) {
-    if (CV3DeviceIsLocked()) return NO;
     if (![NSThread isMainThread]) {
         __block BOOL handled = NO;
         dispatch_sync(dispatch_get_main_queue(), ^{
@@ -3690,9 +3690,23 @@ static BOOL CV3HandleUnlockedBannerTap(id primaryObject, id secondaryObject, NSS
         return handled;
     }
 
+    BOOL locked = CV3DeviceIsLocked();
+    CV3LogToFile(@"[NotificationSplit] phase=handler.enter source=%@ primary=%@ secondary=%@ locked=%d",
+                 source ?: @"Unknown",
+                 primaryObject ? NSStringFromClass([primaryObject class]) : @"nil",
+                 secondaryObject ? NSStringFromClass([secondaryObject class]) : @"nil",
+                 locked);
+    if (locked) return NO;
+
     NSString *bundleID = CV3NotificationBundleIDFromObject(primaryObject, 0);
     if (bundleID.length == 0) bundleID = CV3NotificationBundleIDFromObject(secondaryObject, 0);
-    if (bundleID.length == 0 || [bundleID isEqualToString:@"com.apple.springboard"]) return NO;
+    if (bundleID.length == 0 || [bundleID isEqualToString:@"com.apple.springboard"]) {
+        CV3LogToFile(@"[NotificationSplit] phase=resolver.miss source=%@ primary=%@ secondary=%@",
+                     source ?: @"Unknown",
+                     primaryObject ? NSStringFromClass([primaryObject class]) : @"nil",
+                     secondaryObject ? NSStringFromClass([secondaryObject class]) : @"nil");
+        return NO;
+    }
 
     id appController = [CV3ClassNamed(@"SBApplicationController") sharedInstance];
     if ([appController respondsToSelector:@selector(applicationWithBundleIdentifier:)]) {
@@ -4208,6 +4222,55 @@ static void CV3RegisterSimulatedNotificationBridge(void) {
 - (void)notificationResponse:(id)response forRequest:(id)request {
     if (CV3HandleUnlockedBannerTap(response, request, @"SBNotificationBannerDestination.notificationResponse")) return;
     %orig(response, request);
+}
+
+- (void)notificationViewController:(id)viewController
+                     executeAction:(id)action
+                    withParameters:(id)parameters
+                        completion:(id)completion {
+    CV3LogToFile(@"[NotificationSplit] phase=destination.enter source=SBNotificationBannerDestination viewController=%@ action=%@ parameters=%@ completion=%@",
+                 viewController ? NSStringFromClass([viewController class]) : @"nil",
+                 action ? NSStringFromClass([action class]) : @"nil",
+                 parameters ? NSStringFromClass([parameters class]) : @"nil",
+                 completion ? NSStringFromClass([completion class]) : @"nil");
+
+    NSArray *resolutionContext = @[
+        viewController ?: [NSNull null],
+        action ?: [NSNull null],
+        parameters ?: [NSNull null]
+    ];
+    if (CV3HandleUnlockedBannerTap(resolutionContext,
+                                   nil,
+                                   @"SBNotificationBannerDestination.executeAction")) {
+        // The destination completion accepts a success/handled flag on this OS.
+        // Supplying one argument also remains ABI-safe for a parameterless block.
+        if (completion) ((void (^)(BOOL))completion)(YES);
+        CV3LogToFile(@"[NotificationSplit] phase=destination.consumed source=SBNotificationBannerDestination.executeAction");
+        return;
+    }
+
+    %orig(viewController, action, parameters, completion);
+}
+%end
+
+%hook SBNCNotificationDispatcherDelegate
+- (void)dispatcher:(id)dispatcher
+launchForegroundApplicationForAction:(id)action
+notificationRequest:(id)request
+    fromDestination:(id)destination
+      withParameters:(id)parameters {
+    NSString *destinationClass = destination ? NSStringFromClass([destination class]) : @"nil";
+    BOOL isBannerDestination = [destinationClass containsString:@"Banner"];
+    CV3LogToFile(@"[NotificationSplit] phase=foregroundLaunch source=SBNCNotificationDispatcherDelegate destination=%@ action=%@ request=%@ banner=%d",
+                 destinationClass,
+                 action ? NSStringFromClass([action class]) : @"nil",
+                 request ? NSStringFromClass([request class]) : @"nil",
+                 isBannerDestination);
+    if (isBannerDestination &&
+        CV3HandleUnlockedBannerTap(request, action, @"SBNCNotificationDispatcherDelegate.foregroundLaunch")) {
+        return;
+    }
+    %orig(dispatcher, action, request, destination, parameters);
 }
 %end
 
