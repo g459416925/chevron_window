@@ -844,6 +844,7 @@ static void CV3WriteFocusedDiagnostic(NSString *message) {
         [message hasPrefix:@"[StashAnimation]"] ||
         [message hasPrefix:@"[SplitTrace] [SystemUILevel]"] ||
         [message hasPrefix:@"[SplitTrace] [NotificationSplit]"] ||
+        [message hasPrefix:@"[SplitTrace] [FullscreenLaunch]"] ||
         [message hasPrefix:@"[SplitTrace] [ZOrder]"] ||
         [message hasPrefix:@"[SplitTrace] [RotationLayout]"] ||
         [message hasPrefix:@"[SplitTrace] [ExposeRotation]"] ||
@@ -1056,6 +1057,7 @@ static UIInterfaceOrientation CV3LastPhysicalDeviceInterfaceOrientation = UIInte
 static BOOL CV3SuppressPresentationContextFanout = NO;
 static BOOL CV3WorkspaceTransitionActive = NO;
 static NSUInteger CV3WorkspaceTransitionProtectionToken = 0;
+static NSMutableSet<NSString *> *CV3FullscreenLaunchBypassBundleIDs = nil;
 static BOOL CV3SwitcherWindowVisible = NO;
 static BOOL CV3MainSwitcherVisible = NO;
 static BOOL CV3LockScreenPresented = NO;
@@ -1066,6 +1068,30 @@ static BOOL CV3CoverSheetControllerPresented = NO;
 static __weak UIViewController *CV3GestureCoverSheetController;
 static const char *CV3HostGenerationNotification = "com.xu.chevronv3.host-generation";
 static uint32_t CV3HostGeneration = 0;
+
+static void CV3BeginFullscreenLaunchBypass(NSString *bundleID) {
+    if (bundleID.length == 0) return;
+    @synchronized ([NSObject class]) {
+        if (!CV3FullscreenLaunchBypassBundleIDs) {
+            CV3FullscreenLaunchBypassBundleIDs = [NSMutableSet set];
+        }
+        [CV3FullscreenLaunchBypassBundleIDs addObject:bundleID];
+    }
+}
+
+static void CV3EndFullscreenLaunchBypass(NSString *bundleID) {
+    if (bundleID.length == 0) return;
+    @synchronized ([NSObject class]) {
+        [CV3FullscreenLaunchBypassBundleIDs removeObject:bundleID];
+    }
+}
+
+static BOOL CV3FullscreenLaunchBypassesFocusGuard(NSString *bundleID) {
+    if (bundleID.length == 0) return NO;
+    @synchronized ([NSObject class]) {
+        return [CV3FullscreenLaunchBypassBundleIDs containsObject:bundleID];
+    }
+}
 
 static NSString *CV3VideoOrientationSourceName(uint8_t source) {
     switch (source) {
@@ -1742,6 +1768,8 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, assign) CGRect preHostedLandscapePortraitFrame;
 @property (nonatomic, assign) CGRect preCompactFrame;
 @property (nonatomic, assign) BOOL isFullscreenMode;
+@property (nonatomic, assign) BOOL fullscreenLaunchPending;
+@property (nonatomic, assign) BOOL preserveSceneForegroundOnClose;
 @property (nonatomic, assign) BOOL isCompactMode;
 @property (nonatomic, strong) UIView *liveResizeSnapshotView;
 @property (nonatomic, strong) id rbsAssertion;
@@ -2413,6 +2441,11 @@ static CV3FloatingAppWindow *CV3HostedFloatingWindowForBundleID(NSString *bundle
 }
 
 static BOOL CV3FocusHostedFloatingWindowForBundleID(NSString *bundleID, NSString *source) {
+    if (CV3FullscreenLaunchBypassesFocusGuard(bundleID)) {
+        CV3LogToFile(@"[FullscreenLaunch] phase=focusGuard.bypassed bundle=%@ source=%@",
+                     bundleID, source ?: @"Unknown");
+        return NO;
+    }
     if (![NSThread isMainThread]) {
         __block BOOL handled = NO;
         dispatch_sync(dispatch_get_main_queue(), ^{
