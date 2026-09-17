@@ -1,7 +1,7 @@
 Package: com.xu.chevronv3
 Name: ChevronV3
 Depends: mobilesubstrate, preferenceloader
-Version: 1.0.18-78+rotation-aspect-repair
+Version: 1.0.18-79+rotation-window-layout
 Architecture: iphoneos-arm64
 Description: New generation for testing.
 Maintainer: xu
