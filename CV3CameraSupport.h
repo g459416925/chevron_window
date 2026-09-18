@@ -4,6 +4,7 @@
 static NSString * const CV3CameraGrantDomain = @"com.xu.chevronv3";
 static NSString * const CV3CameraGrantBundleIDsKey = @"HostedCameraGrantBundleIDs";
 static NSString * const CV3CameraGrantStateChangedNotification = @"com.xu.chevronv3.camera-state-changed";
+static NSString * const CV3HostedCameraAccessGrantedNotification = @"com.xu.chevronv3.hosted-camera-access-granted";
 
 NS_INLINE NSSet<NSString *> *CV3CameraForegroundGrantBundleIDs(void) {
     CFPreferencesAppSynchronize((__bridge CFStringRef)CV3CameraGrantDomain);

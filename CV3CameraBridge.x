@@ -13,6 +13,7 @@ static BOOL CV3ApplicationStateMonitorHookInstalled;
 static BOOL CV3SessionMonitorClientHookInstalled;
 static NSSet<NSString *> *CV3CachedCameraGrantBundleIDs;
 static CFAbsoluteTime CV3CameraGrantCacheTimestamp;
+static CFAbsoluteTime CV3LastHostedCameraAccessNotificationTimestamp;
 
 static void CV3InvalidateCameraGrantCache(void) {
     @synchronized (CV3CameraGrantDomain) {
@@ -58,7 +59,20 @@ static NSString *CV3CameraClientApplicationIdentifier(id object) {
 
 static BOOL CV3CameraGrantMatchesClient(id object) {
     NSString *bundleID = CV3CameraClientApplicationIdentifier(object);
-    return bundleID.length > 0 && [CV3CurrentCameraGrantBundleIDs() containsObject:bundleID];
+    BOOL matched = bundleID.length > 0 && [CV3CurrentCameraGrantBundleIDs() containsObject:bundleID];
+    if (!matched) return NO;
+
+    @synchronized (CV3CameraGrantDomain) {
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (now - CV3LastHostedCameraAccessNotificationTimestamp >= 0.25) {
+            CV3LastHostedCameraAccessNotificationTimestamp = now;
+            CFNotificationCenterPostNotification(
+                CFNotificationCenterGetDarwinNotifyCenter(),
+                (__bridge CFStringRef)CV3HostedCameraAccessGrantedNotification,
+                NULL, NULL, true);
+        }
+    }
+    return YES;
 }
 
 static BOOL CV3ApplicationStateMonitorHasBackgroundCameraAccess(id self, SEL selector) {
