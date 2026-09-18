@@ -727,6 +727,37 @@ static void CV3LogToFile(NSString *format, ...) {
     CV3WriteFocusedDiagnostic([NSString stringWithFormat:@"[SplitTrace] %@", details ?: @"<nil>"]);
 }
 
+static CFTimeInterval CV3LastHostedCameraAccessTime = 0;
+static __thread BOOL CV3SuppressRouteChangeVolumeHUD = NO;
+
+static void CV3HostedCameraAccessGranted(CFNotificationCenterRef center,
+                                         void *observer,
+                                         CFStringRef name,
+                                         const void *object,
+                                         CFDictionaryRef userInfo) {
+    CV3LastHostedCameraAccessTime = CACurrentMediaTime();
+}
+
+static NSString *CV3VolumeChangeReason(id event) {
+    NSDictionary *userInfo = nil;
+    if ([event isKindOfClass:[NSDictionary class]]) {
+        userInfo = event;
+    } else if ([event respondsToSelector:@selector(userInfo)]) {
+        userInfo = [event userInfo];
+    }
+    if (![userInfo isKindOfClass:[NSDictionary class]]) return nil;
+
+    id reason = userInfo[@"AVSystemController_AudioVolumeChangeReasonNotificationParameter"];
+    if ([reason isKindOfClass:[NSString class]]) return reason;
+    for (id value in userInfo.allValues) {
+        if ([value isKindOfClass:[NSString class]] &&
+            [value caseInsensitiveCompare:@"RouteChange"] == NSOrderedSame) {
+            return value;
+        }
+    }
+    return nil;
+}
+
 // Scene updates can arrive in bursts while SpringBoard reconciles a hosted
 // window. Rewriting the same effective settings in every callback makes the
 // client app spend its main-thread budget handling scene/accessibility work.
@@ -5867,6 +5898,44 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
 }
 %end
 
+static BOOL CV3HasVisibleHostedWindow(void) {
+    for (CV3FloatingAppWindow *window in [floatingWindows copy]) {
+        if ([window isKindOfClass:[CV3FloatingAppWindow class]] &&
+            !window.isClosing && !window.isStashed && !window.hidden) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL CV3ShouldSuppressHostedCameraRouteChangeHUD(id event) {
+    NSString *reason = CV3VolumeChangeReason(event);
+    if ([reason caseInsensitiveCompare:@"RouteChange"] != NSOrderedSame) return NO;
+    CFTimeInterval elapsed = CACurrentMediaTime() - CV3LastHostedCameraAccessTime;
+    return elapsed >= 0 && elapsed <= 3.0 && CV3HasVisibleHostedWindow();
+}
+
+%hook SBVolumeControl
+- (void)_effectiveVolumeChanged:(id)event {
+    BOOL previousSuppression = CV3SuppressRouteChangeVolumeHUD;
+    BOOL suppress = CV3ShouldSuppressHostedCameraRouteChangeHUD(event);
+    CV3SuppressRouteChangeVolumeHUD = previousSuppression || suppress;
+    @try {
+        %orig(event);
+    } @finally {
+        CV3SuppressRouteChangeVolumeHUD = previousSuppression;
+    }
+}
+
+- (void)_presentVolumeHUDWithVolume:(float)volume {
+    if (CV3SuppressRouteChangeVolumeHUD) {
+        CV3LogToFile(@"[VolumeHUD] suppressed hosted-camera route-change HUD volume=%.3f", volume);
+        return;
+    }
+    %orig(volume);
+}
+%end
+
 %ctor {
     @autoreleasepool {
         CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=logger.ready version=1.0.18-79+rotation-window-layout");
@@ -5879,6 +5948,11 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
         CV3RegisterPlaybackTraceBridge();
         CV3RegisterHostedInteractionBridge();
         CV3RegisterSimulatedNotificationBridge();
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+            CV3HostedCameraAccessGranted,
+            (__bridge CFStringRef)CV3HostedCameraAccessGrantedNotification,
+            NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         %init;
     }
 }

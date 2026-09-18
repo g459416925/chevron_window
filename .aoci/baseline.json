@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-09-18T11:17:40Z",
-  "updated_at": "2026-09-18T13:58:33Z",
+  "updated_at": "2026-09-18T14:26:28Z",
   "files": {
     ".agents/skills/animate/SKILL.md": {
       "sha256": "2a99870e61971553c0af3185a194c0e557f33aaa81e0422ca2fcec52195a4341",
@@ -109,14 +109,14 @@
       "normalized_sha256": "340a4d4c00961967cfe4d0cba15e380a2d57a39aacdc1e6d8e18cc6683564b33"
     },
     "CV3CameraBridge.x": {
-      "sha256": "44c5b61dc4979364471f804fad994192d64d99a24eff8e9b1100a50097efa702",
-      "size": 5413,
-      "normalized_sha256": "44c5b61dc4979364471f804fad994192d64d99a24eff8e9b1100a50097efa702"
+      "sha256": "e152fbdd19bf94e37bbf6cee1cac210a57f8e1bcf2d5bb7a7d08b54507c7029e",
+      "size": 6021,
+      "normalized_sha256": "e152fbdd19bf94e37bbf6cee1cac210a57f8e1bcf2d5bb7a7d08b54507c7029e"
     },
     "CV3CameraSupport.h": {
-      "sha256": "c7fc61785488b66e2775a0f36c08ed6a6bbee7c44a626f83b980a0189e1af53d",
-      "size": 2294,
-      "normalized_sha256": "c7fc61785488b66e2775a0f36c08ed6a6bbee7c44a626f83b980a0189e1af53d"
+      "sha256": "5e245141b6c7c7e7a9c1933f04970cff9ac9c977bf7b770eb8eea5518b06d3ab",
+      "size": 2411,
+      "normalized_sha256": "5e245141b6c7c7e7a9c1933f04970cff9ac9c977bf7b770eb8eea5518b06d3ab"
     },
     "CV3CoreSupport.h": {
       "sha256": "c72136523f75b5f426be86ae813bc4e2a5514778a7b09861d997a7e15d1cb59f",
@@ -199,14 +199,14 @@
       "normalized_sha256": "b66fc920a9fcdcbef4ab79b8c911c6d79c761de709cc32cc6526280bf94ea9ed"
     },
     "Tweak.x": {
-      "sha256": "e1ffab8584d30bf655314acd3367c7e577dd4e164fc1a39c5d830404d39663cb",
-      "size": 256066,
-      "normalized_sha256": "e1ffab8584d30bf655314acd3367c7e577dd4e164fc1a39c5d830404d39663cb"
+      "sha256": "00a0dda0418c873a05cd8b9bcf7abe56e21b661af5a17e00750dff64688456c5",
+      "size": 258906,
+      "normalized_sha256": "00a0dda0418c873a05cd8b9bcf7abe56e21b661af5a17e00750dff64688456c5"
     },
     "aoci.code.txt": {
-      "sha256": "721503a7124ceca0d4ce1b90e698dd4868a516c5dd319c88aa2b806ab61fdabc",
-      "size": 18725,
-      "normalized_sha256": "721503a7124ceca0d4ce1b90e698dd4868a516c5dd319c88aa2b806ab61fdabc"
+      "sha256": "60fe65b36857f4a1ec54e921a3f2dbf937c85c4de331d367d8de66d2542c1d0a",
+      "size": 18837,
+      "normalized_sha256": "60fe65b36857f4a1ec54e921a3f2dbf937c85c4de331d367d8de66d2542c1d0a"
     },
     "aoci.meta.txt": {
       "role": "index",
