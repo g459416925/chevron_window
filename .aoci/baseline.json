@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-09-18T11:17:40Z",
-  "updated_at": "2026-09-18T13:23:40Z",
+  "updated_at": "2026-09-18T13:58:33Z",
   "files": {
     ".agents/skills/animate/SKILL.md": {
       "sha256": "2a99870e61971553c0af3185a194c0e557f33aaa81e0422ca2fcec52195a4341",
@@ -108,15 +108,25 @@
       "size": 14067,
       "normalized_sha256": "340a4d4c00961967cfe4d0cba15e380a2d57a39aacdc1e6d8e18cc6683564b33"
     },
+    "CV3CameraBridge.x": {
+      "sha256": "44c5b61dc4979364471f804fad994192d64d99a24eff8e9b1100a50097efa702",
+      "size": 5413,
+      "normalized_sha256": "44c5b61dc4979364471f804fad994192d64d99a24eff8e9b1100a50097efa702"
+    },
+    "CV3CameraSupport.h": {
+      "sha256": "c7fc61785488b66e2775a0f36c08ed6a6bbee7c44a626f83b980a0189e1af53d",
+      "size": 2294,
+      "normalized_sha256": "c7fc61785488b66e2775a0f36c08ed6a6bbee7c44a626f83b980a0189e1af53d"
+    },
     "CV3CoreSupport.h": {
       "sha256": "c72136523f75b5f426be86ae813bc4e2a5514778a7b09861d997a7e15d1cb59f",
       "size": 6478,
       "normalized_sha256": "c72136523f75b5f426be86ae813bc4e2a5514778a7b09861d997a7e15d1cb59f"
     },
     "CV3FloatingAppWindow.inc": {
-      "sha256": "4f15b5916cf07cbb9a69e1d6aa7ef7ae2e48c31c0320685ccb114aab6ef09fd7",
-      "size": 390953,
-      "normalized_sha256": "4f15b5916cf07cbb9a69e1d6aa7ef7ae2e48c31c0320685ccb114aab6ef09fd7"
+      "sha256": "2aedd51bb2736ddf4d082502ee0045ad3bedfe492d6fa5cf66619938856cd00c",
+      "size": 392094,
+      "normalized_sha256": "2aedd51bb2736ddf4d082502ee0045ad3bedfe492d6fa5cf66619938856cd00c"
     },
     "CV3PrivateAPI.h": {
       "sha256": "18b97990fe381351e296e7f85cc2e0dd80d75707c189b2d69db25a8383f5f6e4",
@@ -142,6 +152,11 @@
       "sha256": "4f6dc3dfce77d213ff2a80a92a6918cb0a9ecd358e80579ce2a64daffd928d17",
       "size": 57,
       "normalized_sha256": "4f6dc3dfce77d213ff2a80a92a6918cb0a9ecd358e80579ce2a64daffd928d17"
+    },
+    "ChevronV3CameraBridge.plist": {
+      "sha256": "c717be9930e47016868e36853561e530b6d3a05e0d3336425add2c3522ff8360",
+      "size": 383,
+      "normalized_sha256": "c717be9930e47016868e36853561e530b6d3a05e0d3336425add2c3522ff8360"
     },
     "ChevronV3Prefs/CV3RootListController.m": {
       "sha256": "2612b94703f24d21666d2a7096b800b8c7182263f332b1129b3f5a206c1612f6",
@@ -174,9 +189,9 @@
       "normalized_sha256": "71ab85c7e4c2088b37d1cdcce9dc8858ba35d10b1227a55925aeb718bff6d284"
     },
     "Makefile": {
-      "sha256": "3ee070b9d6c73991d435d1cde03cddfaa1324df3b1fb141109ed95060facbf6f",
-      "size": 1033,
-      "normalized_sha256": "3ee070b9d6c73991d435d1cde03cddfaa1324df3b1fb141109ed95060facbf6f"
+      "sha256": "ca896a530bb2ee075ad63755ecf57c296ba2c7ef7b1fa361b9960b1a0259384b",
+      "size": 1235,
+      "normalized_sha256": "ca896a530bb2ee075ad63755ecf57c296ba2c7ef7b1fa361b9960b1a0259384b"
     },
     "README.md": {
       "sha256": "b66fc920a9fcdcbef4ab79b8c911c6d79c761de709cc32cc6526280bf94ea9ed",
@@ -184,14 +199,14 @@
       "normalized_sha256": "b66fc920a9fcdcbef4ab79b8c911c6d79c761de709cc32cc6526280bf94ea9ed"
     },
     "Tweak.x": {
-      "sha256": "6076b55fd2b1303bc7a15806341cfe094b661d2b97d367c5e6c3485078912021",
-      "size": 255796,
-      "normalized_sha256": "6076b55fd2b1303bc7a15806341cfe094b661d2b97d367c5e6c3485078912021"
+      "sha256": "e1ffab8584d30bf655314acd3367c7e577dd4e164fc1a39c5d830404d39663cb",
+      "size": 256066,
+      "normalized_sha256": "e1ffab8584d30bf655314acd3367c7e577dd4e164fc1a39c5d830404d39663cb"
     },
     "aoci.code.txt": {
-      "sha256": "f20c69c6d766a6c0baf89c352d3c801a07e3fdfdf3a4a9bd0daf3d6c8f8239f2",
-      "size": 17311,
-      "normalized_sha256": "f20c69c6d766a6c0baf89c352d3c801a07e3fdfdf3a4a9bd0daf3d6c8f8239f2"
+      "sha256": "721503a7124ceca0d4ce1b90e698dd4868a516c5dd319c88aa2b806ab61fdabc",
+      "size": 18725,
+      "normalized_sha256": "721503a7124ceca0d4ce1b90e698dd4868a516c5dd319c88aa2b806ab61fdabc"
     },
     "aoci.meta.txt": {
       "role": "index",

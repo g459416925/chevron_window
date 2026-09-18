@@ -5,6 +5,7 @@
 #import <notify.h>
 #import "CV3PrivateAPI.h"
 #import "CV3CoreSupport.h"
+#import "CV3CameraSupport.h"
 #include <sys/stat.h>
 #include <signal.h>
 
@@ -112,6 +113,8 @@ static void CV3PostHostedState(NSString *bundleID, BOOL hosted);
 
 @interface SBApplication : NSObject
 @property (nonatomic, readonly) NSString *bundleIdentifier;
+- (int)pid;
+- (id)processState;
 - (FBScene *)mainScene;
 - (void)_terminateWithReason:(int)arg1 description:(id)arg2;
 @end
@@ -178,6 +181,11 @@ static void CV3PostHostedState(NSString *bundleID, BOOL hosted);
 
 @interface RBSTarget : NSObject
 + (instancetype)targetWithProcessIdentity:(RBSProcessIdentity *)arg1;
++ (instancetype)targetWithPid:(int)pid;
+@end
+
+@interface RBSLegacyAttribute : NSObject
++ (instancetype)attributeWithReason:(NSUInteger)reason flags:(NSUInteger)flags;
 @end
 
 @interface RBSAssertion : NSObject
@@ -5865,6 +5873,7 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
         CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=logger.ready version=1.0.18-79+rotation-window-layout");
         CV3LogWindowOrientation(@"[WindowOrientationTrace] phase=logger.ready version=1.0.18-79+rotation-window-layout");
         CV3LogToFile(@"[NotificationSplit] phase=logger.ready version=1.0.18-88+roothide-log-path path=/rootfs/var/mobile/Library/Logs/ChevronV3_Logs.txt");
+        CV3ResetCameraForegroundGrants();
         CV3PublishHostGeneration();
         CV3RegisterVideoOrientationBridge();
         CV3RegisterPlaybackTraceBridge();

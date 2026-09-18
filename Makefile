@@ -5,7 +5,7 @@ THEOS_PACKAGE_SCHEME = roothide
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = ChevronV3 ChevronV3VideoBridge
+TWEAK_NAME = ChevronV3 ChevronV3VideoBridge ChevronV3CameraBridge
 
 ChevronV3_FILES = Tweak.x
 ChevronV3_CFLAGS = -fobjc-arc
@@ -17,6 +17,11 @@ ChevronV3VideoBridge_FILES = CV3VideoBridge.x
 ChevronV3VideoBridge_CFLAGS = -fobjc-arc
 ChevronV3VideoBridge_ARCHS = arm64 arm64e
 ChevronV3VideoBridge_FRAMEWORKS = UIKit AVFAudio AVFoundation
+
+ChevronV3CameraBridge_FILES = CV3CameraBridge.x
+ChevronV3CameraBridge_CFLAGS = -fobjc-arc
+ChevronV3CameraBridge_ARCHS = arm64 arm64e
+ChevronV3CameraBridge_FRAMEWORKS = Foundation
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
