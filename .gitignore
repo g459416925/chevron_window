@@ -3,3 +3,7 @@ packages/
 .DS_Store
 .idea/
 crashlogs/
+
+# AOCI agent host integration (machine-bound; do not commit)
+.codex/config.toml
+.codex/config.toml.backup.*
