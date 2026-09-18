@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-09-18T11:17:40Z",
-  "updated_at": "2026-09-18T12:21:54Z",
+  "updated_at": "2026-09-18T13:23:40Z",
   "files": {
     ".agents/skills/animate/SKILL.md": {
       "sha256": "2a99870e61971553c0af3185a194c0e557f33aaa81e0422ca2fcec52195a4341",
@@ -114,9 +114,9 @@
       "normalized_sha256": "c72136523f75b5f426be86ae813bc4e2a5514778a7b09861d997a7e15d1cb59f"
     },
     "CV3FloatingAppWindow.inc": {
-      "sha256": "5cd09789f2818c44a32f4b95d6ce840456a6711b310e85cd31b663bb3567f1ad",
-      "size": 398986,
-      "normalized_sha256": "5cd09789f2818c44a32f4b95d6ce840456a6711b310e85cd31b663bb3567f1ad"
+      "sha256": "4f15b5916cf07cbb9a69e1d6aa7ef7ae2e48c31c0320685ccb114aab6ef09fd7",
+      "size": 390953,
+      "normalized_sha256": "4f15b5916cf07cbb9a69e1d6aa7ef7ae2e48c31c0320685ccb114aab6ef09fd7"
     },
     "CV3PrivateAPI.h": {
       "sha256": "18b97990fe381351e296e7f85cc2e0dd80d75707c189b2d69db25a8383f5f6e4",
@@ -129,9 +129,9 @@
       "normalized_sha256": "f34a0328bdf14c97e8d115e1438d5c9bb11550bddb6cf6d79dfd7395d89b280c"
     },
     "CV3Window.inc": {
-      "sha256": "b78cc7b2029f5077d3336eacc5b140c9d6dc41d32e0cb9ad2480baa0b3ec5a66",
-      "size": 191722,
-      "normalized_sha256": "b78cc7b2029f5077d3336eacc5b140c9d6dc41d32e0cb9ad2480baa0b3ec5a66"
+      "sha256": "575a12bb0b3609feed8f746c7ced71d43d555d5c329a3d9952bd6be15b6fb6a6",
+      "size": 189015,
+      "normalized_sha256": "575a12bb0b3609feed8f746c7ced71d43d555d5c329a3d9952bd6be15b6fb6a6"
     },
     "CV3WorkspaceSupport.h": {
       "sha256": "bbec80a6655c85d06f8dd6e680030952761ad5bc20d95dbc5e04236b84064e98",
@@ -144,9 +144,9 @@
       "normalized_sha256": "4f6dc3dfce77d213ff2a80a92a6918cb0a9ecd358e80579ce2a64daffd928d17"
     },
     "ChevronV3Prefs/CV3RootListController.m": {
-      "sha256": "2c99bd7c0649d4d268f9e2edb7d0222564c3b76b7c41568ee2d3482f95556714",
-      "size": 5139,
-      "normalized_sha256": "2c99bd7c0649d4d268f9e2edb7d0222564c3b76b7c41568ee2d3482f95556714"
+      "sha256": "2612b94703f24d21666d2a7096b800b8c7182263f332b1129b3f5a206c1612f6",
+      "size": 4972,
+      "normalized_sha256": "2612b94703f24d21666d2a7096b800b8c7182263f332b1129b3f5a206c1612f6"
     },
     "ChevronV3Prefs/Resources/Info.plist": {
       "sha256": "68e67abc67703071effe8741537b58716c3c508d8c7513a96892496ae855385e",
@@ -184,14 +184,14 @@
       "normalized_sha256": "b66fc920a9fcdcbef4ab79b8c911c6d79c761de709cc32cc6526280bf94ea9ed"
     },
     "Tweak.x": {
-      "sha256": "af0d52292859d90b019b31617343892a30f791b0d19b0771db0f7329966466b3",
-      "size": 256121,
-      "normalized_sha256": "af0d52292859d90b019b31617343892a30f791b0d19b0771db0f7329966466b3"
+      "sha256": "6076b55fd2b1303bc7a15806341cfe094b661d2b97d367c5e6c3485078912021",
+      "size": 255796,
+      "normalized_sha256": "6076b55fd2b1303bc7a15806341cfe094b661d2b97d367c5e6c3485078912021"
     },
     "aoci.code.txt": {
-      "sha256": "a0c50e77c9f1af42a26b4a51a4fbb7bf869f7001199d14d763751c1ad3789b97",
-      "size": 17003,
-      "normalized_sha256": "a0c50e77c9f1af42a26b4a51a4fbb7bf869f7001199d14d763751c1ad3789b97"
+      "sha256": "f20c69c6d766a6c0baf89c352d3c801a07e3fdfdf3a4a9bd0daf3d6c8f8239f2",
+      "size": 17311,
+      "normalized_sha256": "f20c69c6d766a6c0baf89c352d3c801a07e3fdfdf3a4a9bd0daf3d6c8f8239f2"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -211,9 +211,9 @@
       "normalized_sha256": "4f565e314f82e8d09b2b31ed9b509daac2795ef17c58641dbe59bf6d90ececf4"
     },
     "control": {
-      "sha256": "cb0d9f435229d129718412a4390857769dd69856d878b1ac1b8d91a321b49e56",
+      "sha256": "4e38e005817f0e630de47b8054ba08807c7d1956750b9feaceda4193dee88aae",
       "size": 234,
-      "normalized_sha256": "cb0d9f435229d129718412a4390857769dd69856d878b1ac1b8d91a321b49e56"
+      "normalized_sha256": "4e38e005817f0e630de47b8054ba08807c7d1956750b9feaceda4193dee88aae"
     },
     "layout/Library/PreferenceLoader/Preferences/ChevronV3.plist": {
       "sha256": "fe196c32859eb4a531d70f7de490a3087177f19f58f9de187e6c214ff97fc401",
@@ -231,9 +231,9 @@
       "normalized_sha256": "977dc592c97b1c63a03aa2e1e4cd70b10e6a588746399fe399f00bad2adfc3df"
     },
     "项目要求.rtf": {
-      "sha256": "682df06e15a66d7906590f7b0b191bd9e18f07e3ad0591a2cea74b26a5e53656",
-      "size": 58614,
-      "normalized_sha256": "682df06e15a66d7906590f7b0b191bd9e18f07e3ad0591a2cea74b26a5e53656"
+      "sha256": "56342bcf4e37ffdfbf0e8e993b1e93597989b8fd2b412f50fb4a3f6b31d02eb0",
+      "size": 59519,
+      "normalized_sha256": "56342bcf4e37ffdfbf0e8e993b1e93597989b8fd2b412f50fb4a3f6b31d02eb0"
     }
   },
   "managed_scope": {
