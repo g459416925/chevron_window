@@ -1,0 +1,307 @@
+{
+  "version": 1,
+  "created_at": "2026-09-18T11:17:40Z",
+  "updated_at": "2026-09-18T12:21:54Z",
+  "files": {
+    ".agents/skills/animate/SKILL.md": {
+      "sha256": "2a99870e61971553c0af3185a194c0e557f33aaa81e0422ca2fcec52195a4341",
+      "size": 11527,
+      "normalized_sha256": "2a99870e61971553c0af3185a194c0e557f33aaa81e0422ca2fcec52195a4341"
+    },
+    ".agents/skills/animation-vocabulary/SKILL.md": {
+      "sha256": "d718b48fe3c7898804d588f050a2e266d82c9f5ef51da256c8cb8b5951527757",
+      "size": 13128,
+      "normalized_sha256": "d718b48fe3c7898804d588f050a2e266d82c9f5ef51da256c8cb8b5951527757"
+    },
+    ".agents/skills/apple-design/SKILL.md": {
+      "sha256": "11840b24a11d7f94f39c6aaab074750ae4e4de4ef54ee4b1dd97e16ebd485e61",
+      "size": 22715,
+      "normalized_sha256": "11840b24a11d7f94f39c6aaab074750ae4e4de4ef54ee4b1dd97e16ebd485e61"
+    },
+    ".agents/skills/baseline-ui/SKILL.md": {
+      "sha256": "fea3322f36d58fdafafce2aef56e4556dd2ac7b20876b7dff7d8be7f25fa597f",
+      "size": 3419,
+      "normalized_sha256": "fea3322f36d58fdafafce2aef56e4556dd2ac7b20876b7dff7d8be7f25fa597f"
+    },
+    ".agents/skills/create-design-md/SKILL.md": {
+      "sha256": "adba4fa94a9ca0291811ac26405e8fe15c1a6375743a80971c6f895bb837eeed",
+      "size": 16208,
+      "normalized_sha256": "adba4fa94a9ca0291811ac26405e8fe15c1a6375743a80971c6f895bb837eeed"
+    },
+    ".agents/skills/emil-design-eng/SKILL.md": {
+      "sha256": "e71de849347050c2c573c1cf24d742d5a13459557ecffa6e562f08006f46b5b7",
+      "size": 27226,
+      "normalized_sha256": "e71de849347050c2c573c1cf24d742d5a13459557ecffa6e562f08006f46b5b7"
+    },
+    ".agents/skills/find-animation-opportunities/SKILL.md": {
+      "sha256": "91c1243164057fbf824088d12faea937878a757a7ac653e8288b775e8b27b882",
+      "size": 9491,
+      "normalized_sha256": "91c1243164057fbf824088d12faea937878a757a7ac653e8288b775e8b27b882"
+    },
+    ".agents/skills/fixing-accessibility/SKILL.md": {
+      "sha256": "549261e8a53b53a1a20c0ddbf736821e5fc0876ad82eee76e0efab8e9ee9dadf",
+      "size": 4718,
+      "normalized_sha256": "549261e8a53b53a1a20c0ddbf736821e5fc0876ad82eee76e0efab8e9ee9dadf"
+    },
+    ".agents/skills/fixing-metadata/SKILL.md": {
+      "sha256": "b8315ff95a92dcfa48c33e2b4838a31d9448bd46252aab45726549ce865d6547",
+      "size": 4439,
+      "normalized_sha256": "b8315ff95a92dcfa48c33e2b4838a31d9448bd46252aab45726549ce865d6547"
+    },
+    ".agents/skills/fixing-motion-performance/SKILL.md": {
+      "sha256": "0a2d654902bc04263ce68c8c02967ef03f17b482e855360a5463211d99d7baa9",
+      "size": 5565,
+      "normalized_sha256": "0a2d654902bc04263ce68c8c02967ef03f17b482e855360a5463211d99d7baa9"
+    },
+    ".agents/skills/improve-animations/SKILL.md": {
+      "sha256": "68f17bbc4671593d2f43dba26a679243e2153ba5f26965fb7d59df52842534ff",
+      "size": 7915,
+      "normalized_sha256": "68f17bbc4671593d2f43dba26a679243e2153ba5f26965fb7d59df52842534ff"
+    },
+    ".agents/skills/improve-ui/SKILL.md": {
+      "sha256": "fa2ac808f6d9dab7bb3620880b014d2c18e227e5b006102856038096e573e69a",
+      "size": 7830,
+      "normalized_sha256": "fa2ac808f6d9dab7bb3620880b014d2c18e227e5b006102856038096e573e69a"
+    },
+    ".agents/skills/pick-ui-library/SKILL.md": {
+      "sha256": "4b889bd6c08358499ac4a7202b8af71ffbd3485d2468f7b09d0613bbe7b24bf4",
+      "size": 4514,
+      "normalized_sha256": "4b889bd6c08358499ac4a7202b8af71ffbd3485d2468f7b09d0613bbe7b24bf4"
+    },
+    ".agents/skills/prototype/SKILL.md": {
+      "sha256": "2ad8401c4deaddb54947fb65247f790e7b3d8784e35312bcbedbfb1d59cd89ce",
+      "size": 7488,
+      "normalized_sha256": "2ad8401c4deaddb54947fb65247f790e7b3d8784e35312bcbedbfb1d59cd89ce"
+    },
+    ".agents/skills/review-animations/SKILL.md": {
+      "sha256": "61cf8ac0c4c8e1f63385298c546b16c65ca9aec34abddcd04e821c16712d671d",
+      "size": 8108,
+      "normalized_sha256": "61cf8ac0c4c8e1f63385298c546b16c65ca9aec34abddcd04e821c16712d671d"
+    },
+    ".agents/skills/ui-skills-root/SKILL.md": {
+      "sha256": "d4e1033f910467164a9cd3931277c1b309cb87c6d23cb5f184a65bfdf92b1c9c",
+      "size": 1448,
+      "normalized_sha256": "d4e1033f910467164a9cd3931277c1b309cb87c6d23cb5f184a65bfdf92b1c9c"
+    },
+    ".codegraph/.gitignore": {
+      "sha256": "47c0dacebca9f56c9020b68584470dfc51f07650a3719904e98f4b447a5dd003",
+      "size": 229,
+      "normalized_sha256": "47c0dacebca9f56c9020b68584470dfc51f07650a3719904e98f4b447a5dd003"
+    },
+    ".gitattributes": {
+      "sha256": "21fa16a2122e2b0360b47502c577428b645437e08e9e87ffba661f84853cb476",
+      "size": 291,
+      "normalized_sha256": "21fa16a2122e2b0360b47502c577428b645437e08e9e87ffba661f84853cb476"
+    },
+    ".gitignore": {
+      "sha256": "e59ebd0469c5d80048281f6b81b0fd14a5f3c007e5b3e4350ee0138b48bc6cfa",
+      "size": 155,
+      "normalized_sha256": "e59ebd0469c5d80048281f6b81b0fd14a5f3c007e5b3e4350ee0138b48bc6cfa"
+    },
+    "AGENTS.md": {
+      "sha256": "bae90e44109a0b0168451848f1541b0d464ceb7e4abd0797c3ba3fc7f46afe3c",
+      "size": 18587,
+      "normalized_sha256": "bae90e44109a0b0168451848f1541b0d464ceb7e4abd0797c3ba3fc7f46afe3c"
+    },
+    "CLAUDE.md": {
+      "sha256": "340a4d4c00961967cfe4d0cba15e380a2d57a39aacdc1e6d8e18cc6683564b33",
+      "size": 14067,
+      "normalized_sha256": "340a4d4c00961967cfe4d0cba15e380a2d57a39aacdc1e6d8e18cc6683564b33"
+    },
+    "CV3CoreSupport.h": {
+      "sha256": "c72136523f75b5f426be86ae813bc4e2a5514778a7b09861d997a7e15d1cb59f",
+      "size": 6478,
+      "normalized_sha256": "c72136523f75b5f426be86ae813bc4e2a5514778a7b09861d997a7e15d1cb59f"
+    },
+    "CV3FloatingAppWindow.inc": {
+      "sha256": "5cd09789f2818c44a32f4b95d6ce840456a6711b310e85cd31b663bb3567f1ad",
+      "size": 398986,
+      "normalized_sha256": "5cd09789f2818c44a32f4b95d6ce840456a6711b310e85cd31b663bb3567f1ad"
+    },
+    "CV3PrivateAPI.h": {
+      "sha256": "18b97990fe381351e296e7f85cc2e0dd80d75707c189b2d69db25a8383f5f6e4",
+      "size": 1833,
+      "normalized_sha256": "18b97990fe381351e296e7f85cc2e0dd80d75707c189b2d69db25a8383f5f6e4"
+    },
+    "CV3VideoBridge.x": {
+      "sha256": "f34a0328bdf14c97e8d115e1438d5c9bb11550bddb6cf6d79dfd7395d89b280c",
+      "size": 56586,
+      "normalized_sha256": "f34a0328bdf14c97e8d115e1438d5c9bb11550bddb6cf6d79dfd7395d89b280c"
+    },
+    "CV3Window.inc": {
+      "sha256": "b78cc7b2029f5077d3336eacc5b140c9d6dc41d32e0cb9ad2480baa0b3ec5a66",
+      "size": 191722,
+      "normalized_sha256": "b78cc7b2029f5077d3336eacc5b140c9d6dc41d32e0cb9ad2480baa0b3ec5a66"
+    },
+    "CV3WorkspaceSupport.h": {
+      "sha256": "bbec80a6655c85d06f8dd6e680030952761ad5bc20d95dbc5e04236b84064e98",
+      "size": 2889,
+      "normalized_sha256": "bbec80a6655c85d06f8dd6e680030952761ad5bc20d95dbc5e04236b84064e98"
+    },
+    "ChevronV3.plist": {
+      "sha256": "4f6dc3dfce77d213ff2a80a92a6918cb0a9ecd358e80579ce2a64daffd928d17",
+      "size": 57,
+      "normalized_sha256": "4f6dc3dfce77d213ff2a80a92a6918cb0a9ecd358e80579ce2a64daffd928d17"
+    },
+    "ChevronV3Prefs/CV3RootListController.m": {
+      "sha256": "2c99bd7c0649d4d268f9e2edb7d0222564c3b76b7c41568ee2d3482f95556714",
+      "size": 5139,
+      "normalized_sha256": "2c99bd7c0649d4d268f9e2edb7d0222564c3b76b7c41568ee2d3482f95556714"
+    },
+    "ChevronV3Prefs/Resources/Info.plist": {
+      "sha256": "68e67abc67703071effe8741537b58716c3c508d8c7513a96892496ae855385e",
+      "size": 873,
+      "normalized_sha256": "68e67abc67703071effe8741537b58716c3c508d8c7513a96892496ae855385e"
+    },
+    "ChevronV3VideoBridge.plist": {
+      "sha256": "eb42ed2139544069ce7f0f3376e12c5b780472bb1dfb0b0990946b5f2a07f323",
+      "size": 49,
+      "normalized_sha256": "eb42ed2139544069ce7f0f3376e12c5b780472bb1dfb0b0990946b5f2a07f323"
+    },
+    "FEATURE_ROADMAP.md": {
+      "sha256": "7cb56b6a9186847919f4761b4cbf764d3852aee3897e194e9ccf968e4e61db3e",
+      "size": 1693,
+      "normalized_sha256": "7cb56b6a9186847919f4761b4cbf764d3852aee3897e194e9ccf968e4e61db3e"
+    },
+    "FEATURE_TASKS.md": {
+      "sha256": "2ce88b531fbc64e092fd2ec293d79b5ec7185469fc41d69ab507782060c993df",
+      "size": 2815,
+      "normalized_sha256": "2ce88b531fbc64e092fd2ec293d79b5ec7185469fc41d69ab507782060c993df"
+    },
+    "GEMINI.md": {
+      "sha256": "71ab85c7e4c2088b37d1cdcce9dc8858ba35d10b1227a55925aeb718bff6d284",
+      "size": 6216,
+      "normalized_sha256": "71ab85c7e4c2088b37d1cdcce9dc8858ba35d10b1227a55925aeb718bff6d284"
+    },
+    "Makefile": {
+      "sha256": "3ee070b9d6c73991d435d1cde03cddfaa1324df3b1fb141109ed95060facbf6f",
+      "size": 1033,
+      "normalized_sha256": "3ee070b9d6c73991d435d1cde03cddfaa1324df3b1fb141109ed95060facbf6f"
+    },
+    "README.md": {
+      "sha256": "b66fc920a9fcdcbef4ab79b8c911c6d79c761de709cc32cc6526280bf94ea9ed",
+      "size": 1066,
+      "normalized_sha256": "b66fc920a9fcdcbef4ab79b8c911c6d79c761de709cc32cc6526280bf94ea9ed"
+    },
+    "Tweak.x": {
+      "sha256": "af0d52292859d90b019b31617343892a30f791b0d19b0771db0f7329966466b3",
+      "size": 256121,
+      "normalized_sha256": "af0d52292859d90b019b31617343892a30f791b0d19b0771db0f7329966466b3"
+    },
+    "aoci.code.txt": {
+      "sha256": "a0c50e77c9f1af42a26b4a51a4fbb7bf869f7001199d14d763751c1ad3789b97",
+      "size": 17003,
+      "normalized_sha256": "a0c50e77c9f1af42a26b4a51a4fbb7bf869f7001199d14d763751c1ad3789b97"
+    },
+    "aoci.meta.txt": {
+      "role": "index",
+      "sha256": "60ffea0527ae0e1e2b5bf822c119cd3141118cdd33479dec063ee5f9c2114126",
+      "size": 1900,
+      "normalized_sha256": "60ffea0527ae0e1e2b5bf822c119cd3141118cdd33479dec063ee5f9c2114126"
+    },
+    "aoci.txt": {
+      "role": "index",
+      "sha256": "de22dbdaddf0568a8b6bc8aef622ebfc9a703c5b289cb22bac37f1f6b77324a9",
+      "size": 304,
+      "normalized_sha256": "de22dbdaddf0568a8b6bc8aef622ebfc9a703c5b289cb22bac37f1f6b77324a9"
+    },
+    "codegraph.json": {
+      "sha256": "4f565e314f82e8d09b2b31ed9b509daac2795ef17c58641dbe59bf6d90ececf4",
+      "size": 81,
+      "normalized_sha256": "4f565e314f82e8d09b2b31ed9b509daac2795ef17c58641dbe59bf6d90ececf4"
+    },
+    "control": {
+      "sha256": "cb0d9f435229d129718412a4390857769dd69856d878b1ac1b8d91a321b49e56",
+      "size": 234,
+      "normalized_sha256": "cb0d9f435229d129718412a4390857769dd69856d878b1ac1b8d91a321b49e56"
+    },
+    "layout/Library/PreferenceLoader/Preferences/ChevronV3.plist": {
+      "sha256": "fe196c32859eb4a531d70f7de490a3087177f19f58f9de187e6c214ff97fc401",
+      "size": 545,
+      "normalized_sha256": "fe196c32859eb4a531d70f7de490a3087177f19f58f9de187e6c214ff97fc401"
+    },
+    "patch.diff": {
+      "sha256": "67158ce76d632f2d917a19c3aa0692581aeba43dd67367516e89b4afe1497adf",
+      "size": 1663,
+      "normalized_sha256": "67158ce76d632f2d917a19c3aa0692581aeba43dd67367516e89b4afe1497adf"
+    },
+    "test_plan.md": {
+      "sha256": "977dc592c97b1c63a03aa2e1e4cd70b10e6a588746399fe399f00bad2adfc3df",
+      "size": 6995,
+      "normalized_sha256": "977dc592c97b1c63a03aa2e1e4cd70b10e6a588746399fe399f00bad2adfc3df"
+    },
+    "项目要求.rtf": {
+      "sha256": "682df06e15a66d7906590f7b0b191bd9e18f07e3ad0591a2cea74b26a5e53656",
+      "size": 58614,
+      "normalized_sha256": "682df06e15a66d7906590f7b0b191bd9e18f07e3ad0591a2cea74b26a5e53656"
+    }
+  },
+  "managed_scope": {
+    "version": "managed-scope-baseline/v1",
+    "policy_identity": "0a9e69bdeb908605b7d2788fcf9b88b94a6d93746873e49b2b1b8c9b3ca2e6d8",
+    "observe_change_policy": "review_required",
+    "budget_policy_identity": "15e9b37a6c57e9bf03c9df3d0d049eb5b9a7f5540f9d34960408114e2538a32d",
+    "budget_policy": {
+      "version": "cognition-budget-policy/v1",
+      "mode": "enforce",
+      "whole_index": {
+        "target_tokens": 200000,
+        "warning_tokens": 300000,
+        "max_tokens": 400000
+      },
+      "r": [
+        {
+          "min_c": 1,
+          "max_c": 4,
+          "target_tokens": 25,
+          "max_tokens": 50
+        },
+        {
+          "min_c": 5,
+          "max_c": 7,
+          "target_tokens": 45,
+          "max_tokens": 90
+        },
+        {
+          "min_c": 8,
+          "max_c": 8,
+          "target_tokens": 70,
+          "max_tokens": 140
+        },
+        {
+          "min_c": 9,
+          "max_c": 9,
+          "target_tokens": 90,
+          "max_tokens": 180
+        }
+      ],
+      "s": [
+        {
+          "min_c": 1,
+          "max_c": 4,
+          "target_tokens": 20,
+          "max_tokens": 40
+        },
+        {
+          "min_c": 5,
+          "max_c": 7,
+          "target_tokens": 40,
+          "max_tokens": 80
+        },
+        {
+          "min_c": 8,
+          "max_c": 8,
+          "target_tokens": 70,
+          "max_tokens": 140
+        },
+        {
+          "min_c": 9,
+          "max_c": 9,
+          "target_tokens": 100,
+          "max_tokens": 200
+        }
+      ]
+    },
+    "apply_authorization_mode": "auto"
+  }
+}

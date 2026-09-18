@@ -1,0 +1,86 @@
+#AOCI-CODE-VOLUME: 1
+
+===/Users/xu/ChevronLauncher/.agents/skills/animate/===
+SKILL.md[SU6S]: F:按频率、目的、工具、属性、曲线与中断顺序实现可交付的界面动画 | R:code:.agents/skills/review-animations/SKILL.md,code:.agents/skills/pick-ui-library/SKILL.md | A:规定动画准入门、精确时长曲线、降级动效与指针门控 | S:键盘高频动作不动画；组件需求先交给组件库选择流程
+
+===/Users/xu/ChevronLauncher/.agents/skills/animation-vocabulary/===
+SKILL.md[SU4S]: F:把用户对动效的模糊描述映射为受控词汇表中的准确术语 | R:- | A:按意图匹配、原文引用定义并辨析相近术语 | S:不得发明词表外术语，也不负责设计或实现动画
+
+===/Users/xu/ChevronLauncher/.agents/skills/apple-design/===
+SKILL.md[SU6M]: F:将 Apple 的流体交互、材质、排版和设计原则转译为 Web 实践 | R:code:.agents/skills/animate/SKILL.md | A:覆盖即时反馈、1:1拖动、可中断弹簧、速度交接、动量投影与无障碍降级 | S:手势动画必须从当前呈现值继续并继承释放速度，不能锁定输入等待结束
+
+===/Users/xu/ChevronLauncher/.agents/skills/baseline-ui/===
+SKILL.md[SU5T]: F:为前端界面提供组件、交互、动画、排版、布局和性能的最低质量基线 | R:code:.agents/skills/fixing-accessibility/SKILL.md | A:要求复用可访问原语、现有主题与固定层级，并限制昂贵或多余动效 | S:未明确要求时不得添加动画；同一交互面不得混用原语系统
+
+===/Users/xu/ChevronLauncher/.agents/skills/create-design-md/===
+SKILL.md[SG6M]: F:从仓库或公开网页的可验证证据创建或更新规范化 DESIGN.md | R:- | A:以角色、值、来源、范围、复现度和置信度筛选设计令牌与规则，并执行 lint 和导出验证 | S:仅可修改 DESIGN.md；验证通过前不得展示草稿或把偶然实现提升为设计意图
+
+===/Users/xu/ChevronLauncher/.agents/skills/emil-design-eng/===
+SKILL.md[SU6L]: F:汇集 Emil Kowalski 风格的界面打磨、组件设计、动效决策和性能实践 | R:code:.agents/skills/animate/SKILL.md,code:.agents/skills/review-animations/SKILL.md | A:给出动画准入、曲线时长、弹簧手势、CSS 变换、性能和调试准则 | S:评审输出必须使用 Before/After/Why Markdown 表格；首次无具体问题调用只返回规定引导语
+
+===/Users/xu/ChevronLauncher/.agents/skills/find-animation-opportunities/===
+SKILL.md[SU5S]: F:只读扫描界面中真正需要动效的缺口并给出精确实现配方 | R:code:.agents/skills/improve-animations/SKILL.md,code:.agents/skills/review-animations/SKILL.md | A:以频率、目的、速度和功能四道门筛选并同时报告拒绝项 | S:不得修改源码；整应用最多提出5至7项且必须包含2至5个明确拒绝的候选
+
+===/Users/xu/ChevronLauncher/.agents/skills/fixing-accessibility/===
+SKILL.md[SU6S]: F:审计并小范围修复 HTML 可访问名称、键盘、焦点、语义、表单和动效问题 | R:code:.agents/skills/baseline-ui/SKILL.md | A:按严重度优先处理名称、键盘和对话框焦点，并优先使用原生语义和成熟原语 | S:不得以 ARIA 替代已有原生语义，也不得借修复迁移 UI 库或重构无关代码
+
+===/Users/xu/ChevronLauncher/.agents/skills/fixing-metadata/===
+SKILL.md[SN5S]: F:审计并修复网页标题、描述、canonical、社交卡片、图标、结构化数据和索引指令 | R:- | A:优先消除重复和索引错误，并保持 title、description、canonical 与 og:url 一致 | S:社交卡片必须在真实 URL 验证；JSON-LD 只能反映实际渲染内容
+
+===/Users/xu/ChevronLauncher/.agents/skills/fixing-motion-performance/===
+SKILL.md[SP6S]: F:审计并修复布局抖动、滚动驱动、绘制、图层和滤镜造成的动画性能问题 | R:code:.agents/skills/animate/SKILL.md | A:要求先读后写、一次测量、FLIP 或合成属性，并限制图层和模糊范围 | S:不得用 scroll 事件轮询驱动动画；requestAnimationFrame 循环必须有停止条件
+
+===/Users/xu/ChevronLauncher/.agents/skills/improve-animations/===
+SKILL.md[SU6S]: F:只读审计整个代码库的动效并为选定问题编写可独立执行的修复计划 | R:code:.agents/skills/review-animations/SKILL.md,code:.agents/skills/find-animation-opportunities/SKILL.md | A:先侦察技术栈和频率，再并行审计、复核证据、排序并等待用户选项 | S:不得修改产品源码或执行安装构建提交；仅能写 plans 或 animation-plans
+
+===/Users/xu/ChevronLauncher/.agents/skills/improve-ui/===
+SKILL.md[SU6S]: F:按产品自身设计证据审计单一界面表面并为用户选定改进生成实施计划 | R:code:.agents/skills/create-design-md/SKILL.md | A:沿运行时路径重建设计系统，以契约、运行关系和唯一修正三重证据筛选最多三项发现 | S:产品源码严格只读，仅可写 design-plans；没有确定修正或需发明产品意图的候选必须删除
+
+===/Users/xu/ChevronLauncher/.agents/skills/pick-ui-library/===
+SKILL.md[XE4T]: F:按前端任务从受控清单选择一个合适库并优先复用已安装依赖 | R:- | A:覆盖组件原语、动效、图表、拖放、虚拟化、状态和样式工具 | S:仅显式调用；清单有明确答案时不得给出选项菜单
+
+===/Users/xu/ChevronLauncher/.agents/skills/prototype/===
+SKILL.md[XU5T]: F:在隔离选择器中构建三至五个方向真正不同且可交互的 UI 原型 | R:code:.agents/skills/pick-ui-library/SKILL.md | A:先限定单一组件与差异轴，再复用项目令牌构建、验证并等待用户选择后集成 | S:探索期不得触碰生产代码；切换变体必须即时无动画，选定后默认删除原型表面
+
+===/Users/xu/ChevronLauncher/.agents/skills/review-animations/===
+SKILL.md[TU6S]: F:按严格工艺标准评审动画和动效代码并给出阻断或批准结论 | R:code:.agents/skills/animate/SKILL.md,code:.agents/skills/fixing-motion-performance/SKILL.md | A:依据十项硬标准、升级触发器和补救优先级输出 Before/After/Why 表及分级裁决 | S:只评审动效，不写功能或修复；存在高频动画、ease-in、scale(0)或易替代的非GPU动画即阻断
+
+===/Users/xu/ChevronLauncher/.agents/skills/ui-skills-root/===
+SKILL.md[XW5T]: F:通过 ui-skills CLI 为明确的 UI 目标路由最小必要技能上下文 | R:- | A:按主题、技术栈和具体度选择后再实施，目标不清时只问一个问题 | S:默认只选1个技能，广泛评审或多表面工作也不得超过3个
+
+===/Users/xu/ChevronLauncher/.codegraph/===
+.gitignore[XV3T]: F:阻止 CodeGraph 的本机数据库、进程文件、套接字和日志进入版本控制 | R:- | A:忽略目录内全部内容但保留此规则文件 | S:-
+
+===/Users/xu/ChevronLauncher/===
+.gitattributes[FV6T]: F:统一文本文件检出为 LF 以保持跨平台原始字节稳定 | R:code:aoci.txt | A:对自动识别的文本强制 eol=lf，二进制保持自动判定 | S:AOCI 基线依赖精确字节，autocrlf 改写会导致全树误报 stale
+.gitignore[FV5T]: F:排除 Theos 构建产物、软件包、崩溃日志、IDE 文件和机器绑定的 Codex 配置 | R:code:Makefile | A:保持可生成产物与本机代理接入配置不进入版本控制 | S:-
+AGENTS.md[SG9S]: F:规定本项目设备操作、人工复测、证据诊断和 AOCI 认知维护的代理级合同 | R:code:aoci.txt,code:aoci.meta.txt,code:aoci.code.txt | A:设备按 USB SSH、iOS MCP、Tailscale 降级；修复前后均要求日志与截图；索引按机器 Guide 和批次维护 | S:代理不得代替用户完成功能复测或仅凭构建宣称通过；Tailscale 地址每次降级前必须重新查询
+CLAUDE.md[SG5S]: F:记录 iOS 逆向工具链、真机环境、技能分工和操作纪律的常驻代理说明 | R:code:AGENTS.md | A:强调真机优先、自建 Frida、分阶段逆向闭环、隔离环境和目标目录规范 | S:内容含历史项目基线与旧路径，当前 Chevron 开发中的设备和复测规则以 AGENTS.md 为准
+CV3CoreSupport.h[CH7S]: F:提供按 Bundle ID 共享的 mmap 几何状态、引用计数、串行队列和同心圆角工具 | R:code:Tweak.x,code:CV3VideoBridge.x | A:用递归互斥锁保护进程内映射注册表，在 Preferences 下创建共享结构并管理 fd 与映射生命周期 | S:共享结构 magic 固定为0x43563353，文件权限0644；释放计数归零时必须同时 munmap 和 close
+CV3FloatingAppWindow.inc[DU9L]: F:实现单个浮动 App 窗口的 Scene 托管、几何方向、层级、交互、收纳、Expose 和全屏事务 | R:code:Tweak.x,code:CV3CoreSupport.h,code:CV3PrivateAPI.h,code:CV3WorkspaceSupport.h | A:维护托管生命周期与代际恢复，分离外壳和客户端画布方向，统一安全区钳位、磁吸拖放、Z序提升、快照收纳及前台断言 | S:横屏客户端在竖屏 SpringBoard 中必须保留生产者完整画布并只旋转一次；窗口关闭或收纳时不得保存普通布局
+CV3PrivateAPI.h[IG7T]: F:封装 Objective-C 私有类查找、selector 能力检查和安全消息调用 | R:code:Tweak.x,code:CV3WorkspaceSupport.h | A:为零至两个对象参数及 BOOL、NSInteger 返回值提供异常捕获与回退 | S:调用前必须验证 respondsToSelector，异常时返回 nil 或调用方给定回退值
+CV3VideoBridge.x[IM8L]: F:注入目标 App，向 SpringBoard 回报全屏视频方向、播放状态、宿主交互和客户端画布就绪信息 | R:code:Tweak.x,code:ChevronV3VideoBridge.plist,code:CV3CoreSupport.h | A:通过 Darwin notify 协议追踪控制器与 Scene 方向，在托管播放保护期拦截后台生命周期、暂停和音频中断，并记录客户端图层诊断 | S:SpringBoard 是托管 Scene 几何唯一所有者；控制器消失不能直接推断全屏结束，只有完成 dismiss 且 owner 脱离窗口后才恢复方向
+CV3Window.inc[AU9L]: F:实现全局启动器主面板、右侧唤醒手势、应用搜索分类、图标拖出分屏和面板过渡 | R:code:Tweak.x,code:CV3FloatingAppWindow.inc,code:CV3WorkspaceSupport.h | A:动态识别前台 App，保护已托管目标，协调系统搜索与键盘，保持面板视觉组件同进度并把启动请求分派到全屏或浮窗路径 | S:面板隐藏时触控必须透传；系统界面出现时仅降低 windowLevel，不应销毁或隐藏主窗口
+CV3WorkspaceSupport.h[IW7T]: F:从多种 SpringBoard 工作区对象递归解析 Bundle ID 并匹配活动浮窗 | R:code:Tweak.x,code:CV3FloatingAppWindow.inc,code:CV3PrivateAPI.h | A:遍历常见标识 selector 和嵌套实体，使用指针身份集合防环并以描述字符串作兼容回退 | S:递归深度上限12；关闭或收纳的浮窗不能参与工作区实体匹配
+ChevronV3.plist[FV8T]: F:将 ChevronV3 主 tweak 的注入范围限定为 SpringBoard | R:code:Tweak.x,code:Makefile | A:以 MobileSubstrate Filter 指定 com.apple.springboard | S:主窗口与 Scene 管理代码只能注入 SpringBoard 进程
+ChevronV3VideoBridge.plist[FV8T]: F:按 UIApplication 类存在性将视频桥 tweak 注入应用进程 | R:code:CV3VideoBridge.x,code:Makefile | A:使用 MobileSubstrate Classes Filter 覆盖 UIKit App | S:桥接代码会进入广泛应用进程，运行时必须自行排除 SpringBoard 和无 Bundle ID 进程
+FEATURE_ROADMAP.md[SW4T]: F:概述已实现、当前发布、候选和延期的 ChevronV3 功能路线 | R:code:FEATURE_TASKS.md,code:test_plan.md | A:记录 Scene 托管、方向、窗口交互、布局持久化和诊断演进方向 | S:延期项依赖真机兼容性验证，不代表当前实现承诺
+FEATURE_TASKS.md[SW6T]: F:按发布阶段跟踪16项分屏窗口、输入媒体、内容传输和诊断能力 | R:code:FEATURE_ROADMAP.md,code:Tweak.x,code:CV3FloatingAppWindow.inc | A:标记完成度、实现边界和先后门禁，使新增功能与 Scene/键盘/真机验证纪律解耦 | S:视频、隐私和资源保护必须逐项真机测试；图像传输仅承诺 UIPasteboard，不得宣称任意 App 拖放
+GEMINI.md[SG5T]: F:记录 ChevronV3 的历史架构、液态玻璃、手势、方向和开发操作约定 | R:code:Tweak.x,code:CV3Window.inc,code:AGENTS.md | A:汇总早期窗口层级、动态手势绑定、安全区、性能和维护版本经验 | S:包含过时的单文件编辑和旧日志路径等历史约定；当前操作与证据规则以 AGENTS.md 和实际源码为准
+Makefile[OV8T]: F:用 Theos 构建 RootHide 版主 tweak、应用侧视频桥和 Preferences Bundle | R:code:Tweak.x,code:CV3VideoBridge.x,code:ChevronV3Prefs/CV3RootListController.m,code:control | A:目标 iOS 16.5、最低14.0，同时产出 arm64/arm64e 并安装后重启 SpringBoard | S:主 tweak 依赖 AssertionServices 私有框架；部署方案固定为 roothide
+README.md[SG6T]: F:说明 ChevronV3 的产品定位、双 tweak 架构、构建方法和运行诊断入口 | R:code:Makefile,code:Tweak.x,code:CV3VideoBridge.x,code:test_plan.md | A:区分 SpringBoard 侧窗口宿主与 App 侧视频方向回报，并给出 RootHide/iOS 版本边界 | S:运行日志写入 /var/mobile/Library/Logs/ChevronV3_Logs.txt 并在10MB轮转；编译成功不等于真机验证通过
+Tweak.x[EG9L]: F:作为 SpringBoard 注入入口，声明私有 API、全局状态并协调启动器、浮窗、方向、系统界面、通知和工作区 Hook | R:code:CV3Window.inc,code:CV3FloatingAppWindow.inc,code:CV3WorkspaceSupport.h,code:CV3VideoBridge.x,code:CV3PrivateAPI.h,code:CV3CoreSupport.h | A:在 ctor 注册跨进程桥和诊断，Hook Scene/Workspace/Switcher/锁屏控制中心，并按 action 标识将通知默认打开路由到分屏、自定义交互透传系统 | S:方向同步以 UIWindow layoutSubviews 的可信 Scene 上下文为入口；通知长按界面的自定义 action 不得被分屏入口消费；RootHide 注入进程必须通过 /rootfs/var/mobile/Library/Logs/ChevronV3_Logs.txt 写入设备真实日志
+codegraph.json[FQ4T]: F:配置 CodeGraph 将 h、inc 和 Logos x 文件按 Objective-C 解析 | R:code:Tweak.x,code:CV3Window.inc,code:CV3FloatingAppWindow.inc | A:补充非标准扩展名到语言映射以建立符号和调用图 | S:-
+control[OV7T]: F:声明 Debian tweak 包的身份、版本、架构、依赖和维护元数据 | R:code:Makefile | A:要求 mobilesubstrate 与 preferenceloader 并面向 iphoneos-arm64 | S:发布和安装时包标识固定为 com.xu.chevronv3
+patch.diff[XQ3T]: F:保存一组针对面板 hit-test、手势接收、背景点击和横屏键盘路径的历史调试日志补丁 | R:code:CV3Window.inc | A:以统一 diff 形式展示拟插入的 CV3LogToFile 诊断点 | S:该文件是补丁证据而非当前源码，不能据此认定日志已生效
+test_plan.md[TQ8T]: F:定义 ChevronV3 在目标真机上的构建、窗口生命周期、身份隔离、输入、图标、视频方向和故障回归矩阵 | R:code:项目要求.rtf,code:README.md,code:Tweak.x,code:CV3FloatingAppWindow.inc | A:覆盖单窗与多窗、通知分屏、切换器、键盘、横竖屏视频、系统孔位、内存和重启恢复 | S:所有运行行为必须在 iPhone 14 Pro Max iOS 16.5.1 RootHide 真机验证，构建通过不能替代该矩阵
+项目要求.rtf[SB9S]: F:定义 ChevronLauncher 的交互、方向、窗口几何、系统能力、控制条、多窗排列、恢复、隐私日志和验收合同 | R:code:Tweak.x,code:CV3Window.inc,code:CV3FloatingAppWindow.inc,code:CV3VideoBridge.x,code:test_plan.md | A:以系统界面和 App 内容真实状态统一外框、画面与命中几何，规定可中断手势、多窗布局、生命周期恢复和无障碍边界 | S:分屏内视频全屏可恢复，设备级 App 全屏是退出分屏的单向终态，两流程不得混用；只有用户复测且新日志与新截图同时符合条款才能标记已验证
+
+===/Users/xu/ChevronLauncher/ChevronV3Prefs/===
+CV3RootListController.m[EU5T]: F:构建 ChevronV3 偏好页并持久化通知测试与主屏长按编辑设置 | R:code:Tweak.x,code:ChevronV3Prefs/Resources/Info.plist,code:layout/Library/PreferenceLoader/Preferences/ChevronV3.plist | A:使用 Preferences specifier 读写 com.xu.chevronv3 域，并通过 Darwin 通知触发原生通知测试 | S:通知测试默认目标为 com.apple.MobileSMS，发送前必须同步偏好并结束文本编辑
+
+===/Users/xu/ChevronLauncher/ChevronV3Prefs/Resources/===
+Info.plist[FV5T]: F:声明 ChevronV3Prefs 偏好 Bundle 的标识、版本、本地化和入口控制器 | R:code:ChevronV3Prefs/CV3RootListController.m,code:Makefile | A:将 NSPrincipalClass 绑定到 ChevronV3RootListController | S:-
+
+===/Users/xu/ChevronLauncher/layout/Library/PreferenceLoader/Preferences/===
+ChevronV3.plist[FV5T]: F:在 PreferenceLoader 中注册 ChevronV3 设置入口 | R:code:ChevronV3Prefs/CV3RootListController.m,code:ChevronV3Prefs/Resources/Info.plist | A:以 PSLinkCell 打开 ChevronV3Prefs Bundle 的根控制器 | S:-

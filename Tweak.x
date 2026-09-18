@@ -888,10 +888,12 @@ static void CV3WriteFocusedDiagnostic(NSString *message) {
                 eventOnMain ? @"main" : @"background",
                 (CACurrentMediaTime() - eventMono) * 1000.0, message];
 
-            NSString *documents = @"/var/mobile/Documents";
-            NSString *path = [documents stringByAppendingPathComponent:@"ChevronV3_SplitTrace.log"];
+            // RootHide injects SpringBoard into a remapped filesystem namespace;
+            // /rootfs is required to reach the device-visible mobile home.
+            NSString *logsDirectory = @"/rootfs/var/mobile/Library/Logs";
+            NSString *path = [logsDirectory stringByAppendingPathComponent:@"ChevronV3_Logs.txt"];
             NSFileManager *manager = [NSFileManager defaultManager];
-            [manager createDirectoryAtPath:documents
+            [manager createDirectoryAtPath:logsDirectory
                withIntermediateDirectories:YES
                                 attributes:nil
                                      error:nil];
@@ -3652,6 +3654,87 @@ static BOOL CV3LooksLikeBundleIdentifier(NSString *candidate) {
     return YES;
 }
 
+static NSString *CV3NotificationActionIdentifierFromObject(id object, NSUInteger depth) {
+    if (!object || depth > 3) return nil;
+
+    if ([object isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dictionary = (NSDictionary *)object;
+        for (NSString *key in @[@"actionIdentifier", @"identifier"]) {
+            id value = dictionary[key];
+            if ([value isKindOfClass:[NSString class]] && [value length] > 0) return value;
+        }
+        for (NSString *key in @[@"action", @"response", @"notificationAction", @"bulletinAction"]) {
+            NSString *identifier = CV3NotificationActionIdentifierFromObject(dictionary[key], depth + 1);
+            if (identifier.length > 0) return identifier;
+        }
+        return nil;
+    }
+
+    for (NSString *selectorName in @[@"actionIdentifier", @"identifier"]) {
+        id value = CV3InvokeObject(object, NSSelectorFromString(selectorName));
+        if ([value isKindOfClass:[NSString class]] && [value length] > 0) return value;
+    }
+    for (NSString *selectorName in @[@"action", @"response", @"notificationAction", @"bulletinAction"]) {
+        id nested = CV3InvokeObject(object, NSSelectorFromString(selectorName));
+        if (!nested || nested == object) continue;
+        NSString *identifier = CV3NotificationActionIdentifierFromObject(nested, depth + 1);
+        if (identifier.length > 0) return identifier;
+    }
+    return nil;
+}
+
+static NSString *CV3NotificationActionLaunchBundleID(id object, NSUInteger depth) {
+    if (!object || depth > 3) return nil;
+
+    if ([object isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dictionary = (NSDictionary *)object;
+        for (NSString *key in @[@"launchBundleID", @"bundleIdentifier", @"sectionIdentifier", @"sectionID"]) {
+            id value = dictionary[key];
+            if ([value isKindOfClass:[NSString class]] && CV3LooksLikeBundleIdentifier(value)) return value;
+        }
+        for (NSString *key in @[@"action", @"response", @"notificationAction", @"bulletinAction"]) {
+            NSString *bundleID = CV3NotificationActionLaunchBundleID(dictionary[key], depth + 1);
+            if (bundleID.length > 0) return bundleID;
+        }
+        return nil;
+    }
+
+    for (NSString *selectorName in @[@"launchBundleID", @"bundleIdentifier", @"sectionIdentifier", @"sectionID"]) {
+        id value = CV3InvokeObject(object, NSSelectorFromString(selectorName));
+        if ([value isKindOfClass:[NSString class]] && CV3LooksLikeBundleIdentifier(value)) return value;
+    }
+    for (NSString *selectorName in @[@"action", @"response", @"notificationAction", @"bulletinAction"]) {
+        id nested = CV3InvokeObject(object, NSSelectorFromString(selectorName));
+        if (!nested || nested == object) continue;
+        NSString *bundleID = CV3NotificationActionLaunchBundleID(nested, depth + 1);
+        if (bundleID.length > 0) return bundleID;
+    }
+    return nil;
+}
+
+static BOOL CV3NotificationActionIsDefaultOpen(id action, id parameters) {
+    NSString *identifier = CV3NotificationActionIdentifierFromObject(action, 0);
+    if (identifier.length == 0) {
+        identifier = CV3NotificationActionIdentifierFromObject(parameters, 0);
+    }
+
+    if (identifier.length > 0) {
+        return [identifier isEqualToString:@"com.apple.UNNotificationDefaultActionIdentifier"] ||
+               [identifier isEqualToString:@"UNNotificationDefaultActionIdentifier"];
+    }
+
+    for (id object in @[action ?: [NSNull null], parameters ?: [NSNull null]]) {
+        if (object == [NSNull null]) continue;
+        SEL selector = NSSelectorFromString(@"isDefaultAction");
+        if (CV3TargetRespondsToSelector(object, selector) &&
+            ((BOOL (*)(id, SEL))objc_msgSend)(object, selector)) {
+            return YES;
+        }
+    }
+
+    return CV3NotificationActionLaunchBundleID(action, 0).length > 0;
+}
+
 static NSString *CV3NotificationBundleIDFromObject(id object, NSUInteger depth) {
     if (!object || depth > 5) return nil;
 
@@ -4261,27 +4344,38 @@ static void CV3RegisterSimulatedNotificationBridge(void) {
                      executeAction:(id)action
                     withParameters:(id)parameters
                         completion:(id)completion {
-    CV3LogToFile(@"[NotificationSplit] phase=destination.enter source=SBNotificationBannerDestination viewController=%@ action=%@ parameters=%@ completion=%@",
+    NSString *actionIdentifier = CV3NotificationActionIdentifierFromObject(action, 0);
+    if (actionIdentifier.length == 0) {
+        actionIdentifier = CV3NotificationActionIdentifierFromObject(parameters, 0);
+    }
+    BOOL defaultOpenAction = CV3NotificationActionIsDefaultOpen(action, parameters);
+    CV3LogToFile(@"[NotificationSplit] phase=destination.classify source=SBNotificationBannerDestination default=%d identifier=%@ viewController=%@ action=%@ parameters=%@ completion=%@",
+                 defaultOpenAction,
+                 actionIdentifier ?: @"nil",
                  viewController ? NSStringFromClass([viewController class]) : @"nil",
                  action ? NSStringFromClass([action class]) : @"nil",
                  parameters ? NSStringFromClass([parameters class]) : @"nil",
                  completion ? NSStringFromClass([completion class]) : @"nil");
 
-    NSArray *resolutionContext = @[
-        viewController ?: [NSNull null],
-        action ?: [NSNull null],
-        parameters ?: [NSNull null]
-    ];
-    if (CV3HandleUnlockedBannerTap(resolutionContext,
-                                   nil,
-                                   @"SBNotificationBannerDestination.executeAction")) {
-        // The destination completion accepts a success/handled flag on this OS.
-        // Supplying one argument also remains ABI-safe for a parameterless block.
-        if (completion) ((void (^)(BOOL))completion)(YES);
-        CV3LogToFile(@"[NotificationSplit] phase=destination.consumed source=SBNotificationBannerDestination.executeAction");
-        return;
+    if (defaultOpenAction) {
+        NSArray *resolutionContext = @[
+            viewController ?: [NSNull null],
+            action ?: [NSNull null],
+            parameters ?: [NSNull null]
+        ];
+        if (CV3HandleUnlockedBannerTap(resolutionContext,
+                                       nil,
+                                       @"SBNotificationBannerDestination.executeDefaultAction")) {
+            if (completion) ((void (^)(BOOL))completion)(YES);
+            CV3LogToFile(@"[NotificationSplit] phase=destination.consumed source=SBNotificationBannerDestination.executeDefaultAction identifier=%@",
+                         actionIdentifier ?: @"nil");
+            return;
+        }
     }
 
+    CV3LogToFile(@"[NotificationSplit] phase=destination.passthrough source=SBNotificationBannerDestination reason=%@ identifier=%@",
+                 defaultOpenAction ? @"defaultResolutionFailed" : @"interactiveAction",
+                 actionIdentifier ?: @"nil");
     %orig(viewController, action, parameters, completion);
 }
 %end
@@ -5777,7 +5871,7 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
         CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=logger.ready version=1.0.18-79+rotation-window-layout");
         CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=logger.ready version=1.0.18-79+rotation-window-layout");
         CV3LogWindowOrientation(@"[WindowOrientationTrace] phase=logger.ready version=1.0.18-79+rotation-window-layout");
-        CV3LogToFile(@"[Strict] phase=logger.ready version=1.0.18-79+rotation-window-layout path=/rootfs/var/mobile/Documents/ChevronV3_SplitTrace.log");
+        CV3LogToFile(@"[NotificationSplit] phase=logger.ready version=1.0.18-88+roothide-log-path path=/rootfs/var/mobile/Library/Logs/ChevronV3_Logs.txt");
         CV3PublishHostGeneration();
         CV3RegisterVideoOrientationBridge();
         CV3RegisterPlaybackTraceBridge();
