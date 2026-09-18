@@ -1,7 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <CoreMotion/CoreMotion.h>
 #import <QuartzCore/QuartzCore.h>
-#import <AudioToolbox/AudioToolbox.h>
 #import <objc/runtime.h>
 #import <notify.h>
 #import "CV3PrivateAPI.h"
@@ -266,7 +265,6 @@ struct {
     CGFloat parallaxPanelFactor;
     CGFloat parallaxDecoFactor;
     CGFloat lerpFactor;
-    CGFloat hapticThreshold;
     CGFloat tiltMaxAngle;
     CGFloat scrollTiltFactor;
     CGFloat momentumDamping;
@@ -347,7 +345,6 @@ struct {
     .parallaxPanelFactor = 8.0,
     .parallaxDecoFactor = 11.0,
     .lerpFactor = 0.15,
-    .hapticThreshold = 0.6,
     .tiltMaxAngle = 0.12,
     .scrollTiltFactor = 0.0015,
     .momentumDamping = 0.92,
@@ -1835,7 +1832,6 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 - (void)updateSovereigntyAssertion;
 - (void)menuBtnTouchDown:(UIButton *)sender;
 - (void)menuBtnTouchUp:(UIButton *)sender;
-- (void)triggerCollisionImpulse;
 - (void)updateAdaptiveColor;
 - (void)setWindowFocused:(BOOL)focused;
 - (void)promoteFloatingWindowInZOrder;
@@ -2591,8 +2587,6 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 @property (nonatomic, assign) BOOL isSuppressedBySystem; 
 @property (nonatomic, strong) NSMutableArray<CV3AppInfo *> *apps;
 
-@property (nonatomic, strong) UIImpactFeedbackGenerator *feedback;
-@property (nonatomic, strong) UISelectionFeedbackGenerator *selectionFeedback;
 @property (nonatomic, strong) NSTimer *heartbeatTimer;
 @property (nonatomic, strong) NSTimer *panelStateRefreshTimer;
 @property (nonatomic, assign) BOOL isKeyboardVisible; 
@@ -2608,7 +2602,6 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 @property (nonatomic, strong) NSMutableSet *pinnedBundleIDs; 
 @property (nonatomic, strong) UILabel *noResultsLabel;
 @property (nonatomic, assign) NSUInteger appLoadGeneration;
-@property (nonatomic, assign) CGFloat lastHapticX;
 @property (nonatomic, strong) UIScreenEdgePanGestureRecognizer *systemEdgePan;
 @property (nonatomic, assign) NSUInteger edgeEnvironmentSequence;
 @property (nonatomic, assign) BOOL edgeEnvironmentCancelled;

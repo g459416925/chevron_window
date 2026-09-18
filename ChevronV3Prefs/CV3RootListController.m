@@ -86,8 +86,6 @@ static PSSpecifier *CV3Group(NSString *name, NSString *footer) {
     [self.view endEditing:YES];
     CFPreferencesAppSynchronize(CFSTR("com.xu.chevronv3"));
     notify_post("com.xu.chevronv3.simulate-notification");
-    UINotificationFeedbackGenerator *feedback = [[UINotificationFeedbackGenerator alloc] init];
-    [feedback notificationOccurred:UINotificationFeedbackTypeSuccess];
 }
 
 @end

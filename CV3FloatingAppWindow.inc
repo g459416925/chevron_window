@@ -2880,15 +2880,11 @@ static NSString *CV3OrientationResolverTrace(id settings) {
 
 - (void)handleChromeCloseAction:(id)sender {
     CV3ExitExposeModeIfNeeded(self, NO);
-    // 隐藏窗口：触发中等关闭震动
-    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
     [self closeWindow];
 }
 
 - (void)handleChromeMinimizeAction:(id)sender {
     CV3ExitExposeModeIfNeeded(self, NO);
-    // 隐藏窗口：触发中等关闭震动
-    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
     [self handleHideAction];
 }
 
@@ -2896,13 +2892,10 @@ static NSString *CV3OrientationResolverTrace(id settings) {
     CV3ExitExposeModeIfNeeded(self, YES);
     // 绿色按钮点击时弹出多任务菜单（全屏/所有浮窗/关闭）
     CV3LogToFile(@"[MultitaskingMenu] handleChromeModeAction clicked!");
-    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
     [self toggleMultitaskingMenu];
 }
 
 - (void)chromeBtnTouchDown:(UIButton *)sender {
-    // 触发微弱选择震动
-    [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
     [UIView animateWithDuration:0.2 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
         UIView *dot = [sender viewWithTag:999];
         if (dot) {
@@ -2939,7 +2932,6 @@ static NSString *CV3OrientationResolverTrace(id settings) {
 }
 
 - (void)menuBtnTouchDown:(UIButton *)sender {
-    [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
     [UIView animateWithDuration:CV3Style.durationShort delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
         sender.transform = CGAffineTransformMakeScale(CV3Style.menuBtnScale, CV3Style.menuBtnScale);
         sender.alpha = 0.85;
@@ -3192,8 +3184,6 @@ static NSString *CV3OrientationResolverTrace(id settings) {
 - (void)startHomeBarResizeSessionIfNeeded {
     if (self.isLiveResizing) return;
 
-    UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-    [gen impactOccurred];
 
     self.isLiveResizing = YES;
     [self visualShadowLayer].shadowPath = nil;
@@ -3391,16 +3381,10 @@ static NSString *CV3OrientationResolverTrace(id settings) {
 - (void)handleHomeBarTap:(UITapGestureRecognizer *)gesture {
     if (gesture.state != UIGestureRecognizerStateEnded || self.isClosing || self.isStashed) return;
     CV3ExitExposeModeIfNeeded(self, NO);
-    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
     [self handleHideAction];
 }
 
 - (void)handleHomeBarResizePan:(UIPanGestureRecognizer *)gesture {
-    static CGFloat lastHapticOvershoot = 0;
-    static BOOL hasTriggeredTopHaptic = NO;
-    static BOOL hasTriggeredBottomHaptic = NO;
-    static BOOL hasTriggeredSideHaptic = NO;
-
     if (self.isClosing || self.isStashed) return;
 
     if (gesture.state == UIGestureRecognizerStateBegan) {
@@ -3453,10 +3437,6 @@ static NSString *CV3OrientationResolverTrace(id settings) {
         }
         self.homeBarCommandAxis = commandAxis;
         [gesture setTranslation:CGPointZero inView:nil];
-        lastHapticOvershoot = 0;
-        hasTriggeredTopHaptic = NO;
-        hasTriggeredBottomHaptic = NO;
-        hasTriggeredSideHaptic = NO;
         self.homeBarPanMode = 0;
         self.homeBarCommandProjection = 0.0;
     }
@@ -3492,8 +3472,6 @@ static NSString *CV3OrientationResolverTrace(id settings) {
             if (fabs(commandTranslation) > fabs(dominantTranslation) * 1.15) {
                 self.homeBarPanMode = 2;
                 self.homeBarCommandProjection = commandTranslation;
-                UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-                [gen impactOccurred];
                 return;
             }
 
@@ -3508,18 +3486,6 @@ static NSString *CV3OrientationResolverTrace(id settings) {
 
         CGFloat initialLogicalWidth = MIN(self.initialResizeFrame.size.width, self.initialResizeFrame.size.height);
         CGFloat targetWidth = initialLogicalWidth + dominantTranslation * 0.9;
-
-        CGFloat overshoot = 0;
-        if (targetWidth < minAllowedWidth) overshoot = (minAllowedWidth - targetWidth) / (minAllowedWidth * 0.2);
-        else if (targetWidth > maxAllowedWidth) overshoot = (targetWidth - maxAllowedWidth) / (maxAllowedWidth * 0.2);
-
-        if (overshoot > 0.05 && fabs(overshoot - lastHapticOvershoot) > 0.1) {
-            UIImpactFeedbackGenerator *gradientGen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-            [gradientGen impactOccurredWithIntensity:MIN(1.0, overshoot)];
-            lastHapticOvershoot = overshoot;
-        } else if (overshoot <= 0.05) {
-            lastHapticOvershoot = 0;
-        }
 
         NSArray *windowsSnapshot = [floatingWindows copy];
         for (CV3FloatingAppWindow *other in windowsSnapshot) {
@@ -3539,29 +3505,6 @@ static NSString *CV3OrientationResolverTrace(id settings) {
                                                            displayBounds:screenBounds
                                                             orientation:self.targetOrientation];
         CGRect newFrame = [self constrainedFloatingFrameForSize:physicalSize preferredCenter:preferredCenter];
-
-        UIEdgeInsets safeArea = [self currentSafeAreaInsets];
-        if (newFrame.origin.y < safeArea.top && !hasTriggeredTopHaptic) {
-            [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
-            hasTriggeredTopHaptic = YES;
-        } else if (newFrame.origin.y >= safeArea.top) {
-            hasTriggeredTopHaptic = NO;
-        }
-
-        if (CGRectGetMaxY(newFrame) > screenBounds.size.height - safeArea.bottom && !hasTriggeredBottomHaptic) {
-            [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
-            hasTriggeredBottomHaptic = YES;
-        } else if (CGRectGetMaxY(newFrame) <= screenBounds.size.height - safeArea.bottom) {
-            hasTriggeredBottomHaptic = NO;
-        }
-
-        BOOL hitSide = (newFrame.origin.x < safeArea.left || CGRectGetMaxX(newFrame) > screenBounds.size.width - safeArea.right);
-        if (hitSide && !hasTriggeredSideHaptic) {
-            [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
-            hasTriggeredSideHaptic = YES;
-        } else if (!hitSide) {
-            hasTriggeredSideHaptic = NO;
-        }
 
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
@@ -3604,7 +3547,6 @@ static NSString *CV3OrientationResolverTrace(id settings) {
             if (gesture.state == UIGestureRecognizerStateEnded &&
                 (fabs(commandProjection) > 42.0 || fabs(commandVelocity) > 520.0)) {
                 CGFloat commandSignal = fabs(commandVelocity) > 520.0 ? commandVelocity : commandProjection;
-                [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
                 if (commandSignal > 0.0) {
                     CV3ExitExposeModeIfNeeded(nil, NO);
                     CV3LogToFile(@"[FullscreenLaunch] phase=trigger source=homeBar bundle=%@", self.bundleID);
@@ -3697,7 +3639,6 @@ static NSString *CV3OrientationResolverTrace(id settings) {
             CGFloat snapThreshold = 25.0;
             if (fabs(snapFrame.origin.y - safeArea.top) < snapThreshold) {
                 snapFrame.origin.y = safeArea.top;
-                [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
             }
 
             CGFloat currentRatio = finalWidth / shortSide;
@@ -3713,7 +3654,6 @@ static NSString *CV3OrientationResolverTrace(id settings) {
             if (fabs(finalWidth - previousLogicalWidth) > 0.1) {
                 snapFrame.origin.x = initialCenter.x - finalSize.width / 2.0;
                 snapFrame.origin.y = initialCenter.y - finalSize.height / 2.0;
-                [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
             }
 
             snapFrame = [self constrainedFloatingFrameForSize:finalSize preferredCenter:CGPointMake(CGRectGetMidX(snapFrame), CGRectGetMidY(snapFrame))];
@@ -3800,8 +3740,6 @@ static NSString *CV3OrientationResolverTrace(id settings) {
                 self.fullscreenLaunchPending = NO;
                 CV3LogToFile(@"[FullscreenLaunch] phase=request.failed bundle=%@ fallback=%d closing=%d",
                              bundleID, usedFallback, self.isClosing);
-                UINotificationFeedbackGenerator *feedback = [[UINotificationFeedbackGenerator alloc] init];
-                [feedback notificationOccurred:UINotificationFeedbackTypeError];
             }
             CV3EndFullscreenLaunchBypass(bundleID);
         });
@@ -4039,7 +3977,6 @@ static NSString *CV3OrientationResolverTrace(id settings) {
     [self dismissMultitaskingMenu];
     CV3ExitExposeModeIfNeeded(nil, NO);
     CV3LogToFile(@"[FullscreenLaunch] phase=trigger source=windowChrome bundle=%@", self.bundleID);
-    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
     [self activateHostedAppFullscreenAndClose];
 }
 
@@ -4078,7 +4015,6 @@ static NSString *CV3OrientationResolverTrace(id settings) {
         @"public.png": UIImagePNGRepresentation(image)
     }];
     CV3LogToFile(@"[Clipboard] 已复制分屏画面 %@ size=%@", self.bundleID, NSStringFromCGSize(image.size));
-    [self triggerCollisionImpulse];
 }
 
 - (void)handleExposeMenuAction:(id)sender {
@@ -5615,18 +5551,9 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     [self updateResizeHandleAppearance];
 }
 
-- (void)handleGrabberLongPress:(UILongPressGestureRecognizer *)gesture {
-    if (gesture.state == UIGestureRecognizerStateBegan) {
-        UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
-        [gen impactOccurred];
-    }
-}
-
 - (void)handleHideAction {
     [self dismissMultitaskingMenu];
     CV3ExitExposeModeIfNeeded(self, NO);
-    UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-    [gen impactOccurred];
 
     CGRect screen = CV3DisplayBoundsForWindow(self);
     BOOL isNearLeft = (self.center.x < screen.size.width / 2.0);
@@ -5887,11 +5814,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         });
     });
 }
-- (void)triggerCollisionImpulseAtPoint:(CGPoint)point {
-    UIImpactFeedbackGenerator *rigid = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid];
-    [rigid impactOccurredWithIntensity:1.0];
-}
-
 - (UIImage *)sparkImageWithColor:(UIColor *)color {
     CGFloat size = 20.0;
     UIGraphicsBeginImageContextWithOptions(CGSizeMake(size, size), NO, 0);
@@ -5902,10 +5824,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
     UIGraphicsEndImageContext();
     return image;
-}
-
-- (void)triggerCollisionImpulse {
-    [self triggerCollisionImpulseAtPoint:self.center];
 }
 
 - (void)applyCurrentTransformWithScale:(CGFloat)scale {
@@ -6434,8 +6352,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         lastTime = CACurrentMediaTime();
         lastVelocity = CGPointZero;
         
-        UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-        [gen impactOccurred];
     }
     
     if (gesture.state == UIGestureRecognizerStateChanged) {
@@ -6492,7 +6408,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
             BOOL towardTop = (lastVelocity.y < -1800 && self.center.y < 150);
             
             if (towardLeft || towardRight || towardTop) {
-                [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
                 [UIView animateWithDuration:0.45 delay:0 options:UIViewAnimationOptionCurveEaseIn animations:^{
                     self.center = CGPointMake(self.center.x + lastVelocity.x * 0.15, self.center.y + lastVelocity.y * 0.15);
                     self.transform = CGAffineTransformScale(self.transform, 0.01, 0.01);
@@ -6623,8 +6538,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     [self setWindowFocused:YES];
 
     if (self.isStashed) {
-        UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-        [gen impactOccurred];
 
         CGRect iconFrame = self.frame;
         UIView *iconProxy = [self.stashGrabber snapshotViewAfterScreenUpdates:NO];
@@ -6754,9 +6667,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
                 iconProxy.transform = CGAffineTransformScale(iconBaseTransform, 0.86, 0.86);
             }];
         } completion:nil];
-    } else {
-        // 如果没有被隐藏，则执行轻微的脉冲动画提醒用户它已置顶
-        [self triggerCollisionImpulse];
     }
 }
 
@@ -6764,8 +6674,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     if (!self.isStashed) return;
     if (gesture.state == UIGestureRecognizerStateBegan) {
         CV3ExitExposeModeIfNeeded(self, NO);
-        UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
-        [gen impactOccurred];
         
         [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:0 animations:^{
             self.transform = CGAffineTransformMakeScale(0.01, 0.01);
@@ -6789,8 +6697,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
             [self visualShadowLayer].shadowOpacity = 0;
             [self visualShadowLayer].shadowRadius = 0;
         }];
-        UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-        [gen impactOccurred];
     } else if (gesture.state == UIGestureRecognizerStateChanged) {
         // 核心修复：使用增量平移 (Incremental Translation) 替代绝对位置设置，解决“跳动”问题
         self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
@@ -6822,9 +6728,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
             [self updateSovereigntyAssertion]; // 确保 Stash 态优先级同步
             
         } completion:^(BOOL finished) {
-            UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-            [gen impactOccurred];
-            
             for (CV3FloatingAppWindow *win in floatingWindows) {
                 if (win.isStashed) [win updateGrabberStack];
             }
@@ -6989,10 +6892,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 }
 
 - (void)handleResizePan:(UIPanGestureRecognizer *)gesture {
-    static BOOL hasTriggeredTopHaptic = NO;
-    static BOOL hasTriggeredBottomHaptic = NO;
-    static BOOL hasTriggeredSideHaptic = NO;
-
     if (gesture.state == UIGestureRecognizerStateBegan) {
         [self dismissMultitaskingMenu];
         CV3ExitExposeModeIfNeeded(self, YES);
@@ -7000,12 +6899,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         self.isCompactMode = NO;
         self.initialResizeFrame = self.frame;
         [gesture setTranslation:CGPointZero inView:nil];
-        hasTriggeredTopHaptic = NO;
-        hasTriggeredBottomHaptic = NO;
-        hasTriggeredSideHaptic = NO;
-        
-        UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-        [gen impactOccurred];
 
         self.isLiveResizing = YES;
         CALayer *shadowLayer = [self visualShadowLayer];
@@ -7067,20 +6960,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         CGFloat initialLogicalWidth = self.initialResizeFrame.size.width;
         CGFloat targetWidth = initialLogicalWidth * scaleFactor;
         
-        // --- [Geek Advice] Haptic Gradient Implementation ---
-        static CGFloat lastHapticOvershoot = 0;
-        CGFloat overshoot = 0;
-        if (targetWidth < minAllowedWidth) overshoot = (minAllowedWidth - targetWidth) / (minAllowedWidth * 0.2);
-        else if (targetWidth > maxAllowedWidth) overshoot = (targetWidth - maxAllowedWidth) / (maxAllowedWidth * 0.2);
-        
-        if (overshoot > 0.05 && fabs(overshoot - lastHapticOvershoot) > 0.1) {
-            UIImpactFeedbackGenerator *gradientGen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-            [gradientGen impactOccurredWithIntensity:MIN(1.0, overshoot)];
-            lastHapticOvershoot = overshoot;
-        } else if (overshoot <= 0.05) {
-            lastHapticOvershoot = 0;
-        }
-
         // Use copy to avoid mutation during enumeration
         NSArray *windowsSnapshot = [floatingWindows copy];
         for (CV3FloatingAppWindow *other in windowsSnapshot) {
@@ -7110,30 +6989,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         newFrame.origin.x = initialCenter.x - outerWidth / 2.0;
         newFrame.origin.y = initialCenter.y - outerHeight / 2.0;
         
-        UIEdgeInsets safeArea = [self currentSafeAreaInsets];
-        
-        if (newFrame.origin.y < safeArea.top && !hasTriggeredTopHaptic) {
-            [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
-            hasTriggeredTopHaptic = YES;
-        } else if (newFrame.origin.y >= safeArea.top) {
-            hasTriggeredTopHaptic = NO;
-        }
-
-        if (CGRectGetMaxY(newFrame) > screenBounds.size.height - safeArea.bottom && !hasTriggeredBottomHaptic) {
-            [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
-            hasTriggeredBottomHaptic = YES;
-        } else if (CGRectGetMaxY(newFrame) <= screenBounds.size.height - safeArea.bottom) {
-            hasTriggeredBottomHaptic = NO;
-        }
-
-        BOOL hitSide = (newFrame.origin.x < safeArea.left || CGRectGetMaxX(newFrame) > screenBounds.size.width - safeArea.right);
-        if (hitSide && !hasTriggeredSideHaptic) {
-            [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
-            hasTriggeredSideHaptic = YES;
-        } else if (!hitSide) {
-            hasTriggeredSideHaptic = NO;
-        }
-            
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         
@@ -7235,7 +7090,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
             CGFloat snapThreshold = 25.0;
             if (fabs(snapFrame.origin.y - safeArea.top) < snapThreshold) {
                 snapFrame.origin.y = safeArea.top;
-                [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
             }
 
             // Ratio Snapping
@@ -7252,7 +7106,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
             if (fabs(finalWidth - previousLogicalWidth) > 0.1) {
                 snapFrame.origin.x = initialCenter.x - outerWidth / 2.0;
                 snapFrame.origin.y = initialCenter.y - outerHeight / 2.0;
-                [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
             }
 
             // Safety clamp with breath padding to enforce Safe Area Constraint

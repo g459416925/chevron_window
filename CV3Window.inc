@@ -940,7 +940,6 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         return;
     }
     
-    [self.feedback impactOccurred];
     BOOL became = [self.searchField becomeFirstResponder];
     UIInterfaceOrientation orientation = self.targetOrientation != UIInterfaceOrientationUnknown ? self.targetOrientation : UIInterfaceOrientationPortrait;
     CV3LogToFile(@"[Warning][KeyboardDebug] doubleTap becomeFirstResponder=%d isFirstResponder=%d orientation=%ld window=%@ windowScene=%@ accessory=%@",
@@ -958,8 +957,6 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     NSString *bid = [info.bundleId copy];
     CV3AppPanelProtectionState protectionState = CV3AppPanelProtectionStateForBundleID(bid);
     if (protectionState != CV3AppPanelProtectionStateNone) {
-        UINotificationFeedbackGenerator *blockedFeedback = [[UINotificationFeedbackGenerator alloc] init];
-        [blockedFeedback notificationOccurred:UINotificationFeedbackTypeWarning];
         CV3LogToFile(@"[Launcher] 已阻止主App面板操作: 目标=%@, 原因=%@",
                      bid,
                      CV3AppPanelProtectionReason(protectionState) ?: @"Unknown");
@@ -974,8 +971,6 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         self.launchDebounce = NO;
     });
 
-    UIImpactFeedbackGenerator *launcherImpact = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-    [launcherImpact impactOccurred];
 
     NSString *currentActive = CV3CurrentWorkspaceBundleID();
     CV3LogToFile(@"[Launcher] 主App面板应用点击: 目标=%@, 当前前台App=%@", bid, currentActive);
@@ -1081,9 +1076,6 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         if (filterGeneration != self.interactionCount) return;
         if (!CV3ScrollViewIsActivelyControlled(self.collectionView)) {
             [self animateIconsStaggered];
-        }
-        if (hasSearch && self.filteredApps.count > 0) {
-            [self.feedback impactOccurredWithIntensity:0.75];
         }
     });
 
@@ -1421,8 +1413,6 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         [self applyAdaptiveLevel];
         self.backgroundColor = [UIColor clearColor];
         self.apps = [NSMutableArray array];
-        self.feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
-        self.selectionFeedback = [[UISelectionFeedbackGenerator alloc] init];
         
         // 初始化边缘预警层
         self.triggerPreviewLayer = [CAGradientLayer layer];
@@ -1792,8 +1782,6 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
             self.draggedAppInfo = self.filteredApps[indexPath.item];
             CV3AppPanelProtectionState protectionState = CV3AppPanelProtectionStateForBundleID(self.draggedAppInfo.bundleId);
             if (protectionState != CV3AppPanelProtectionStateNone) {
-                UINotificationFeedbackGenerator *blockedFeedback = [[UINotificationFeedbackGenerator alloc] init];
-                [blockedFeedback notificationOccurred:UINotificationFeedbackTypeWarning];
                 CV3LogToFile(@"[Launcher] 已阻止主App面板长按操作: 目标=%@, 原因=%@",
                              self.draggedAppInfo.bundleId,
                              CV3AppPanelProtectionReason(protectionState) ?: @"Unknown");
@@ -1804,7 +1792,6 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 
             CV3ExitExposeModeIfNeeded(nil, NO);
             
-            [self.feedback impactOccurredWithIntensity:0.85];
             
             // 锁定 CollectionView 滚动，防止拖拽时面板跟着滑动
             self.collectionView.scrollEnabled = NO;
@@ -1849,8 +1836,6 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         if (self.draggedIconView && self.draggedAppInfo) {
             CV3AppPanelProtectionState protectionState = CV3AppPanelProtectionStateForBundleID(self.draggedAppInfo.bundleId);
             if (protectionState != CV3AppPanelProtectionStateNone) {
-                UINotificationFeedbackGenerator *blockedFeedback = [[UINotificationFeedbackGenerator alloc] init];
-                [blockedFeedback notificationOccurred:UINotificationFeedbackTypeWarning];
                 CV3LogToFile(@"[Launcher] 已阻止主App面板拖拽完成操作: 目标=%@, 原因=%@",
                              self.draggedAppInfo.bundleId,
                              CV3AppPanelProtectionReason(protectionState) ?: @"Unknown");
@@ -1871,7 +1856,6 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
             BOOL isOutside = !CGRectContainsPoint(self.panelContainer.bounds, pointInPanel);
             
             if (isOutside && gesture.state == UIGestureRecognizerStateEnded) {
-                [self.feedback impactOccurredWithIntensity:1.0];
                 CV3LogToFile(@"[Info] 拖拽出面板，使用自带 App Hosting 开启: %@", self.draggedAppInfo.bundleId);
                 
                 NSString *bundleID = [self.draggedAppInfo.bundleId copy];
@@ -1950,7 +1934,6 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 - (void)handleCategoryTap:(UIButton *)sender {
     CV3ExitExposeModeIfNeeded(nil, NO);
     [self.searchField resignFirstResponder];
-    [self.selectionFeedback selectionChanged]; // 模拟物理拨轮的刻度感
     
     // 从标题中解析出原始分类名，如从 "社交 (12)" 解析出 "社交"
     NSString *fullTitle = sender.titleLabel.text;
@@ -2172,13 +2155,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         targetCenter.x = MAX(hW, MIN(b.size.width - hW, targetCenter.x));
         targetCenter.y = MAX(hH, MIN(b.size.height - hH, targetCenter.y));
 
-        // 建议1：触觉反馈深度耦合 (Haptic Coupling)
-        // 如果检测到位置发生了磁吸偏移，触发一次刚性震动
-        if (!CGPointEqualToPoint(currentCenter, targetCenter)) {
-            UIImpactFeedbackGenerator *rigid = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid];
-            [rigid impactOccurredWithIntensity:1.0];
-        }
-
         CGPoint releaseVelocity = [gesture velocityInView:self.panelContainer.superview];
         CGFloat springVelocity = CV3ClampedSpringVelocity(hypot(releaseVelocity.x, releaseVelocity.y),
                                                           kCV3PanelDragReleaseVelocityDivisor,
@@ -2214,7 +2190,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
     // 建议：把手动态激活 (Handle Flare)
     // 根据手势状态切换把手视觉样式
     if (gesture.state == UIGestureRecognizerStateBegan) {
-        [self.feedback impactOccurredWithIntensity:0.5];
         [CATransaction begin];
         [CATransaction setAnimationDuration:0.25];
         self.resizingHandleLayer.strokeColor = [[UIColor cyanColor] colorWithAlphaComponent:0.8].CGColor;
@@ -2321,13 +2296,9 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
             finalH = minH - ((minH - rawH) * 0.3);
         }
 
-        // 极限反馈判定（在 Begin/Ended 时已经处理了基础颜色，这里处理 Drag 过程中的 Limit 反馈）
+        // 拖动到尺寸极限时使用颜色提示。
         BOOL atLimit = (rawW < minW || rawH < minH || rawW > maxW || rawH > maxH);
         if (atLimit && gesture.state == UIGestureRecognizerStateChanged) {
-            static BOOL lastAtLimit = NO;
-            if (!lastAtLimit) [self.feedback impactOccurredWithIntensity:0.65];
-            lastAtLimit = YES;
-            
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
             self.resizingHandleLayer.strokeColor = [[UIColor redColor] colorWithAlphaComponent:0.8].CGColor; // 触底/触顶变红提示
@@ -2462,7 +2433,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 - (void)handleTrafficLight:(UIButton *)sender {
     CV3ExitExposeModeIfNeeded(nil, NO);
     // 立即反馈
-    [self.feedback impactOccurred];
     [self updateTrafficLightsFocus:NO];
 
     if (sender.tag == 0 || sender.tag == 1) {
@@ -2773,9 +2743,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         self.cachedTargetCenter = [self calculateTargetCenter];
 
         if (!self.isPanelShowing) {
-            [self.feedback impactOccurred];
-            [self.selectionFeedback prepare];
-            self.lastHapticX = 0;
             self.bezierContainer.alpha = 1.0;
             
             [CATransaction begin];
@@ -2805,16 +2772,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
                 self.panelContainer.alpha = triggerProgress * 0.45;
                 CGAffineTransform peekTransform = CGAffineTransformScale(self.baseRotationTransform, 0.91 + triggerProgress * 0.09, 0.91 + triggerProgress * 0.09);
                 self.panelContainer.transform = peekTransform;
-            }
-
-            // 触觉颗粒感 (Tactile Granularity)
-            CGFloat hapticInterval = MAX(8.0, 20.0 - triggerProgress * 12.0);
-            if (fabs(stretch - self.lastHapticX) > hapticInterval) {
-                UIImpactFeedbackGenerator *rigid = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid];
-                [rigid impactOccurredWithIntensity:0.3 + triggerProgress * 0.4];
-                
-                AudioServicesPlaySystemSound(1104); 
-                self.lastHapticX = stretch;
             }
 
             if (stretch > triggerDistance) {
