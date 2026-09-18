@@ -4389,6 +4389,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     
     if (self) {
         self.bundleID = bundleID;
+        CV3SetCameraForegroundGrant(bundleID, YES);
         self.coldLaunchStartTime = CACurrentMediaTime();
         self.coldLaunchTraceID = [NSString stringWithFormat:@"%@-%.0f",
                                   bundleID ?: @"unknown",
@@ -5297,11 +5298,9 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 - (void)updateSovereigntyAssertion {
     if (!self.bundleID || self.isClosing || self.rbsAssertionUnsupported) return;
 
-    // AssertionServices exposes this public private-header contract on iOS 16:
-    // BackgroundUI reason=7, flags PreventSuspend=1,
-    // PreventThrottleDownCPU=2, AllowIdleSleep=4 and
-    // WantsForegroundResourcePriority=8.
-    NSUInteger assertionFlags = self.isStashed ? (1 | 4) : (1 | 2 | 8);
+    // iOS 16 rejects the BKSProcessAssertion initializer for this hosted-scene
+    // use case. Acquire the equivalent RunningBoard legacy assertion by PID.
+    NSUInteger assertionFlags = self.isStashed ? 1 : (1 | 2 | 8 | 32);
     NSUInteger assertionReason = 7;
     NSString *attributeName = self.isStashed ? @"BKS.BackgroundUI.Stashed" : @"BKS.BackgroundUI.Foreground";
     if (self.rbsAssertion && [self.rbsAssertionAttributeName isEqualToString:attributeName]) return;
@@ -5317,24 +5316,37 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     if (now < self.rbsAssertionRetryAfter) return;
 
     @try {
-        Class assertionClass = CV3ClassNamed(@"BKSProcessAssertion");
-        if (!assertionClass) {
+        SBApplication *application = [[CV3ClassNamed(@"SBApplicationController") sharedInstance]
+            applicationWithBundleIdentifier:self.bundleID];
+        int pid = (int)CV3InvokeInteger(application, @selector(pid), 0);
+        if (pid <= 0) {
+            id processState = CV3InvokeObject(application, @selector(processState));
+            pid = (int)CV3InvokeInteger(processState, @selector(pid), 0);
+        }
+
+        Class targetClass = CV3ClassNamed(@"RBSTarget");
+        Class attributeClass = CV3ClassNamed(@"RBSLegacyAttribute");
+        Class assertionClass = CV3ClassNamed(@"RBSAssertion");
+        if (pid <= 0 || !targetClass || !attributeClass || !assertionClass) {
             @throw [NSException exceptionWithName:@"CV3RBSConfigurationException"
-                                           reason:@"BKSProcessAssertion is unavailable"
+                                           reason:[NSString stringWithFormat:
+                                               @"RBS assertion dependencies unavailable pid=%d", pid]
                                          userInfo:nil];
         }
 
-        BKSProcessAssertion *replacement = [[assertionClass alloc]
-            initWithBundleIdentifier:self.bundleID
-            flags:assertionFlags
-            reason:assertionReason
-            name:[NSString stringWithFormat:@"ChevronV3 hosted scene (%@)", self.bundleID]
-            withHandler:nil];
-        if (!replacement || !replacement.valid) {
+        id target = [targetClass targetWithPid:pid];
+        id attribute = [attributeClass attributeWithReason:assertionReason flags:assertionFlags];
+        RBSAssertion *replacement = [[assertionClass alloc]
+            initWithExplanation:[NSString stringWithFormat:@"ChevronV3 hosted scene (%@)", self.bundleID]
+            target:target
+            attributes:attribute ? @[attribute] : @[]];
+        NSError *acquisitionError = nil;
+        if (!replacement || ![replacement acquireWithError:&acquisitionError]) {
             [replacement invalidate];
             @throw [NSException exceptionWithName:@"CV3RBSConfigurationException"
-                                           reason:[NSString stringWithFormat:@"BKS BackgroundUI assertion is invalid flags=%lu",
-                                                   (unsigned long)assertionFlags]
+                                           reason:[NSString stringWithFormat:
+                                               @"RBS BackgroundUI assertion acquisition failed pid=%d flags=%lu error=%@",
+                                               pid, (unsigned long)assertionFlags, acquisitionError]
                                          userInfo:nil];
         }
 
@@ -5344,8 +5356,8 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         self.rbsAssertionFailureCount = 0;
         self.rbsAssertionRetryAfter = 0;
         [previous invalidate];
-        CV3LogToFile(@"[Immortality] 已更新 %@ 后台 UI 断言 -> %@ flags=%lu",
-                     self.bundleID, attributeName, (unsigned long)assertionFlags);
+        CV3LogToFile(@"[Immortality] 已更新 %@ 后台 UI 断言 -> %@ pid=%d flags=%lu",
+                     self.bundleID, attributeName, pid, (unsigned long)assertionFlags);
         CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=BKSAssertionAcquired bundle=%@ attribute=%@ flags=%lu",
                      self.bundleID, attributeName, (unsigned long)assertionFlags);
     } @catch (NSException *e) {
@@ -5581,6 +5593,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 
     self.preStashFrame = initialFrame;
     self.isStashed = YES;
+    CV3SetCameraForegroundGrant(self.bundleID, NO);
     self.stashedSide = isNearLeft ? 1 : 2;
     CGRect targetFrame = CV3StackedStashFrameForWindow(self, proposedTargetFrame);
     CGRect targetFrameInWindow = CGRectOffset(targetFrame, -initialFrame.origin.x, -initialFrame.origin.y);
@@ -6557,6 +6570,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         self.stashGrabber.alpha = 0.0;
 
         self.isStashed = NO; // 先解除 Stash 标志，以便下面 updateSettings 时能被识别为前台
+        CV3SetCameraForegroundGrant(self.bundleID, YES);
         [self refreshContentVisibilityGate];
         [self.hostedSession setActive:YES];
         CV3CascadeUpdateSovereigntyAssertions(); // 级联刷新所有窗口前台优先级断言
@@ -7167,6 +7181,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     if (self.isClosing) return;
     CV3ExitExposeModeIfNeeded(self, NO);
     self.isClosing = YES;
+    CV3SetCameraForegroundGrant(self.bundleID, NO);
     self.sceneHostGeneration += 1;
     [self setHostLifecycleState:CV3HostLifecycleStateReleasing reason:@"WindowClosing"];
     [self.hostedSession invalidate];
@@ -7283,6 +7298,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 
 - (void)dealloc {
     CV3LogToFile(@"[Lifecycle] CV3FloatingAppWindow Dealloc: %@", self.bundleID);
+    CV3SetCameraForegroundGrant(self.bundleID, NO);
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [[UIDevice currentDevice] endGeneratingDeviceOrientationNotifications];
     [self.receptionTraceTimer invalidate];
