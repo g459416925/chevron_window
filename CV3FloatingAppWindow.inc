@@ -4622,8 +4622,11 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         // Assertions are refreshed by state changes; this slower watchdog only retries failures.
         self.assertionWatchdogTimer = [NSTimer scheduledTimerWithTimeInterval:15.0 target:self selector:@selector(assertionWatchdogTick:) userInfo:nil repeats:YES];
         
-        // [SHM Lazy Unmapping] 持有共享内存引用计数
-        CV3RetainSharedGeometry(self.bundleID);
+        // Each window owns exactly one registry reference. The ownership bit
+        // makes closeWindow and dealloc safe to call in either order.
+        self.sharedGeometryRetained = CV3RetainSharedGeometry(self.bundleID);
+        CV3LogToFile(@"[ChevronProbe][SharedGeometry] phase=retain bundle=%@ retained=%d",
+                     self.bundleID ?: @"<nil>", self.sharedGeometryRetained);
         [self.hostedSession setActive:YES];
         self.receptionTraceTimer = [NSTimer timerWithTimeInterval:0.25
                                                            target:self
@@ -7216,6 +7219,18 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     }
 }
 
+- (void)releaseSharedGeometryIfNeeded:(NSString *)reason {
+    if (!self.sharedGeometryRetained) {
+        CV3LogToFile(@"[ChevronProbe][SharedGeometry] phase=release.skip bundle=%@ reason=%@ retained=0",
+                     self.bundleID ?: @"<nil>", reason ?: @"unknown");
+        return;
+    }
+    self.sharedGeometryRetained = NO;
+    BOOL released = CV3ReleaseSharedGeometry(self.bundleID);
+    CV3LogToFile(@"[ChevronProbe][SharedGeometry] phase=release bundle=%@ reason=%@ released=%d",
+                 self.bundleID ?: @"<nil>", reason ?: @"unknown", released);
+}
+
 - (void)closeWindow {
     if (self.isClosing) return;
     CV3ExitExposeModeIfNeeded(self, NO);
@@ -7302,8 +7317,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     CV3CascadeUpdateSovereigntyAssertions(); // 级联刷新剩下的窗口前台优先级断言
     CV3UpdateFloatingBackdrop(nil);
     
-    // [SHM Lazy Unmapping] 释放当前窗口对 SHM 的引用计数，若归零则60秒后回收
-    CV3ReleaseSharedGeometry(self.bundleID);
+    [self releaseSharedGeometryIfNeeded:@"closeWindow"];
 }
 
 - (void)assertionWatchdogTick:(NSTimer *)timer {
@@ -7337,6 +7351,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 
 - (void)dealloc {
     CV3LogToFile(@"[Lifecycle] CV3FloatingAppWindow Dealloc: %@", self.bundleID);
+    [self releaseSharedGeometryIfNeeded:@"dealloc"];
     CV3SetCameraForegroundGrant(self.bundleID, NO);
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [[UIDevice currentDevice] endGeneratingDeviceOrientationNotifications];

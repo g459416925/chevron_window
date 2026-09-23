@@ -787,6 +787,11 @@ static void CV3LogToFile(NSString *format, ...) {
     CV3WriteFocusedDiagnostic([NSString stringWithFormat:@"[SplitTrace] %@", details ?: @"<nil>"]);
 }
 
+static void CV3LogCameraGrantMutation(NSString *message) {
+    CV3LogToFile(@"%@", [message stringByTrimmingCharactersInSet:
+                          NSCharacterSet.newlineCharacterSet]);
+}
+
 static CFTimeInterval CV3LastHostedCameraAccessTime = 0;
 static __thread BOOL CV3SuppressRouteChangeVolumeHUD = NO;
 
@@ -1788,6 +1793,7 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 // Pro Enhancements
 @property (nonatomic, assign) BOOL isFocused;
 @property (nonatomic, assign) BOOL isClosing;
+@property (nonatomic, assign) BOOL sharedGeometryRetained;
 @property (nonatomic, assign) BOOL isSuppressedByLockScreen;
 @property (nonatomic, assign) BOOL isInLayout;
 @property (nonatomic, assign) BOOL isMovingWindow;
@@ -1905,6 +1911,7 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 - (void)animateFocusShadow:(BOOL)focused;
 - (void)restoreFromStash;
 - (void)handleHideAction;
+- (void)releaseSharedGeometryIfNeeded:(NSString *)reason;
 - (void)enforceSceneForegroundState;
 - (void)attemptToHostSceneWithRetries:(int)retries delay:(double)delay;
 - (void)attemptToHostSceneWithRetries:(int)retries delay:(double)delay generation:(NSUInteger)generation;
@@ -6048,7 +6055,8 @@ static BOOL CV3ShouldSuppressHostedCameraRouteChangeHUD(id event) {
         CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=logger.ready version=1.0.18-79+rotation-window-layout");
         CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=logger.ready version=1.0.18-79+rotation-window-layout");
         CV3LogWindowOrientation(@"[WindowOrientationTrace] phase=logger.ready version=1.0.18-79+rotation-window-layout");
-        CV3LogToFile(@"[NotificationSplit] phase=logger.ready version=1.0.18-89+roothide-log-path-13 path=/rootfs/var/mobile/Library/Logs/ChevronV3_Logs.txt");
+        CV3LogToFile(@"[NotificationSplit] phase=logger.ready version=1.0.18-94+geometry-release path=/rootfs/var/mobile/Library/Logs/ChevronV3_Logs.txt");
+        CV3SetCameraGrantMutationLogger(CV3LogCameraGrantMutation);
         CV3ResetCameraForegroundGrants();
         CV3PublishHostGeneration();
         CV3RegisterVideoOrientationBridge();
