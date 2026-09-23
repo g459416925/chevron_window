@@ -48,17 +48,20 @@ typedef NS_ENUM(uint8_t, CV3VideoOrientationSource) {
 };
 
 static void CV3AppendCanvasTrace(NSString *line) {
-    if (![line hasPrefix:@"[ReceptionTrace][Client]"] ||
+    BOOL isProbe = [line hasPrefix:@"[ChevronProbe]"];
+    if (!isProbe && (![line hasPrefix:@"[ReceptionTrace][Client]"] ||
         (![line containsString:@"phase=hosted."] &&
-         ![line containsString:@"phase=lifecycle.notification."])) return;
+         ![line containsString:@"phase=lifecycle.notification."]))) return;
     if (line.length > 2048) line = [line substringToIndex:2048];
     static dispatch_queue_t traceQueue;
     static NSString *tracePath;
+    static NSString *mainTracePath;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         traceQueue = dispatch_queue_create("com.xu.chevronv3.client-trace", DISPATCH_QUEUE_SERIAL);
         NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
         tracePath = [documents stringByAppendingPathComponent:@"ChevronV3-Client-Scene.log"];
+        mainTracePath = @"/rootfs/var/mobile/Library/Logs/ChevronV3_Logs.txt";
     });
     NSString *entry = [NSString stringWithFormat:@"%@ pid=%d bundle=%@ mono=%.6f eventUnix=%.6f %@\n",
         NSDate.date, NSProcessInfo.processInfo.processIdentifier,
@@ -82,6 +85,22 @@ static void CV3AppendCanvasTrace(NSString *line) {
                 [handle seekToEndOfFile];
                 [handle writeData:data];
                 [handle closeFile];
+            }
+            // Mirror probe records into the shared SpringBoard log so the
+            // cross-process orientation path can be collected from one file.
+            if (isProbe) {
+                NSFileManager *rootManager = NSFileManager.defaultManager;
+                NSString *directory = [mainTracePath stringByDeletingLastPathComponent];
+                [rootManager createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
+                if (![rootManager fileExistsAtPath:mainTracePath]) {
+                    [rootManager createFileAtPath:mainTracePath contents:nil attributes:nil];
+                }
+                NSFileHandle *mainHandle = [NSFileHandle fileHandleForWritingAtPath:mainTracePath];
+                if (mainHandle) {
+                    [mainHandle seekToEndOfFile];
+                    [mainHandle writeData:data];
+                    [mainHandle closeFile];
+                }
             }
         } @catch (NSException *exception) {
             NSLog(@"[ChevronV3][ClientTrace] writeError=%@", exception.name);
@@ -709,15 +728,23 @@ static UIInterfaceOrientation CV3InterfaceOrientationForMask(UIInterfaceOrientat
     }
 
     if (UIInterfaceOrientationIsLandscape(preferredOrientation)) return preferredOrientation;
+    if (preferredOrientation == UIInterfaceOrientationPortrait ||
+        preferredOrientation == UIInterfaceOrientationPortraitUpsideDown) {
+        return preferredOrientation;
+    }
     return UIInterfaceOrientationUnknown;
 }
 
 static void CV3PostVideoOrientation(UIInterfaceOrientation orientation,
                                     CV3VideoOrientationSource source) {
-    if (orientation == UIInterfaceOrientationUnknown) return;
-
     NSString *bundleID = [NSBundle mainBundle].bundleIdentifier;
     if (bundleID.length == 0 || [bundleID isEqualToString:@"com.apple.springboard"]) return;
+
+    CV3AppendCanvasTrace([NSString stringWithFormat:
+        @"[ChevronProbe] orientation.post requested=%ld previous=%ld source=%u hosted=%d owner=%@",
+        (long)orientation, (long)CV3RequestedInterfaceOrientation, (unsigned int)source,
+        CV3ApplicationIsChevronHosted, NSStringFromClass(CV3VideoOrientationOwner.class)]);
+    if (orientation == UIInterfaceOrientationUnknown) return;
 
     CFTimeInterval now = CACurrentMediaTime();
     uint64_t revision = ++CV3OrientationRequestRevision;
@@ -806,7 +833,13 @@ static void CV3PostOrientationForController(UIViewController *controller) {
 
     UIInterfaceOrientation orientation = CV3InterfaceOrientationForMask(supportedOrientations,
                                                                          preferredOrientation);
-    if (UIInterfaceOrientationIsLandscape(orientation) && CV3ControllerLikelyOwnsFullscreenVideo(controller)) {
+    BOOL likelyOwnsFullscreenVideo = CV3ControllerLikelyOwnsFullscreenVideo(controller);
+    if (UIInterfaceOrientationIsLandscape(orientation) && likelyOwnsFullscreenVideo) {
+        CV3AppendCanvasTrace([NSString stringWithFormat:
+            @"[ChevronProbe] orientation.controller controller=%@ mask=0x%lx preferred=%ld resolved=%ld window=%d",
+            NSStringFromClass(controller.class), (unsigned long)supportedOrientations,
+            (long)preferredOrientation, (long)orientation,
+            controller.viewIfLoaded.window != nil]);
         if (!CV3VideoOrientationOwner) {
             CV3OrientationBeforeVideo = controller.viewIfLoaded.window.windowScene.interfaceOrientation;
         }
@@ -877,7 +910,12 @@ static BOOL CV3FullscreenOwnerBelongsToDismissal(UIViewController *owner,
     SEL selector = NSSelectorFromString(@"interfaceOrientations");
     if (CV3ApplicationIsChevronHosted && preferences && [preferences respondsToSelector:selector]) {
         UIInterfaceOrientationMask mask = ((UIInterfaceOrientationMask (*)(id, SEL))objc_msgSend)(preferences, selector);
-        CV3PostVideoOrientation(CV3InterfaceOrientationForMask(mask, UIInterfaceOrientationUnknown),
+        UIInterfaceOrientation resolved = CV3InterfaceOrientationForMask(mask, UIInterfaceOrientationUnknown);
+        CV3AppendCanvasTrace([NSString stringWithFormat:
+            @"[ChevronProbe] orientation.geometry mask=0x%lx preferred=%ld resolved=%ld hosted=%d",
+            (unsigned long)mask, (long)UIInterfaceOrientationUnknown, (long)resolved,
+            CV3ApplicationIsChevronHosted]);
+        CV3PostVideoOrientation(resolved,
                                 CV3VideoOrientationSourceSceneGeometry);
     }
     %orig(preferences, errorHandler);
@@ -885,7 +923,62 @@ static BOOL CV3FullscreenOwnerBelongsToDismissal(UIViewController *owner,
 %end
 
 %hook UIViewController
+- (void)viewWillTransitionToSize:(CGSize)size
+       withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
+    if (CV3ApplicationIsChevronHosted && size.width > 0.0 && size.height > 0.0) {
+        BOOL transitioningToLandscape = size.width > size.height;
+        UIViewController *owner = CV3VideoOrientationOwner;
+        CV3AppendCanvasTrace([NSString stringWithFormat:
+            @"[ChevronProbe] orientation.transition.observe landscape=%d size=%@ controller=%@ likelyVideo=%d owner=%@",
+            transitioningToLandscape, NSStringFromCGSize(size), NSStringFromClass(self.class),
+            CV3ControllerLikelyOwnsFullscreenVideo(self), NSStringFromClass(owner.class)]);
+
+        if (transitioningToLandscape && CV3ControllerLikelyOwnsFullscreenVideo(self)) {
+            UIInterfaceOrientation orientation =
+                CV3InterfaceOrientationForDeviceOrientation(UIDevice.currentDevice.orientation);
+            if (!UIInterfaceOrientationIsLandscape(orientation)) {
+                @try {
+                    orientation = CV3InterfaceOrientationForMask(
+                        self.supportedInterfaceOrientations,
+                        self.preferredInterfaceOrientationForPresentation);
+                } @catch (__unused NSException *exception) {}
+            }
+            if (!UIInterfaceOrientationIsLandscape(orientation)) {
+                orientation = UIInterfaceOrientationLandscapeRight;
+            }
+            if (!owner) {
+                CV3OrientationBeforeVideo = self.viewIfLoaded.window.windowScene.interfaceOrientation;
+            }
+            CV3VideoOrientationOwner = self;
+            CV3AppendCanvasTrace([NSString stringWithFormat:
+                @"[ChevronProbe] orientation.transition phase=willTransition landscape=1 size=%@ owner=%@ requested=%ld",
+                NSStringFromCGSize(size), NSStringFromClass(self.class), (long)orientation]);
+            CV3PostVideoOrientation(orientation, CV3VideoOrientationSourceController);
+        } else if (!transitioningToLandscape && owner &&
+                   (owner == self || CV3FullscreenOwnerBelongsToDismissal(owner, self))) {
+            UIInterfaceOrientation restoreOrientation = CV3OrientationBeforeVideo;
+            if (!UIInterfaceOrientationIsPortrait(restoreOrientation)) {
+                restoreOrientation = UIInterfaceOrientationPortrait;
+            }
+            CV3AppendCanvasTrace([NSString stringWithFormat:
+                @"[ChevronProbe] orientation.transition phase=willTransition landscape=0 size=%@ owner=%@ requested=%ld",
+                NSStringFromCGSize(size), NSStringFromClass(owner.class), (long)restoreOrientation]);
+            CV3VideoOrientationOwner = nil;
+            CV3OrientationBeforeVideo = UIInterfaceOrientationUnknown;
+            CV3PostVideoOrientation(restoreOrientation,
+                                    CV3VideoOrientationSourceControllerRestore);
+        }
+    }
+    %orig(size, coordinator);
+}
+
 - (void)setNeedsUpdateOfSupportedInterfaceOrientations {
+    if (CV3ApplicationIsChevronHosted) {
+        // Apps such as Douyin rotate their video immediately after this call.
+        // Publish the new controller preference before UIKit starts that work;
+        // the async pass below remains as a fallback for late getter updates.
+        CV3PostOrientationForController(self);
+    }
     %orig;
     if (!CV3ApplicationIsChevronHosted) return;
     __weak UIViewController *weakController = self;
@@ -915,6 +1008,12 @@ static BOOL CV3FullscreenOwnerBelongsToDismissal(UIViewController *owner,
         CV3FullscreenOwnerBelongsToDismissal(owner, self);
     UIInterfaceOrientation restoreOrientation = CV3OrientationBeforeVideo;
     __weak UIViewController *weakOwner = owner;
+    if (CV3ApplicationIsChevronHosted) {
+        CV3AppendCanvasTrace([NSString stringWithFormat:
+            @"[ChevronProbe] orientation.callback api=dismiss controller=%@ owner=%@ containsOwner=%d restore=%ld",
+            NSStringFromClass(self.class), NSStringFromClass(owner.class),
+            dismissalContainsOwner, (long)restoreOrientation]);
+    }
 
     void (^wrappedCompletion)(void) = ^{
         if (completion) completion();
@@ -948,8 +1047,28 @@ static BOOL CV3FullscreenOwnerBelongsToDismissal(UIViewController *owner,
     if (CV3ApplicationIsChevronHosted &&
         [key isEqualToString:@"orientation"] &&
         [value respondsToSelector:@selector(integerValue)]) {
-        CV3PostVideoOrientation(CV3InterfaceOrientationForDeviceOrientation((UIDeviceOrientation)[value integerValue]),
-                                CV3VideoOrientationSourceDeviceKVC);
+        UIDeviceOrientation deviceOrientation = (UIDeviceOrientation)[value integerValue];
+        UIInterfaceOrientation interfaceOrientation =
+            CV3InterfaceOrientationForDeviceOrientation(deviceOrientation);
+        CV3AppendCanvasTrace([NSString stringWithFormat:
+            @"[ChevronProbe] orientation.callback api=deviceKVC device=%ld resolved=%ld",
+            (long)deviceOrientation, (long)interfaceOrientation]);
+        BOOL authoritativeRestore = UIInterfaceOrientationIsPortrait(interfaceOrientation) &&
+            UIInterfaceOrientationIsLandscape(CV3RequestedInterfaceOrientation) &&
+            CV3VideoOrientationOwner != nil;
+        CV3VideoOrientationSource source = authoritativeRestore
+            ? CV3VideoOrientationSourceControllerRestore
+            : CV3VideoOrientationSourceDeviceKVC;
+        if (authoritativeRestore) {
+            CV3AppendCanvasTrace([NSString stringWithFormat:
+                @"[ChevronProbe] orientation.restore.promoted api=deviceKVC owner=%@ requested=%ld",
+                NSStringFromClass(CV3VideoOrientationOwner.class), (long)interfaceOrientation]);
+        }
+        CV3PostVideoOrientation(interfaceOrientation, source);
+        if (authoritativeRestore) {
+            CV3VideoOrientationOwner = nil;
+            CV3OrientationBeforeVideo = UIInterfaceOrientationUnknown;
+        }
     }
     %orig(value, key);
 }
@@ -1179,6 +1298,7 @@ static void CV3InstallHostedAppHooksIfNeeded(void) {
 
 %ctor {
     @autoreleasepool {
+        CV3AppendCanvasTrace([NSString stringWithFormat:@"[ChevronProbe] video.ctor pid=%d bundle=%@", NSProcessInfo.processInfo.processIdentifier, NSBundle.mainBundle.bundleIdentifier ?: @"<nil>"]);
         %init(CV3GlobalIconImageHooks);
 
         NSString *processBundleID = [NSBundle mainBundle].bundleIdentifier.lowercaseString;

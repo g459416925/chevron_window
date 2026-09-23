@@ -3,6 +3,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <substrate.h>
+#include <stdarg.h>
 #import "CV3CameraSupport.h"
 
 typedef BOOL (*CV3CameraAccessGetterIMP)(id, SEL);
@@ -15,11 +16,33 @@ static NSSet<NSString *> *CV3CachedCameraGrantBundleIDs;
 static CFAbsoluteTime CV3CameraGrantCacheTimestamp;
 static CFAbsoluteTime CV3LastHostedCameraAccessNotificationTimestamp;
 
+static void CV3CameraProbe(NSString *format, ...) {
+    va_list args;
+    va_start(args, format);
+    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+    NSLog(@"[ChevronProbe][CameraBridge] pid=%d process=%@ %@",
+          NSProcessInfo.processInfo.processIdentifier,
+          NSProcessInfo.processInfo.processName, message ?: @"<nil>");
+    @try {
+        NSString *path = @"/rootfs/var/mobile/Library/Logs/ChevronV3_Logs.txt";
+        NSString *line = [NSString stringWithFormat:@"[%@][ChevronProbe][CameraBridge] pid=%d process=%@ %@\n",
+                          NSDate.date, NSProcessInfo.processInfo.processIdentifier,
+                          NSProcessInfo.processInfo.processName, message ?: @"<nil>"];
+        NSFileManager *manager = NSFileManager.defaultManager;
+        [manager createDirectoryAtPath:[path stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
+        if (![manager fileExistsAtPath:path]) [manager createFileAtPath:path contents:nil attributes:nil];
+        NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (handle) { [handle seekToEndOfFile]; [handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; [handle closeFile]; }
+    } @catch (__unused NSException *exception) {}
+}
+
 static void CV3InvalidateCameraGrantCache(void) {
     @synchronized (CV3CameraGrantDomain) {
         CV3CachedCameraGrantBundleIDs = nil;
         CV3CameraGrantCacheTimestamp = 0;
     }
+    CV3CameraProbe(@"grant-cache invalidated");
 }
 
 static void CV3CameraGrantStateDidChange(CFNotificationCenterRef center,
@@ -60,6 +83,7 @@ static NSString *CV3CameraClientApplicationIdentifier(id object) {
 static BOOL CV3CameraGrantMatchesClient(id object) {
     NSString *bundleID = CV3CameraClientApplicationIdentifier(object);
     BOOL matched = bundleID.length > 0 && [CV3CurrentCameraGrantBundleIDs() containsObject:bundleID];
+    CV3CameraProbe(@"grant-check bundle=%@ matched=%d", bundleID ?: @"<nil>", matched);
     if (!matched) return NO;
 
     @synchronized (CV3CameraGrantDomain) {
@@ -129,6 +153,7 @@ static void CV3CameraImageDidLoad(const struct mach_header *header, intptr_t sli
 
 %ctor {
     if (!CV3IsTargetCameraDaemon()) return;
+    CV3CameraProbe(@"camera.ctor");
     CFNotificationCenterAddObserver(
         CFNotificationCenterGetDarwinNotifyCenter(), NULL,
         CV3CameraGrantStateDidChange,

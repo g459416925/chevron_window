@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-09-18T11:17:40Z",
-  "updated_at": "2026-09-18T14:26:28Z",
+  "updated_at": "2026-09-23T10:22:11Z",
   "files": {
     ".agents/skills/animate/SKILL.md": {
       "sha256": "2a99870e61971553c0af3185a194c0e557f33aaa81e0422ca2fcec52195a4341",
@@ -109,9 +109,9 @@
       "normalized_sha256": "340a4d4c00961967cfe4d0cba15e380a2d57a39aacdc1e6d8e18cc6683564b33"
     },
     "CV3CameraBridge.x": {
-      "sha256": "e152fbdd19bf94e37bbf6cee1cac210a57f8e1bcf2d5bb7a7d08b54507c7029e",
-      "size": 6021,
-      "normalized_sha256": "e152fbdd19bf94e37bbf6cee1cac210a57f8e1bcf2d5bb7a7d08b54507c7029e"
+      "sha256": "2c676c5f333b70cad7827a2e3d6632015d555e39abbe2157b32b7d95301067af",
+      "size": 7551,
+      "normalized_sha256": "2c676c5f333b70cad7827a2e3d6632015d555e39abbe2157b32b7d95301067af"
     },
     "CV3CameraSupport.h": {
       "sha256": "5e245141b6c7c7e7a9c1933f04970cff9ac9c977bf7b770eb8eea5518b06d3ab",
@@ -124,9 +124,9 @@
       "normalized_sha256": "c72136523f75b5f426be86ae813bc4e2a5514778a7b09861d997a7e15d1cb59f"
     },
     "CV3FloatingAppWindow.inc": {
-      "sha256": "2aedd51bb2736ddf4d082502ee0045ad3bedfe492d6fa5cf66619938856cd00c",
-      "size": 392094,
-      "normalized_sha256": "2aedd51bb2736ddf4d082502ee0045ad3bedfe492d6fa5cf66619938856cd00c"
+      "sha256": "4116ae033f6032defbccd80b8ef98bbb7da40c279985036478f98af773d92f97",
+      "size": 394336,
+      "normalized_sha256": "4116ae033f6032defbccd80b8ef98bbb7da40c279985036478f98af773d92f97"
     },
     "CV3PrivateAPI.h": {
       "sha256": "18b97990fe381351e296e7f85cc2e0dd80d75707c189b2d69db25a8383f5f6e4",
@@ -134,9 +134,9 @@
       "normalized_sha256": "18b97990fe381351e296e7f85cc2e0dd80d75707c189b2d69db25a8383f5f6e4"
     },
     "CV3VideoBridge.x": {
-      "sha256": "f34a0328bdf14c97e8d115e1438d5c9bb11550bddb6cf6d79dfd7395d89b280c",
-      "size": 56586,
-      "normalized_sha256": "f34a0328bdf14c97e8d115e1438d5c9bb11550bddb6cf6d79dfd7395d89b280c"
+      "sha256": "1759e741430215a5ffa42e8b78d30d3215153fb3b7ddf3bf7e9e4b86e75ffd80",
+      "size": 64065,
+      "normalized_sha256": "1759e741430215a5ffa42e8b78d30d3215153fb3b7ddf3bf7e9e4b86e75ffd80"
     },
     "CV3Window.inc": {
       "sha256": "575a12bb0b3609feed8f746c7ced71d43d555d5c329a3d9952bd6be15b6fb6a6",
@@ -199,14 +199,14 @@
       "normalized_sha256": "b66fc920a9fcdcbef4ab79b8c911c6d79c761de709cc32cc6526280bf94ea9ed"
     },
     "Tweak.x": {
-      "sha256": "00a0dda0418c873a05cd8b9bcf7abe56e21b661af5a17e00750dff64688456c5",
-      "size": 258906,
-      "normalized_sha256": "00a0dda0418c873a05cd8b9bcf7abe56e21b661af5a17e00750dff64688456c5"
+      "sha256": "ad6c9af1532ba6f75140229e5a5f986a8f9744da488f7db2ca2c05e7ce87dd30",
+      "size": 265038,
+      "normalized_sha256": "ad6c9af1532ba6f75140229e5a5f986a8f9744da488f7db2ca2c05e7ce87dd30"
     },
     "aoci.code.txt": {
-      "sha256": "60fe65b36857f4a1ec54e921a3f2dbf937c85c4de331d367d8de66d2542c1d0a",
-      "size": 18837,
-      "normalized_sha256": "60fe65b36857f4a1ec54e921a3f2dbf937c85c4de331d367d8de66d2542c1d0a"
+      "sha256": "c72300fe59c363afc62931870696ef142a275ca4adc149e5e73d979e78d428c9",
+      "size": 19635,
+      "normalized_sha256": "c72300fe59c363afc62931870696ef142a275ca4adc149e5e73d979e78d428c9"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -226,9 +226,9 @@
       "normalized_sha256": "4f565e314f82e8d09b2b31ed9b509daac2795ef17c58641dbe59bf6d90ececf4"
     },
     "control": {
-      "sha256": "4e38e005817f0e630de47b8054ba08807c7d1956750b9feaceda4193dee88aae",
-      "size": 234,
-      "normalized_sha256": "4e38e005817f0e630de47b8054ba08807c7d1956750b9feaceda4193dee88aae"
+      "sha256": "e091570293e4ae94d2d2dc6c9e2276951d535834b71403cfc16d3b3f1be56eda",
+      "size": 237,
+      "normalized_sha256": "e091570293e4ae94d2d2dc6c9e2276951d535834b71403cfc16d3b3f1be56eda"
     },
     "layout/Library/PreferenceLoader/Preferences/ChevronV3.plist": {
       "sha256": "fe196c32859eb4a531d70f7de490a3087177f19f58f9de187e6c214ff97fc401",
