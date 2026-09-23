@@ -2460,6 +2460,14 @@ static NSString *CV3OrientationResolverTrace(id settings) {
 
 - (void)applyHostedContentOrientation:(UIInterfaceOrientation)orientation {
     CFTimeInterval orientationStart = CACurrentMediaTime();
+    UIInterfaceOrientation previousHostedOrientation = self.hostedContentOrientation;
+    BOOL animateShellAxisTransition =
+        !self.isStashed && !self.hidden && self.alpha > 0.01 &&
+        CV3IsValidInterfaceOrientation(previousHostedOrientation) &&
+        ((UIInterfaceOrientationIsLandscape(previousHostedOrientation) &&
+          UIInterfaceOrientationIsPortrait(orientation)) ||
+         (UIInterfaceOrientationIsPortrait(previousHostedOrientation) &&
+          UIInterfaceOrientationIsLandscape(orientation)));
     [self recordSurfaceOrientationAudit:@"orientation.request.before" force:YES];
     [self recordStrictSplitTrace:@"orientation.request.received"
                          details:[NSString stringWithFormat:@"requested=%ld", (long)orientation]];
@@ -2529,25 +2537,56 @@ static NSString *CV3OrientationResolverTrace(id settings) {
     [self refreshHostViewPresentation];
     [self recordStrictSplitTrace:@"orientation.afterPresentationRefresh" details:[NSString stringWithFormat:@"elapsedMs=%.3f", (CACurrentMediaTime() - orientationStart) * 1000.0]];
     [self recordProducerGeometryTrace:@"orientation.afterPresentationRefresh"];
+    CGRect portraitRestoreFrame = CGRectZero;
     if (!self.isStashed && UIInterfaceOrientationIsPortrait(orientation) &&
         !CV3ShellShouldBeLandscape(self, orientation) &&
         !CGRectIsEmpty(self.preHostedLandscapePortraitFrame)) {
         CGRect saved = self.preHostedLandscapePortraitFrame;
-        CGRect fitted = [self safeAreaClampedFrame:saved
-                                  preferredCenter:CGPointMake(CGRectGetMidX(saved), CGRectGetMidY(saved))
-                                     preserveSize:NO];
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        self.bounds = CGRectMake(0, 0, fitted.size.width, fitted.size.height);
-        self.center = CGPointMake(CGRectGetMidX(fitted), CGRectGetMidY(fitted));
-        [CATransaction commit];
+        portraitRestoreFrame = [self safeAreaClampedFrame:saved
+                                       preferredCenter:CGPointMake(CGRectGetMidX(saved), CGRectGetMidY(saved))
+                                          preserveSize:NO];
         self.preHostedLandscapePortraitFrame = CGRectZero;
         CV3LogToFile(@"[PortraitWindowRestore] phase=restored bundle=%@ saved=%@ fitted=%@",
-                     self.bundleID, NSStringFromCGRect(saved), NSStringFromCGRect(fitted));
+                     self.bundleID, NSStringFromCGRect(saved), NSStringFromCGRect(portraitRestoreFrame));
     }
     [self setNeedsLayout];
     [self recordStrictSplitTrace:@"orientation.afterSetNeedsLayout" details:nil];
-    [self layoutIfNeeded];
+    void (^applyShellGeometry)(void) = ^{
+        if (!CGRectIsEmpty(portraitRestoreFrame)) {
+            self.bounds = CGRectMake(0, 0,
+                                     portraitRestoreFrame.size.width,
+                                     portraitRestoreFrame.size.height);
+            self.center = CGPointMake(CGRectGetMidX(portraitRestoreFrame),
+                                      CGRectGetMidY(portraitRestoreFrame));
+        }
+        [self layoutIfNeeded];
+    };
+    if (animateShellAxisTransition) {
+        [self recordStrictSplitTrace:@"orientation.shellAnimation.begin"
+                             details:[NSString stringWithFormat:@"from=%ld to=%ld duration=0.220",
+                                      (long)previousHostedOrientation, (long)orientation]];
+        [UIView animateWithDuration:0.22
+                              delay:0.0
+                            options:UIViewAnimationOptionBeginFromCurrentState |
+                                    UIViewAnimationOptionAllowUserInteraction |
+                                    UIViewAnimationOptionCurveEaseInOut
+                         animations:applyShellGeometry
+                         completion:^(BOOL finished) {
+            [self recordStrictSplitTrace:@"orientation.shellAnimation.completed"
+                                 details:[NSString stringWithFormat:@"from=%ld to=%ld finished=%d elapsedMs=%.3f",
+                                          (long)previousHostedOrientation, (long)orientation,
+                                          finished, (CACurrentMediaTime() - orientationStart) * 1000.0]];
+            if (!self.isClosing) {
+                [self synchronizeHostedContextLayerGeometry];
+                [self syncWindowShadowForCurrentState];
+            }
+        }];
+    } else {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        applyShellGeometry();
+        [CATransaction commit];
+    }
     [self recordStrictSplitTrace:@"orientation.afterLayoutIfNeeded" details:[NSString stringWithFormat:@"elapsedMs=%.3f", (CACurrentMediaTime() - orientationStart) * 1000.0]];
     [self recordProducerGeometryTrace:@"orientation.afterLayoutIfNeeded"];
     [self synchronizeHostedContextLayerGeometry];
