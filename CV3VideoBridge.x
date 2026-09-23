@@ -37,6 +37,11 @@ static volatile CFTimeInterval CV3LastVideoPixelBufferCopyTime = 0;
 static CFTimeInterval CV3LandscapeReentrySuppressedUntil = 0;
 static uint64_t CV3OrientationRequestRevision = 0;
 static CFTimeInterval CV3LastHostedInteractionPostTime = 0;
+// Keep the identity that was used to subscribe to the hosted-state lease.
+// Some apps mutate CFBundleIdentifier at runtime, so recomputing the hash from
+// NSBundle.mainBundle during a later touch can no longer identify the window
+// that SpringBoard originally hosted.
+static uint64_t CV3HostedLeaseBundleHash = 0;
 
 typedef NS_ENUM(uint8_t, CV3VideoOrientationSource) {
     CV3VideoOrientationSourceUnknown = 0,
@@ -405,7 +410,8 @@ static uint64_t CV3StableBundleHash(NSString *bundleID) {
 static NSString *CV3HostedStateNotificationName(void) {
     NSString *bundleID = [NSBundle mainBundle].bundleIdentifier;
     if (bundleID.length == 0) return nil;
-    return [NSString stringWithFormat:@"com.xu.chevronv3.hosted.%014llx", CV3StableBundleHash(bundleID)];
+    CV3HostedLeaseBundleHash = CV3StableBundleHash(bundleID);
+    return [NSString stringWithFormat:@"com.xu.chevronv3.hosted.%014llx", CV3HostedLeaseBundleHash];
 }
 
 static void CV3PostPlaybackTrace(CV3PlaybackTraceEvent event) {
@@ -428,16 +434,23 @@ static void CV3PostHostedInteraction(void) {
     if (now - CV3LastHostedInteractionPostTime < 0.08) return;
     CV3LastHostedInteractionPostTime = now;
 
-    NSString *bundleID = [NSBundle mainBundle].bundleIdentifier;
-    if (bundleID.length == 0) return;
+    NSString *runtimeBundleID = [NSBundle mainBundle].bundleIdentifier;
+    uint64_t bundleHash = CV3HostedLeaseBundleHash;
+    if (bundleHash == 0 && runtimeBundleID.length > 0) {
+        bundleHash = CV3StableBundleHash(runtimeBundleID);
+    }
+    if (bundleHash == 0) return;
     if (CV3HostedInteractionNotificationToken < 0 &&
         notify_register_check(CV3HostedInteractionNotification,
                               &CV3HostedInteractionNotificationToken) != NOTIFY_STATUS_OK) {
         CV3HostedInteractionNotificationToken = -1;
         return;
     }
-    notify_set_state(CV3HostedInteractionNotificationToken, CV3StableBundleHash(bundleID));
+    notify_set_state(CV3HostedInteractionNotificationToken, bundleHash);
     notify_post(CV3HostedInteractionNotification);
+    CV3AppendCanvasTrace([NSString stringWithFormat:
+        @"[ChevronProbe] hosted.interaction.post hash=%014llx runtimeBundle=%@",
+        bundleHash, runtimeBundleID ?: @"<nil>"]);
 }
 
 static NSString *CV3BridgeReadyNotificationName(void) {

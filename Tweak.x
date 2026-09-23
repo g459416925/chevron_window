@@ -305,18 +305,12 @@ struct {
     CGFloat trafficCapsuleW;
     CGFloat trafficCapsuleH;
     CGFloat trafficDotSize;
-    CGFloat windowHandleW;
-    CGFloat windowHandleH;
     CGFloat shadowRadiusMask;
     CGFloat shadowOpacityMask;
     CGFloat maskAlpha;
-    CGFloat floatingChromeH;
-    CGFloat floatingChromeControlSize;
     CGFloat floatingChromeCornerRadius;
     CGFloat resizeHandleHitArea;
     CGFloat resizeHandleWindowExpansion;
-    CGFloat trafficLightInactiveGray;
-    CGFloat trafficLightInactiveAlpha;
     CGFloat multitaskingMenuFontSize;
     CGFloat multitaskingMenuIconSize;
     CGFloat menuTintR;
@@ -385,18 +379,12 @@ struct {
     .trafficCapsuleW = 64.0,
     .trafficCapsuleH = 24.0,
     .trafficDotSize = 8.0,
-    .windowHandleW = 58.0,
-    .windowHandleH = 18.0,
     .shadowRadiusMask = 180.0,
     .shadowOpacityMask = 0.85,
     .maskAlpha = 0.18,
-    .floatingChromeH = 28.0,
-    .floatingChromeControlSize = 12.0,
     .floatingChromeCornerRadius = 18.0,
     .resizeHandleHitArea = 80.0,
     .resizeHandleWindowExpansion = 40.0,
-    .trafficLightInactiveGray = 0.78,
-    .trafficLightInactiveAlpha = 0.35,
     .multitaskingMenuFontSize = 11.0,
     .multitaskingMenuIconSize = 13.0,
     .menuTintR = 0.0,
@@ -943,6 +931,7 @@ static BOOL CV3ShouldForceSceneContentState(FBScene *scene, NSString *bundleID) 
 
 static void CV3WriteFocusedDiagnostic(NSString *message) {
     BOOL relevant = [message hasPrefix:@"[ChevronProbe]"] ||
+        [message hasPrefix:@"[HomeBarTrace]"] ||
         [message hasPrefix:@"[SplitTrace] [Error]"] ||
         [message hasPrefix:@"[SplitTrace] [Recovery]"] ||
         [message hasPrefix:@"[SplitTrace] [ChevronProbe]"] ||
@@ -1746,14 +1735,7 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, strong) UIView *hostView;
 @property (nonatomic, copy) NSString *sceneHostingRequester;
 @property (nonatomic, strong) CV3HostedSceneSession *hostedSession;
-@property (nonatomic, strong) UIView *windowChromeView;
-@property (nonatomic, strong) UIView *chromeDragHandle;
-@property (nonatomic, strong) UIButton *chromeCloseButton;
-@property (nonatomic, strong) UIButton *chromeMinimizeButton;
-@property (nonatomic, strong) UIButton *chromeModeButton;
 @property (nonatomic, strong) UIVisualEffectView *multitaskingMenuView;
-@property (nonatomic, assign) BOOL chromeControlsExpanded;
-@property (nonatomic, strong) NSTimer *chromeCollapseTimer;
 @property (nonatomic, strong) UIView *homeBarView;
 @property (nonatomic, strong) UIVisualEffectView *homeBarBlurView;
 @property (nonatomic, strong) CAGradientLayer *homeBarGlowLayer;
