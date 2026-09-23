@@ -2458,16 +2458,76 @@ static NSString *CV3OrientationResolverTrace(id settings) {
                  changed ? @"change" : @"heartbeat", phase ?: @"unknown", signature);
 }
 
+- (BOOL)hostPresentationMatchesOrientation:(UIInterfaceOrientation)orientation {
+    if (!self.hostView || !CV3IsValidInterfaceOrientation(orientation)) return NO;
+    CALayer *presentation = self.hostView.layer.presentationLayer ?: self.hostView.layer;
+    CGSize size = presentation.bounds.size;
+    if (size.width <= 1.0 || size.height <= 1.0) return NO;
+    return UIInterfaceOrientationIsLandscape(orientation)
+        ? size.width > size.height
+        : size.height > size.width;
+}
+
+- (void)finishOrientationShellSyncForGeneration:(NSUInteger)generation reason:(NSString *)reason {
+    if (!self.orientationShellSyncPending ||
+        generation != self.orientationShellSyncGeneration) return;
+
+    UIInterfaceOrientation orientation = self.pendingShellOrientation;
+    UIInterfaceOrientation previousOrientation = self.pendingShellPreviousOrientation;
+    CGRect targetFrame = self.pendingShellTargetFrame;
+    CFTimeInterval elapsedMs = (CACurrentMediaTime() - self.orientationShellSyncStartTime) * 1000.0;
+    self.orientationShellSyncPending = NO;
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    [UIView performWithoutAnimation:^{
+        if (!CGRectIsEmpty(targetFrame)) {
+            self.bounds = CGRectMake(0, 0, targetFrame.size.width, targetFrame.size.height);
+            self.center = CGPointMake(CGRectGetMidX(targetFrame), CGRectGetMidY(targetFrame));
+        }
+        [self setNeedsLayout];
+        [self layoutIfNeeded];
+        [self synchronizeHostedContextLayerGeometry];
+        [self syncWindowShadowForCurrentState];
+    }];
+    [CATransaction commit];
+
+    [self.orientationShellSnapshotView removeFromSuperview];
+    self.orientationShellSnapshotView = nil;
+    self.pendingShellTargetFrame = CGRectZero;
+    [self recordStrictSplitTrace:@"orientation.shellSurfaceSync.completed"
+                         details:[NSString stringWithFormat:@"from=%ld to=%ld reason=%@ elapsedMs=%.3f",
+                                  (long)previousOrientation, (long)orientation,
+                                  reason ?: @"unknown", elapsedMs]];
+    [self recordSurfaceOrientationAudit:@"orientation.shellSurfaceSync.completed" force:YES];
+}
+
+- (void)pollOrientationShellSyncForGeneration:(NSUInteger)generation {
+    if (!self.orientationShellSyncPending || self.isClosing ||
+        generation != self.orientationShellSyncGeneration ||
+        self.hostedContentOrientation != self.pendingShellOrientation) return;
+
+    CFTimeInterval elapsed = CACurrentMediaTime() - self.orientationShellSyncStartTime;
+    if ([self hostPresentationMatchesOrientation:self.pendingShellOrientation]) {
+        [self finishOrientationShellSyncForGeneration:generation reason:@"presentationMatched"];
+        return;
+    }
+
+    if (elapsed >= 0.45) {
+        [self finishOrientationShellSyncForGeneration:generation reason:@"timeoutFallback"];
+        return;
+    }
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.01 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self pollOrientationShellSyncForGeneration:generation];
+    });
+}
+
 - (void)applyHostedContentOrientation:(UIInterfaceOrientation)orientation {
     CFTimeInterval orientationStart = CACurrentMediaTime();
     UIInterfaceOrientation previousHostedOrientation = self.hostedContentOrientation;
-    BOOL animateShellAxisTransition =
-        !self.isStashed && !self.hidden && self.alpha > 0.01 &&
-        CV3IsValidInterfaceOrientation(previousHostedOrientation) &&
-        ((UIInterfaceOrientationIsLandscape(previousHostedOrientation) &&
-          UIInterfaceOrientationIsPortrait(orientation)) ||
-         (UIInterfaceOrientationIsPortrait(previousHostedOrientation) &&
-          UIInterfaceOrientationIsLandscape(orientation)));
+    BOOL isAweme = [self.bundleID isEqualToString:@"com.ss.iphone.ugc.Aweme"];
     [self recordSurfaceOrientationAudit:@"orientation.request.before" force:YES];
     [self recordStrictSplitTrace:@"orientation.request.received"
                          details:[NSString stringWithFormat:@"requested=%ld", (long)orientation]];
@@ -2485,6 +2545,27 @@ static NSString *CV3OrientationResolverTrace(id settings) {
         return;
     }
     UIInterfaceOrientation liveClientOrientation = CV3HostedClientOrientation(self);
+    BOOL awemeStaleLandscapeReassert =
+        isAweme &&
+        UIInterfaceOrientationIsLandscape(previousHostedOrientation) &&
+        UIInterfaceOrientationIsLandscape(orientation) &&
+        UIInterfaceOrientationIsPortrait(liveClientOrientation);
+    if (awemeStaleLandscapeReassert) {
+        [self recordStrictSplitTrace:@"orientation.request.awemeStaleLandscapeRemapped"
+                             details:[NSString stringWithFormat:@"received=%ld effective=%ld liveClient=%ld",
+                                      (long)orientation, (long)liveClientOrientation,
+                                      (long)liveClientOrientation]];
+        CV3LogToFile(@"[OrientationPolicy] phase=awemeStaleLandscapeRemapped bundle=%@ received=%ld effective=%ld liveClient=%ld",
+                     self.bundleID ?: @"nil", (long)orientation,
+                     (long)liveClientOrientation, (long)liveClientOrientation);
+        orientation = liveClientOrientation;
+    }
+    BOOL leavingLandscapeForPortrait =
+        UIInterfaceOrientationIsLandscape(previousHostedOrientation) &&
+        UIInterfaceOrientationIsPortrait(orientation);
+    BOOL enteringLandscapeFromPortrait =
+        UIInterfaceOrientationIsPortrait(previousHostedOrientation) &&
+        UIInterfaceOrientationIsLandscape(orientation);
     BOOL liveClientMatchesRequest =
         CV3IsValidInterfaceOrientation(liveClientOrientation) &&
         liveClientOrientation == orientation;
@@ -2493,6 +2574,44 @@ static NSString *CV3OrientationResolverTrace(id settings) {
                              details:[NSString stringWithFormat:@"requested=%ld", (long)orientation]];
         [self recordVideoFullscreenTrace:@"applyHosted.shortCircuit.sameOrientation" requestedOrientation:orientation];
         return;
+    }
+
+    BOOL synchronizeShellAxisTransition =
+        !isAweme &&
+        !self.isStashed && !self.hidden && self.alpha > 0.01 &&
+        CV3IsValidInterfaceOrientation(previousHostedOrientation) &&
+        (leavingLandscapeForPortrait || enteringLandscapeFromPortrait);
+    if (synchronizeShellAxisTransition) {
+        self.orientationShellSyncGeneration += 1;
+        self.orientationShellSyncPending = YES;
+        self.pendingShellOrientation = orientation;
+        self.pendingShellPreviousOrientation = previousHostedOrientation;
+        self.pendingShellTargetFrame = CGRectZero;
+        self.orientationShellSyncStartTime = CACurrentMediaTime();
+        // drawViewHierarchyInRect cannot capture Douyin's remote video surface.
+        // Its partial UIKit-only image remains visible while the CALayerHost
+        // rotates above it, producing the doubled portrait-page/diagonal-video
+        // composition seen in the device recording.  Do not install that
+        // misleading overlay for Douyin; the live remote surface is the only
+        // complete visual source available during this transition.
+        if (!isAweme && !self.orientationShellSnapshotView) {
+            UIImage *snapshotImage = [self snapshotImageForRestoreAnimation];
+            if (snapshotImage) {
+                UIImageView *snapshotView = [[UIImageView alloc] initWithImage:snapshotImage];
+                snapshotView.frame = self.bounds;
+                snapshotView.contentMode = UIViewContentModeScaleToFill;
+                snapshotView.userInteractionEnabled = NO;
+                snapshotView.layer.cornerRadius = self.layer.cornerRadius;
+                snapshotView.layer.masksToBounds = YES;
+                self.orientationShellSnapshotView = snapshotView;
+                [self addSubview:snapshotView];
+            }
+        }
+        [self recordStrictSplitTrace:@"orientation.shellSurfaceSync.begin"
+                             details:[NSString stringWithFormat:@"from=%ld to=%ld generation=%lu snapshot=%d",
+                                      (long)previousHostedOrientation, (long)orientation,
+                                      (unsigned long)self.orientationShellSyncGeneration,
+                                      self.orientationShellSnapshotView != nil]];
     }
 
     BOOL repairingClientDrift = self.hostedContentOrientation == orientation &&
@@ -2549,6 +2668,9 @@ static NSString *CV3OrientationResolverTrace(id settings) {
         CV3LogToFile(@"[PortraitWindowRestore] phase=restored bundle=%@ saved=%@ fitted=%@",
                      self.bundleID, NSStringFromCGRect(saved), NSStringFromCGRect(portraitRestoreFrame));
     }
+    if (synchronizeShellAxisTransition) {
+        self.pendingShellTargetFrame = portraitRestoreFrame;
+    }
     [self setNeedsLayout];
     [self recordStrictSplitTrace:@"orientation.afterSetNeedsLayout" details:nil];
     void (^applyShellGeometry)(void) = ^{
@@ -2561,27 +2683,19 @@ static NSString *CV3OrientationResolverTrace(id settings) {
         }
         [self layoutIfNeeded];
     };
-    if (animateShellAxisTransition) {
-        [self recordStrictSplitTrace:@"orientation.shellAnimation.begin"
-                             details:[NSString stringWithFormat:@"from=%ld to=%ld duration=0.220",
-                                      (long)previousHostedOrientation, (long)orientation]];
-        [UIView animateWithDuration:0.22
-                              delay:0.0
-                            options:UIViewAnimationOptionBeginFromCurrentState |
-                                    UIViewAnimationOptionAllowUserInteraction |
-                                    UIViewAnimationOptionCurveEaseInOut
-                         animations:applyShellGeometry
-                         completion:^(BOOL finished) {
-            [self recordStrictSplitTrace:@"orientation.shellAnimation.completed"
-                                 details:[NSString stringWithFormat:@"from=%ld to=%ld finished=%d elapsedMs=%.3f",
-                                          (long)previousHostedOrientation, (long)orientation,
-                                          finished, (CACurrentMediaTime() - orientationStart) * 1000.0]];
-            if (!self.isClosing) {
-                [self synchronizeHostedContextLayerGeometry];
-                [self syncWindowShadowForCurrentState];
-            }
-        }];
+    if (synchronizeShellAxisTransition) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        [self layoutIfNeeded];
+        [CATransaction commit];
+        if (self.orientationShellSnapshotView.superview == self) {
+            [self bringSubviewToFront:self.orientationShellSnapshotView];
+        }
+        [self pollOrientationShellSyncForGeneration:self.orientationShellSyncGeneration];
     } else {
+        [self recordStrictSplitTrace:@"orientation.shellGeometry.immediate"
+                             details:[NSString stringWithFormat:@"from=%ld to=%ld",
+                                      (long)previousHostedOrientation, (long)orientation]];
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         applyShellGeometry();
@@ -5736,7 +5850,8 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     // identity, so frame/center calculations continue to use physical points.
     BOOL wantsLandscape = CV3ShellShouldBeLandscape(self, activeOrientation);
     BOOL shellIsLandscape = self.bounds.size.width > self.bounds.size.height;
-    if (wantsLandscape != shellIsLandscape && self.bounds.size.width > 0.0 && self.bounds.size.height > 0.0) {
+    if (wantsLandscape != shellIsLandscape && !self.orientationShellSyncPending &&
+        self.bounds.size.width > 0.0 && self.bounds.size.height > 0.0) {
         CGSize shellSize = self.bounds.size;
         CGRect requested = CGRectMake(0, 0, shellSize.height, shellSize.width);
         CGRect fitted = [self safeAreaClampedFrame:requested
@@ -5745,6 +5860,11 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         self.center = CGPointMake(CGRectGetMidX(fitted), CGRectGetMidY(fitted));
         CV3LogToFile(@"[ViewportFit] phase=orientationSwap bundle=%@ requestedSize=%@ fitted=%@",
                      self.bundleID, NSStringFromCGSize(requested.size), NSStringFromCGRect(fitted));
+    } else if (wantsLandscape != shellIsLandscape && self.orientationShellSyncPending) {
+        [self recordStrictSplitTrace:@"layout.shellSwapDeferred"
+                             details:[NSString stringWithFormat:@"target=%ld wantsLandscape=%d generation=%lu",
+                                      (long)self.pendingShellOrientation, wantsLandscape,
+                                      (unsigned long)self.orientationShellSyncGeneration]];
     }
 
     UIInterfaceOrientation sceneOrientation = self.windowScene
@@ -5893,6 +6013,9 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     }
     if (self.homeBarView && self.homeBarView.superview) {
         [self.homeBarView.superview bringSubviewToFront:self.homeBarView];
+    }
+    if (self.orientationShellSnapshotView.superview == self) {
+        [self bringSubviewToFront:self.orientationShellSnapshotView];
     }
     
     if (!self.isLiveResizing) {

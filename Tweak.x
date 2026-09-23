@@ -1876,6 +1876,13 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, assign) CFTimeInterval pendingPortraitDeadline;
 @property (nonatomic, assign) CFTimeInterval pendingPortraitStableSince;
 @property (nonatomic, assign) CFTimeInterval lastOrientationMapRepairAt;
+@property (nonatomic, assign) BOOL orientationShellSyncPending;
+@property (nonatomic, assign) NSUInteger orientationShellSyncGeneration;
+@property (nonatomic, assign) UIInterfaceOrientation pendingShellOrientation;
+@property (nonatomic, assign) UIInterfaceOrientation pendingShellPreviousOrientation;
+@property (nonatomic, assign) CGRect pendingShellTargetFrame;
+@property (nonatomic, assign) CFTimeInterval orientationShellSyncStartTime;
+@property (nonatomic, strong) UIImageView *orientationShellSnapshotView;
 
 + (CMMotionManager *)sharedMotionManager;
 + (CGRect)initialFrameForBundleID:(NSString *)bundleID
@@ -1935,6 +1942,8 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 - (CGRect)restorableFramePreservingStashedSizeForOrientation:(UIInterfaceOrientation)orientation preferredCenter:(CGPoint)preferredCenter;
 - (CGRect)currentVisualShadowFrame;
 - (UIImage *)snapshotImageForRestoreAnimation;
+- (void)pollOrientationShellSyncForGeneration:(NSUInteger)generation;
+- (void)finishOrientationShellSyncForGeneration:(NSUInteger)generation reason:(NSString *)reason;
 - (void)updateStashedRestoreSnapshotForOrientation:(UIInterfaceOrientation)orientation;
 - (void)animateGenieSurfaceImage:(UIImage *)image
                       sourceFrame:(CGRect)sourceFrame
