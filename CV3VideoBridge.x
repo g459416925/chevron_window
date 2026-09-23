@@ -37,6 +37,7 @@ static volatile CFTimeInterval CV3LastVideoPixelBufferCopyTime = 0;
 static CFTimeInterval CV3LandscapeReentrySuppressedUntil = 0;
 static uint64_t CV3OrientationRequestRevision = 0;
 static CFTimeInterval CV3LastHostedInteractionPostTime = 0;
+static uint64_t CV3AwemeTransitionProbeGeneration = 0;
 // Keep the identity that was used to subscribe to the hosted-state lease.
 // Some apps mutate CFBundleIdentifier at runtime, so recomputing the hash from
 // NSBundle.mainBundle during a later touch can no longer identify the window
@@ -51,6 +52,34 @@ typedef NS_ENUM(uint8_t, CV3VideoOrientationSource) {
     CV3VideoOrientationSourceControllerDisappeared = 4,
     CV3VideoOrientationSourceDeviceKVC = 5,
 };
+
+static NSString *CV3TransitionProbeTransform(CATransform3D transform) {
+    return [NSString stringWithFormat:
+        @"[%.4f,%.4f,%.4f,%.4f;%.4f,%.4f,%.4f,%.4f;%.4f,%.4f,%.4f,%.4f;%.4f,%.4f,%.4f,%.4f]",
+        transform.m11, transform.m12, transform.m13, transform.m14,
+        transform.m21, transform.m22, transform.m23, transform.m24,
+        transform.m31, transform.m32, transform.m33, transform.m34,
+        transform.m41, transform.m42, transform.m43, transform.m44];
+}
+
+static NSString *CV3AwemeTransitionWindowProbe(void) {
+    NSMutableArray<NSString *> *entries = [NSMutableArray array];
+    for (UIWindow *window in UIApplication.sharedApplication.windows ?: @[]) {
+        if (window.hidden || window.alpha < 0.01) continue;
+        CALayer *model = window.layer;
+        CALayer *presentation = model.presentationLayer;
+        [entries addObject:[NSString stringWithFormat:
+            @"%@{bounds=%@ frame=%@ modelT=%@ presBounds=%@ presFrame=%@ presT=%@ scene=%ld}",
+            NSStringFromClass(window.class), NSStringFromCGRect(model.bounds),
+            NSStringFromCGRect(model.frame), CV3TransitionProbeTransform(model.transform),
+            presentation ? NSStringFromCGRect(presentation.bounds) : @"nil",
+            presentation ? NSStringFromCGRect(presentation.frame) : @"nil",
+            presentation ? CV3TransitionProbeTransform(presentation.transform) : @"nil",
+            (long)window.windowScene.interfaceOrientation]];
+        if (entries.count >= 8) break;
+    }
+    return [entries componentsJoinedByString:@" | "];
+}
 
 static void CV3AppendCanvasTrace(NSString *line) {
     BOOL isProbe = [line hasPrefix:@"[ChevronProbe]"];
@@ -767,6 +796,10 @@ static void CV3PostVideoOrientation(UIInterfaceOrientation orientation,
 
     CFTimeInterval now = CACurrentMediaTime();
     uint64_t revision = ++CV3OrientationRequestRevision;
+    BOOL awemeAuthoritativeDeviceReentry =
+        [runtimeBundleID isEqualToString:@"com.ss.iphone.ugc.Aweme"] &&
+        source == CV3VideoOrientationSourceDeviceKVC &&
+        UIInterfaceOrientationIsLandscape(orientation);
     CV3AppendCanvasTrace([NSString stringWithFormat:
         @"[OrientationRequest] requested=%ld previous=%ld source=%u hosted=%d owner=%@ suppressionRemaining=%.3f",
         (long)orientation, (long)CV3RequestedInterfaceOrientation, (unsigned int)source,
@@ -781,7 +814,8 @@ static void CV3PostVideoOrientation(UIInterfaceOrientation orientation,
         // full-screen presentation and can form a portrait/landscape loop.
         CV3LandscapeReentrySuppressedUntil = now + 1.5;
     } else if (UIInterfaceOrientationIsLandscape(orientation) &&
-               now < CV3LandscapeReentrySuppressedUntil) {
+               now < CV3LandscapeReentrySuppressedUntil &&
+               !awemeAuthoritativeDeviceReentry) {
         // Suppression must not permanently lose a real re-entry. Recheck live
         // geometry at the deadline; any newer request invalidates this callback.
         CFTimeInterval deadline = CV3LandscapeReentrySuppressedUntil;
@@ -811,6 +845,20 @@ static void CV3PostVideoOrientation(UIInterfaceOrientation orientation,
             if (confirmed) CV3PostVideoOrientation(orientation, source);
         });
         return;
+    }
+    if (awemeAuthoritativeDeviceReentry && now < CV3LandscapeReentrySuppressedUntil) {
+        // Douyin emits an explicit UIDevice landscape KVC write at the start of
+        // every real full-screen entry.  Its controller tree also emits stale
+        // landscape callbacks while dismissing, which is why the general
+        // suppression window exists.  Deferring the authoritative device write
+        // makes the remote video begin rotating almost a second before the
+        // floating shell follows.  Accept the device signal immediately and
+        // retire the stale-callback window; later controller callbacks now agree
+        // with this committed orientation.
+        CV3AppendCanvasTrace([NSString stringWithFormat:
+            @"[ChevronProbe] orientation.reentry phase=authoritativeDeviceBypass requested=%ld remainingMs=%.3f",
+            (long)orientation, (CV3LandscapeReentrySuppressedUntil - now) * 1000.0]);
+        CV3LandscapeReentrySuppressedUntil = 0;
     }
     CV3RequestedInterfaceOrientation = orientation;
 
@@ -951,6 +999,31 @@ static BOOL CV3FullscreenOwnerBelongsToDismissal(UIViewController *owner,
             @"[ChevronProbe] orientation.transition.observe landscape=%d size=%@ controller=%@ likelyVideo=%d owner=%@",
             transitioningToLandscape, NSStringFromCGSize(size), NSStringFromClass(self.class),
             CV3ControllerLikelyOwnsFullscreenVideo(self), NSStringFromClass(owner.class)]);
+
+        NSString *runtimeBundleID = NSBundle.mainBundle.bundleIdentifier;
+        if ([runtimeBundleID isEqualToString:@"com.ss.iphone.ugc.Aweme"] && coordinator) {
+            uint64_t generation = ++CV3AwemeTransitionProbeGeneration;
+            CFTimeInterval start = CACurrentMediaTime();
+            NSTimeInterval duration = coordinator.transitionDuration;
+            CV3AppendCanvasTrace([NSString stringWithFormat:
+                @"[ChevronProbe] orientation.transition.transaction phase=begin generation=%llu controller=%@ size=%@ durationMs=%.3f animated=%d interactive=%d initiallyInteractive=%d percent=%.5f curve=%ld velocity=%.5f target=%@ windows=[%@]",
+                (unsigned long long)generation, NSStringFromClass(self.class),
+                NSStringFromCGSize(size), duration * 1000.0, coordinator.isAnimated,
+                coordinator.isInteractive, coordinator.initiallyInteractive,
+                coordinator.percentComplete, (long)coordinator.completionCurve,
+                coordinator.completionVelocity,
+                NSStringFromCGAffineTransform(coordinator.targetTransform),
+                CV3AwemeTransitionWindowProbe()]);
+
+            [coordinator animateAlongsideTransition:nil completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+                CV3AppendCanvasTrace([NSString stringWithFormat:
+                    @"[ChevronProbe] orientation.transition.transaction phase=completion generation=%llu elapsedMs=%.3f percent=%.5f cancelled=%d initiallyInteractive=%d windows=[%@]",
+                    (unsigned long long)generation,
+                    (CACurrentMediaTime() - start) * 1000.0,
+                    context.percentComplete, context.isCancelled,
+                    context.initiallyInteractive, CV3AwemeTransitionWindowProbe()]);
+            }];
+        }
 
         if (transitioningToLandscape && CV3ControllerLikelyOwnsFullscreenVideo(self)) {
             UIInterfaceOrientation orientation =
