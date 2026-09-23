@@ -407,6 +407,11 @@ static uint64_t CV3StableBundleHash(NSString *bundleID) {
     return hash & 0x00FFFFFFFFFFFFFFULL;
 }
 
+static uint64_t CV3EffectiveHostedBundleHash(NSString *runtimeBundleID) {
+    if (CV3HostedLeaseBundleHash != 0) return CV3HostedLeaseBundleHash;
+    return runtimeBundleID.length > 0 ? CV3StableBundleHash(runtimeBundleID) : 0;
+}
+
 static NSString *CV3HostedStateNotificationName(void) {
     NSString *bundleID = [NSBundle mainBundle].bundleIdentifier;
     if (bundleID.length == 0) return nil;
@@ -416,14 +421,15 @@ static NSString *CV3HostedStateNotificationName(void) {
 
 static void CV3PostPlaybackTrace(CV3PlaybackTraceEvent event) {
     NSString *bundleID = [NSBundle mainBundle].bundleIdentifier;
-    if (bundleID.length == 0) return;
+    uint64_t bundleHash = CV3EffectiveHostedBundleHash(bundleID);
+    if (bundleHash == 0) return;
     if (CV3PlaybackTraceNotificationToken < 0 &&
         notify_register_check(CV3PlaybackTraceNotification,
                               &CV3PlaybackTraceNotificationToken) != NOTIFY_STATUS_OK) {
         CV3PlaybackTraceNotificationToken = -1;
         return;
     }
-    uint64_t state = (((uint64_t)event) << 56) | CV3StableBundleHash(bundleID);
+    uint64_t state = (((uint64_t)event) << 56) | bundleHash;
     notify_set_state(CV3PlaybackTraceNotificationToken, state);
     notify_post(CV3PlaybackTraceNotification);
 }
@@ -435,10 +441,7 @@ static void CV3PostHostedInteraction(void) {
     CV3LastHostedInteractionPostTime = now;
 
     NSString *runtimeBundleID = [NSBundle mainBundle].bundleIdentifier;
-    uint64_t bundleHash = CV3HostedLeaseBundleHash;
-    if (bundleHash == 0 && runtimeBundleID.length > 0) {
-        bundleHash = CV3StableBundleHash(runtimeBundleID);
-    }
+    uint64_t bundleHash = CV3EffectiveHostedBundleHash(runtimeBundleID);
     if (bundleHash == 0) return;
     if (CV3HostedInteractionNotificationToken < 0 &&
         notify_register_check(CV3HostedInteractionNotification,
@@ -750,13 +753,16 @@ static UIInterfaceOrientation CV3InterfaceOrientationForMask(UIInterfaceOrientat
 
 static void CV3PostVideoOrientation(UIInterfaceOrientation orientation,
                                     CV3VideoOrientationSource source) {
-    NSString *bundleID = [NSBundle mainBundle].bundleIdentifier;
-    if (bundleID.length == 0 || [bundleID isEqualToString:@"com.apple.springboard"]) return;
+    NSString *runtimeBundleID = [NSBundle mainBundle].bundleIdentifier;
+    if ([runtimeBundleID isEqualToString:@"com.apple.springboard"]) return;
+    uint64_t bundleHash = CV3EffectiveHostedBundleHash(runtimeBundleID);
+    if (bundleHash == 0) return;
 
     CV3AppendCanvasTrace([NSString stringWithFormat:
-        @"[ChevronProbe] orientation.post requested=%ld previous=%ld source=%u hosted=%d owner=%@",
+        @"[ChevronProbe] orientation.post requested=%ld previous=%ld source=%u hosted=%d owner=%@ hash=%014llx runtimeBundle=%@",
         (long)orientation, (long)CV3RequestedInterfaceOrientation, (unsigned int)source,
-        CV3ApplicationIsChevronHosted, NSStringFromClass(CV3VideoOrientationOwner.class)]);
+        CV3ApplicationIsChevronHosted, NSStringFromClass(CV3VideoOrientationOwner.class),
+        bundleHash, runtimeBundleID ?: @"<nil>"]);
     if (orientation == UIInterfaceOrientationUnknown) return;
 
     CFTimeInterval now = CACurrentMediaTime();
@@ -821,7 +827,7 @@ static void CV3PostVideoOrientation(UIInterfaceOrientation orientation,
     // real geometry update from a transient controller callback.
     uint8_t payload = (((uint8_t)source & 0x0F) << 4) |
         ((uint8_t)orientation & 0x0F);
-    uint64_t state = CV3StableBundleHash(bundleID) | ((uint64_t)payload << 56);
+    uint64_t state = bundleHash | ((uint64_t)payload << 56);
     notify_set_state(CV3VideoOrientationNotificationToken, state);
     notify_post(CV3VideoOrientationNotification);
 }
