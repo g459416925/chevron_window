@@ -12,8 +12,7 @@ static CV3CameraAccessGetterIMP CV3OriginalApplicationStateMonitorHasBackgroundC
 static CV3CameraAccessGetterIMP CV3OriginalSessionMonitorClientHasBackgroundCameraAccess;
 static BOOL CV3ApplicationStateMonitorHookInstalled;
 static BOOL CV3SessionMonitorClientHookInstalled;
-static NSSet<NSString *> *CV3CachedCameraGrantBundleIDs;
-static CFAbsoluteTime CV3CameraGrantCacheTimestamp;
+static NSMutableDictionary<NSString *, NSNumber *> *CV3CachedCameraGrantStates;
 static CFAbsoluteTime CV3LastHostedCameraAccessNotificationTimestamp;
 
 static void CV3CameraProbe(NSString *format, ...) {
@@ -39,8 +38,7 @@ static void CV3CameraProbe(NSString *format, ...) {
 
 static void CV3InvalidateCameraGrantCache(void) {
     @synchronized (CV3CameraGrantDomain) {
-        CV3CachedCameraGrantBundleIDs = nil;
-        CV3CameraGrantCacheTimestamp = 0;
+        CV3CachedCameraGrantStates = nil;
     }
     CV3CameraProbe(@"grant-cache invalidated");
 }
@@ -53,15 +51,17 @@ static void CV3CameraGrantStateDidChange(CFNotificationCenterRef center,
     CV3InvalidateCameraGrantCache();
 }
 
-static NSSet<NSString *> *CV3CurrentCameraGrantBundleIDs(void) {
+static BOOL CV3CurrentCameraGrantForBundleID(NSString *bundleID) {
+    if (bundleID.length == 0) return NO;
     @synchronized (CV3CameraGrantDomain) {
-        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-        if (CV3CachedCameraGrantBundleIDs && now - CV3CameraGrantCacheTimestamp < 0.25) {
-            return CV3CachedCameraGrantBundleIDs;
+        if (!CV3CachedCameraGrantStates) {
+            CV3CachedCameraGrantStates = [NSMutableDictionary dictionary];
         }
-        CV3CachedCameraGrantBundleIDs = CV3CameraForegroundGrantBundleIDs();
-        CV3CameraGrantCacheTimestamp = now;
-        return CV3CachedCameraGrantBundleIDs;
+        NSNumber *cached = CV3CachedCameraGrantStates[bundleID];
+        if (cached) return cached.boolValue;
+        BOOL granted = CV3CameraForegroundGrantIsGranted(bundleID);
+        CV3CachedCameraGrantStates[bundleID] = @(granted);
+        return granted;
     }
 }
 
@@ -82,7 +82,7 @@ static NSString *CV3CameraClientApplicationIdentifier(id object) {
 
 static BOOL CV3CameraGrantMatchesClient(id object) {
     NSString *bundleID = CV3CameraClientApplicationIdentifier(object);
-    BOOL matched = bundleID.length > 0 && [CV3CurrentCameraGrantBundleIDs() containsObject:bundleID];
+    BOOL matched = CV3CurrentCameraGrantForBundleID(bundleID);
     CV3CameraProbe(@"grant-check bundle=%@ matched=%d", bundleID ?: @"<nil>", matched);
     if (!matched) return NO;
 

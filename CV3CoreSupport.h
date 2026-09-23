@@ -114,8 +114,8 @@ static CV3SharedGeometry *CV3SharedGeometryForBundleID(NSString *bundleID) {
     }
 }
 
-static inline void CV3RetainSharedGeometry(NSString *bundleID) {
-    if (bundleID.length == 0) return;
+static inline BOOL CV3RetainSharedGeometry(NSString *bundleID) {
+    if (bundleID.length == 0) return NO;
     pthread_mutex_t *lock = CV3SharedGeometryLock();
     pthread_mutex_lock(lock);
     NSMutableDictionary *registry = CV3SharedGeometryRegistry();
@@ -130,17 +130,25 @@ static inline void CV3RetainSharedGeometry(NSString *bundleID) {
             entry[@"refCount"] = @(1);
         }
     }
+    BOOL retained = entry != nil;
     pthread_mutex_unlock(lock);
+    return retained;
 }
 
-static inline void CV3ReleaseSharedGeometry(NSString *bundleID) {
-    if (bundleID.length == 0) return;
+static inline BOOL CV3ReleaseSharedGeometry(NSString *bundleID) {
+    if (bundleID.length == 0) return NO;
     pthread_mutex_t *lock = CV3SharedGeometryLock();
     pthread_mutex_lock(lock);
     NSMutableDictionary *registry = CV3SharedGeometryRegistry();
     NSMutableDictionary *entry = registry[bundleID];
+    BOOL released = NO;
     if (entry) {
-        NSInteger ref = [entry[@"refCount"] integerValue] - 1;
+        NSInteger currentRef = [entry[@"refCount"] integerValue];
+        if (currentRef <= 0) {
+            pthread_mutex_unlock(lock);
+            return NO;
+        }
+        NSInteger ref = currentRef - 1;
         if (ref <= 0) {
             CV3SharedGeometry *geometry = [entry[@"pointer"] pointerValue];
             int fd = [entry[@"fd"] intValue];
@@ -154,8 +162,10 @@ static inline void CV3ReleaseSharedGeometry(NSString *bundleID) {
         } else {
             entry[@"refCount"] = @(ref);
         }
+        released = YES;
     }
     pthread_mutex_unlock(lock);
+    return released;
 }
 
 static inline BOOL CV3WriteSharedGeometryForBundleID(NSString *bundleID, float w, float h, int isHosted) {
