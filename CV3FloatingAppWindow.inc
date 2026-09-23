@@ -2734,242 +2734,6 @@ static NSString *CV3OrientationResolverTrace(id settings) {
     }
 }
 
-- (UIButton *)chromeButtonWithTitle:(NSString *)title action:(SEL)action {
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
-    (void)title;
-    button.tintColor = [UIColor clearColor];
-    [button setTitle:nil forState:UIControlStateNormal];
-    [button setImage:nil forState:UIControlStateNormal];
-    button.clipsToBounds = NO;
-    
-    // 视觉圆点作为子视图居中
-    UIView *visualDot = [[UIView alloc] initWithFrame:CGRectZero];
-    visualDot.tag = 999;
-    visualDot.backgroundColor = [UIColor secondaryLabelColor];
-    visualDot.layer.cornerRadius = CV3Style.floatingChromeControlSize / 2.0;
-    visualDot.layer.masksToBounds = YES;
-    visualDot.layer.borderWidth = 0.5 / [UIScreen mainScreen].scale;
-    visualDot.layer.borderColor = [[UIColor blackColor] colorWithAlphaComponent:0.18].CGColor;
-    visualDot.userInteractionEnabled = NO;
-    [button addSubview:visualDot];
-    
-    // macOS 交通灯内部图标符号
-    NSString *symbolName = nil;
-    if (action == @selector(handleChromeCloseAction:)) {
-        symbolName = @"xmark";
-    } else if (action == @selector(handleChromeMinimizeAction:)) {
-        symbolName = @"minus";
-    } else if (action == @selector(handleChromeModeAction:)) {
-        symbolName = @"plus";
-    }
-    
-    if (symbolName) {
-        UIImageView *symbolView = [[UIImageView alloc] initWithFrame:CGRectZero];
-        symbolView.tag = 998;
-        if (@available(iOS 13.0, *)) {
-            UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:6.0 weight:UIImageSymbolWeightBold scale:UIImageSymbolScaleSmall];
-            symbolView.image = [[UIImage systemImageNamed:symbolName withConfiguration:config] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
-        }
-        symbolView.tintColor = [[UIColor blackColor] colorWithAlphaComponent:0.55];
-        symbolView.contentMode = UIViewContentModeScaleAspectFit;
-        symbolView.userInteractionEnabled = NO;
-        symbolView.alpha = 0.0; // 默认隐藏，在 touch down 或悬停时显现
-        [visualDot addSubview:symbolView];
-    }
-    
-    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
-    return button;
-}
-
-- (void)updateFloatingChromeAppearance {
-    self.windowChromeView.backgroundColor = [UIColor clearColor];
-    self.windowChromeView.layer.cornerRadius = 0;
-    self.chromeModeButton.hidden = NO;
-    self.chromeMinimizeButton.hidden = NO;
-    self.chromeCloseButton.hidden = NO;
-
-    // 去掉药丸把手的视觉背景和描边（使其透明，仅保留手势物理拦截区）
-    self.chromeDragHandle.backgroundColor = [UIColor clearColor];
-    self.chromeDragHandle.layer.borderColor = [UIColor clearColor].CGColor;
-    self.chromeDragHandle.layer.borderWidth = 0.0;
-    self.chromeDragHandle.layer.cornerRadius = self.chromeDragHandle.bounds.size.height / 2.0;
-    self.chromeDragHandle.clipsToBounds = NO; // 不裁切子圆点的物理缩放交互边界
-    
-    // 取消生硬投影
-    self.chromeDragHandle.layer.shadowColor = [UIColor clearColor].CGColor;
-    self.chromeDragHandle.layer.shadowOpacity = 0.0;
-
-    // 默认常态显示经典的交通灯配色 (若窗口失焦则显示置灰颜色)
-    NSArray<UIButton *> *buttons = @[self.chromeCloseButton, self.chromeMinimizeButton, self.chromeModeButton];
-    for (UIButton *btn in buttons) {
-        btn.backgroundColor = [UIColor clearColor]; // 物理按钮自身透明
-        btn.layer.borderWidth = 0;
-        btn.alpha = 1.0;
-        
-        UIView *vDot = [btn viewWithTag:999];
-        if (vDot) {
-            vDot.transform = CGAffineTransformIdentity;
-            vDot.layer.borderWidth = 0.5 / [UIScreen mainScreen].scale;
-            vDot.layer.borderColor = [[UIColor blackColor] colorWithAlphaComponent:0.12].CGColor;
-            
-            if (self.isFocused) {
-                // 经典交通灯配色
-                if (btn == self.chromeCloseButton) {
-                    vDot.backgroundColor = [UIColor colorWithRed:1.00 green:0.37 blue:0.33 alpha:1.0]; // macOS 红
-                } else if (btn == self.chromeMinimizeButton) {
-                    vDot.backgroundColor = [UIColor colorWithRed:1.00 green:0.75 blue:0.18 alpha:1.0]; // macOS 黄
-                } else if (btn == self.chromeModeButton) {
-                    vDot.backgroundColor = [UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:1.0]; // macOS 绿
-                }
-            } else {
-                // 失焦时使用全局样式中定义的灰色
-                vDot.backgroundColor = [UIColor colorWithWhite:CV3Style.trafficLightInactiveGray alpha:CV3Style.trafficLightInactiveAlpha];
-            }
-        }
-    }
-
-    [self.windowChromeView sendSubviewToBack:self.chromeDragHandle];
-    [self.windowChromeView bringSubviewToFront:self.chromeCloseButton];
-    [self.windowChromeView bringSubviewToFront:self.chromeMinimizeButton];
-    [self.windowChromeView bringSubviewToFront:self.chromeModeButton];
-}
-
-- (void)layoutFloatingChromeForSize:(CGSize)size {
-    CGFloat chromeScale = MIN(1.25, MAX(0.72, MIN(size.width, size.height) / 390.0));
-    CGFloat chromeH = MIN(44.0 * chromeScale, MAX(0.0, size.height));
-    self.windowChromeView.frame = CGRectMake(0, 0, size.width, chromeH);
-
-    // 恒定使用完美的展开比例，取消折叠尺寸
-    CGFloat capsuleX = 9.0 * chromeScale;
-    CGFloat capsuleY = 6.0 * chromeScale;
-    CGFloat capsuleW = CV3Style.windowHandleW * chromeScale;
-    CGFloat capsuleH = CV3Style.windowHandleH * chromeScale;
-    CGFloat dot = CV3Style.floatingChromeControlSize * chromeScale;
-
-    self.chromeDragHandle.frame = CGRectMake(capsuleX, capsuleY, capsuleW, capsuleH);
-    
-    // 物理热区进一步放大：按钮高度提升到 54pt，宽度平分胶囊宽度 (capsuleW / 3)
-    CGFloat btnW = capsuleW / 3.0;
-    CGFloat btnH = 54.0;
-    CGFloat btnY = capsuleY + (capsuleH - btnH) / 2.0;
-    
-    self.chromeCloseButton.frame = CGRectMake(capsuleX + 0 * btnW, btnY, btnW, btnH);
-    self.chromeMinimizeButton.frame = CGRectMake(capsuleX + 1 * btnW, btnY, btnW, btnH);
-    self.chromeModeButton.frame = CGRectMake(capsuleX + 2 * btnW, btnY, btnW, btnH);
-    
-    // 重新排列内部的视觉圆点
-    NSArray<UIButton *> *buttons = @[self.chromeCloseButton, self.chromeMinimizeButton, self.chromeModeButton];
-    for (UIButton *btn in buttons) {
-        UIView *vDot = [btn viewWithTag:999];
-        if (vDot) {
-            // 采用 bounds 和 center 安全定位，规避 transform 状态下赋值 frame 的未定义错乱
-            vDot.bounds = CGRectMake(0, 0, dot, dot);
-            vDot.center = CGPointMake(btnW / 2.0, btnH / 2.0);
-            vDot.layer.cornerRadius = dot / 2.0;
-            
-            UIView *symbolView = [vDot viewWithTag:998];
-            if (symbolView) {
-                CGFloat symbolSize = dot * 0.55;
-                symbolView.bounds = CGRectMake(0, 0, symbolSize, symbolSize);
-                symbolView.center = CGPointMake(dot / 2.0, dot / 2.0);
-            }
-        }
-    }
-    
-    [self updateFloatingChromeAppearance];
-}
-
-- (void)setChromeControlsExpanded:(BOOL)expanded animated:(BOOL)animated {
-    self.chromeControlsExpanded = expanded;
-    void (^changes)(void) = ^{
-        [self layoutFloatingChromeForSize:self.bounds.size];
-        [self updateFloatingChromeAppearance];
-    };
-    if (animated) {
-        [UIView animateWithDuration:0.18 delay:0 options:UIViewAnimationOptionCurveEaseOut animations:changes completion:nil];
-    } else {
-        changes();
-    }
-}
-
-- (void)scheduleChromeControlsCollapse {
-    // 长驻无需折叠
-}
-
-- (void)collapseChromeControlsTimerFired:(NSTimer *)timer {
-    // 长驻无需折叠
-}
-
-- (void)handleChromeControlTouchDown:(id)sender {
-    // 长驻无需折叠
-}
-
-- (void)handleChromeControlTap:(id)sender {
-    // 恒定展开，无需操作
-}
-
-- (void)attachMoveLongPressToChromeButton:(UIButton *)button {
-    if (!button) return;
-
-    UILongPressGestureRecognizer *moveLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleMoveLongPress:)];
-    moveLongPress.minimumPressDuration = 0.22;
-    moveLongPress.delegate = self;
-    [button addGestureRecognizer:moveLongPress];
-}
-
-- (void)handleChromeCloseAction:(id)sender {
-    CV3ExitExposeModeIfNeeded(self, NO);
-    [self closeWindow];
-}
-
-- (void)handleChromeMinimizeAction:(id)sender {
-    CV3ExitExposeModeIfNeeded(self, NO);
-    [self handleHideAction];
-}
-
-- (void)handleChromeModeAction:(id)sender {
-    CV3ExitExposeModeIfNeeded(self, YES);
-    // 绿色按钮点击时弹出多任务菜单（全屏/所有浮窗/关闭）
-    CV3LogToFile(@"[MultitaskingMenu] handleChromeModeAction clicked!");
-    [self toggleMultitaskingMenu];
-}
-
-- (void)chromeBtnTouchDown:(UIButton *)sender {
-    [UIView animateWithDuration:0.2 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
-        UIView *dot = [sender viewWithTag:999];
-        if (dot) {
-            dot.transform = CGAffineTransformMakeScale(0.82, 0.82);
-        }
-        
-        NSArray<UIButton *> *buttons = @[self.chromeCloseButton, self.chromeMinimizeButton, self.chromeModeButton];
-        for (UIButton *btn in buttons) {
-            UIView *vDot = [btn viewWithTag:999];
-            if (vDot) {
-                UIView *sym = [vDot viewWithTag:998];
-                if (sym) sym.alpha = 1.0;
-            }
-        }
-    } completion:nil];
-}
-
-- (void)chromeBtnTouchUp:(UIButton *)sender {
-    [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.6 initialSpringVelocity:0.5 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
-        UIView *dot = [sender viewWithTag:999];
-        if (dot) {
-            dot.transform = CGAffineTransformIdentity;
-        }
-        
-        NSArray<UIButton *> *buttons = @[self.chromeCloseButton, self.chromeMinimizeButton, self.chromeModeButton];
-        for (UIButton *btn in buttons) {
-            UIView *vDot = [btn viewWithTag:999];
-            if (vDot) {
-                UIView *sym = [vDot viewWithTag:998];
-                if (sym) sym.alpha = 0.0;
-            }
-        }
-    } completion:nil];
-}
-
 - (void)menuBtnTouchDown:(UIButton *)sender {
     [UIView animateWithDuration:CV3Style.durationShort delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
         sender.transform = CGAffineTransformMakeScale(CV3Style.menuBtnScale, CV3Style.menuBtnScale);
@@ -3938,8 +3702,8 @@ static NSString *CV3OrientationResolverTrace(id settings) {
         }
     }
 
-    // 级联水滴滑入动效 (Cascade Slide Animation) - 从绿色的多任务按钮正下方喷射展开
-    CGPoint startCenter = [self.windowChromeView convertPoint:self.chromeModeButton.center toView:self.rootTransformContainer];
+    // 级联水滴滑入动效从窗口顶部中心展开。
+    CGPoint startCenter = CGPointMake(CGRectGetMidX(self.rootTransformContainer.bounds), 24.0);
     CGPoint targetCenter = CGPointMake(logicalW / 2.0, 24.0 + menuH / 2.0);
     
     self.multitaskingMenuView.center = startCenter;
@@ -3980,7 +3744,7 @@ static NSString *CV3OrientationResolverTrace(id settings) {
     CV3LogToFile(@"[MultitaskingMenu] dismissMultitaskingMenu called.");
     if (!self.multitaskingMenuView || self.multitaskingMenuView.hidden) return;
     
-    CGPoint startCenter = [self.windowChromeView convertPoint:self.chromeModeButton.center toView:self.rootTransformContainer];
+    CGPoint startCenter = CGPointMake(CGRectGetMidX(self.rootTransformContainer.bounds), 24.0);
     CGPoint currentCenter = self.multitaskingMenuView.center;
     
     // 原路收缩，吸回绿色的多任务按钮中
@@ -4015,7 +3779,7 @@ static NSString *CV3OrientationResolverTrace(id settings) {
 - (void)handleFullscreenMenuAction:(id)sender {
     [self dismissMultitaskingMenu];
     CV3ExitExposeModeIfNeeded(nil, NO);
-    CV3LogToFile(@"[FullscreenLaunch] phase=trigger source=windowChrome bundle=%@", self.bundleID);
+    CV3LogToFile(@"[FullscreenLaunch] phase=trigger source=multitaskingMenu bundle=%@", self.bundleID);
     [self activateHostedAppFullscreenAndClose];
 }
 
@@ -4558,6 +4322,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         self.hostContainerProxy.layer.minificationFilter = kCAFilterTrilinear;
         
         [self.clippingContainer addSubview:self.hostContainerProxy];
+
         [self ensureLaunchSplashVisible];
         
         // 侧边隐藏拉手 (Grabber -> Prism Switcher)
@@ -5484,7 +5249,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     self.hostContainerProxy.alpha = 1.0;
     
     [self updateFloatingHomeBarAppearance];
-    
+
     if (focused) {
         [self promoteFloatingWindowInZOrder];
         
