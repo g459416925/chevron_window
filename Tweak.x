@@ -942,9 +942,10 @@ static void CV3WriteFocusedDiagnostic(NSString *message) {
         [message hasPrefix:@"[SplitTrace] [ZOrder]"] ||
         [message hasPrefix:@"[SplitTrace] [RotationLayout]"] ||
         [message hasPrefix:@"[SplitTrace] [ExposeRotation]"] ||
+        [message hasPrefix:@"[SplitTrace] [OrientationShellPolicy]"] ||
         ([message hasPrefix:@"[SplitTrace] [Strict]"] &&
-         ([message containsString:@"phase=orientation.shellAnimation.begin"] ||
-          [message containsString:@"phase=orientation.shellAnimation.completed"] ||
+         ([message containsString:@"phase=orientation.shellSurfaceSync.begin"] ||
+          [message containsString:@"phase=orientation.shellSurfaceSync.completed"] ||
           [message containsString:@"phase=orientation.request.received"] ||
           [message containsString:@"phase=orientation.request.completed"] ||
           [message containsString:@"phase=orientation.request.rejected"] ||
@@ -1107,11 +1108,6 @@ static const char *CV3HostedInteractionNotification = "com.xu.chevronv3.hosted-i
 static int CV3VideoOrientationNotificationToken = -1;
 static int CV3PlaybackTraceNotificationToken = -1;
 static int CV3HostedInteractionNotificationToken = -1;
-static uint64_t CV3LastVideoOrientationDiagnosticState = 0;
-static CFTimeInterval CV3LastVideoOrientationDiagnosticTime = 0;
-static NSMutableDictionary<NSNumber *, NSNumber *> *CV3LegacyLandscapeHoldUntilByBundleHash = nil;
-static NSMutableDictionary<NSNumber *, NSDictionary *> *CV3PendingControllerLandscapeByBundleHash = nil;
-static NSUInteger CV3PendingControllerLandscapeGeneration = 0;
 static UIInterfaceOrientation CV3LastTrustedInterfaceOrientation = UIInterfaceOrientationPortrait;
 static UIInterfaceOrientation CV3LastPhysicalDeviceInterfaceOrientation = UIInterfaceOrientationPortrait;
 static BOOL CV3SuppressPresentationContextFanout = NO;
@@ -1869,20 +1865,6 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, copy) NSString *lastOrientationTraceSignature;
 @property (nonatomic, copy) NSString *lastSurfaceOrientationAuditSignature;
 @property (nonatomic, assign) CFTimeInterval lastSurfaceOrientationAuditTime;
-@property (nonatomic, assign) CFTimeInterval hostedOrientationDriftFirstSeenAt;
-@property (nonatomic, assign) UIInterfaceOrientation hostedOrientationDriftClientOrientation;
-@property (nonatomic, assign) BOOL hostedOrientationDriftRepairApplied;
-@property (nonatomic, assign) UIInterfaceOrientation pendingPortraitOrientation;
-@property (nonatomic, assign) CFTimeInterval pendingPortraitDeadline;
-@property (nonatomic, assign) CFTimeInterval pendingPortraitStableSince;
-@property (nonatomic, assign) CFTimeInterval lastOrientationMapRepairAt;
-@property (nonatomic, assign) BOOL orientationShellSyncPending;
-@property (nonatomic, assign) NSUInteger orientationShellSyncGeneration;
-@property (nonatomic, assign) UIInterfaceOrientation pendingShellOrientation;
-@property (nonatomic, assign) UIInterfaceOrientation pendingShellPreviousOrientation;
-@property (nonatomic, assign) CGRect pendingShellTargetFrame;
-@property (nonatomic, assign) CFTimeInterval orientationShellSyncStartTime;
-@property (nonatomic, strong) UIImageView *orientationShellSnapshotView;
 
 + (CMMotionManager *)sharedMotionManager;
 + (CGRect)initialFrameForBundleID:(NSString *)bundleID
@@ -1942,8 +1924,6 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 - (CGRect)restorableFramePreservingStashedSizeForOrientation:(UIInterfaceOrientation)orientation preferredCenter:(CGPoint)preferredCenter;
 - (CGRect)currentVisualShadowFrame;
 - (UIImage *)snapshotImageForRestoreAnimation;
-- (void)pollOrientationShellSyncForGeneration:(NSUInteger)generation;
-- (void)finishOrientationShellSyncForGeneration:(NSUInteger)generation reason:(NSString *)reason;
 - (void)updateStashedRestoreSnapshotForOrientation:(UIInterfaceOrientation)orientation;
 - (void)animateGenieSurfaceImage:(UIImage *)image
                       sourceFrame:(CGRect)sourceFrame
@@ -1973,7 +1953,6 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 - (void)recordReceptionTrace:(NSString *)phase force:(BOOL)force;
 - (void)recordViewportConstraintAudit:(NSString *)phase force:(BOOL)force;
 - (void)receptionTraceTimerFired:(NSTimer *)timer;
-- (void)schedulePendingPortraitConfirmation;
 - (void)loadAppScene;
 - (UIEdgeInsets)currentSafeAreaInsets;
 - (void)dismissLaunchSplashAnimated;
@@ -1985,7 +1964,7 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 - (CGRect)currentHostedSceneBounds;
 - (BOOL)applyHostedSceneLayoutToSettings:(id)settings force:(BOOL)force;
 - (BOOL)syncHostedSceneLayoutForce:(BOOL)force;
-- (void)applyHostedContentOrientation:(UIInterfaceOrientation)orientation;
+- (void)applyHostedContentOrientation:(UIInterfaceOrientation)orientation source:(uint8_t)source;
 - (BOOL)applyForegroundSovereigntyToSettings:(id)settings clearDeactivation:(BOOL)clearDeactivation forceLayout:(BOOL)forceLayout;
 - (void)stabilizeForegroundForWorkspaceTransition:(NSString *)reason;
 @end
@@ -2217,25 +2196,11 @@ static BOOL CV3ApplyVideoOrientationNotification(uint64_t bundleHash,
                              requestedOrientation:orientation
                                            source:sourceName];
         [window recordVideoFullscreenTrace:@"notification.matched.before" requestedOrientation:orientation];
-        [window applyHostedContentOrientation:orientation];
+        [window applyHostedContentOrientation:orientation source:source];
         [window recordVideoFullscreenTrace:@"notification.matched.after" requestedOrientation:orientation];
         [window recordSplitWindowOrientationTrace:@"notification.after"
                              requestedOrientation:orientation
                                            source:sourceName];
-        NSArray<NSNumber *> *delays = @[@0.05, @0.15, @0.40, @0.80, @1.20];
-        for (NSNumber *delay in delays) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                         (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                if (!window.isClosing) {
-                    [window recordVideoFullscreenTrace:[NSString stringWithFormat:@"notification.after.%.0fms", delay.doubleValue * 1000.0]
-                                  requestedOrientation:orientation];
-                    [window recordSplitWindowOrientationTrace:[NSString stringWithFormat:@"notification.after.%.0fms", delay.doubleValue * 1000.0]
-                                         requestedOrientation:orientation
-                                                       source:sourceName];
-                }
-            });
-        }
         return YES;
     }
     return NO;
@@ -2258,148 +2223,6 @@ static void CV3RegisterVideoOrientationBridge(void) {
         UIInterfaceOrientation orientation = (UIInterfaceOrientation)(payload & 0x0F);
         uint64_t bundleHash = state & 0x00FFFFFFFFFFFFFFULL;
         if (!CV3IsValidInterfaceOrientation(orientation)) return;
-
-        CFTimeInterval now = CACurrentMediaTime();
-        if (state == CV3LastVideoOrientationDiagnosticState &&
-            now - CV3LastVideoOrientationDiagnosticTime < 0.30) {
-            return;
-        }
-        CV3LastVideoOrientationDiagnosticState = state;
-        CV3LastVideoOrientationDiagnosticTime = now;
-
-        BOOL hasMatchingWindow = NO;
-        for (CV3FloatingAppWindow *window in [floatingWindows copy]) {
-            if (![window isKindOfClass:CV3FloatingAppWindow.class] || window.isClosing ||
-                CV3StableBundleHash(window.bundleID) != bundleHash) continue;
-            hasMatchingWindow = YES;
-            if (source != 4) {
-                window.pendingPortraitOrientation = UIInterfaceOrientationUnknown;
-                window.pendingPortraitStableSince = 0;
-            }
-            if (source == 5 && UIInterfaceOrientationIsPortrait(orientation) &&
-                !window.requiresLandscapeContent && !window.isStashed) {
-                window.pendingPortraitOrientation = orientation;
-                window.pendingPortraitDeadline = now + 1.5;
-                UIInterfaceOrientation clientOrientation = CV3HostedClientOrientation(window);
-                window.pendingPortraitStableSince = clientOrientation == orientation ? now : 0;
-                [window schedulePendingPortraitConfirmation];
-                CV3LogToFile(@"[PortraitRestore] phase=pending bundle=%@ requested=%ld client=%ld",
-                             window.bundleID, (long)orientation, (long)clientOrientation);
-                return;
-            }
-        }
-
-        NSNumber *bundleKey = @(bundleHash);
-        NSDictionary *pendingControllerLandscape =
-            CV3PendingControllerLandscapeByBundleHash[bundleKey];
-        if (pendingControllerLandscape &&
-            (UIInterfaceOrientationIsPortrait(orientation) ||
-             (source != 2 && source != 5))) {
-            [CV3PendingControllerLandscapeByBundleHash removeObjectForKey:bundleKey];
-            CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=notification.arbitration.cancelled hash=%014llx requested=%ld source=%@ sourceCode=%u pendingGeneration=%lu",
-                                  bundleHash, (long)orientation,
-                                  CV3VideoOrientationSourceName(source), source,
-                                  (unsigned long)[pendingControllerLandscape[@"generation"] unsignedIntegerValue]);
-        }
-
-        // These callbacks describe implementation details, not the visible
-        // remote surface. A full-screen controller may briefly disappear while
-        // UIKit reparents it, and many players force UIDevice back to portrait
-        // while their landscape frame is still on screen. Let a confirmed
-        // controller restore (source 3) or scene geometry update (source 1)
-        // perform the portrait transition instead.
-        if (UIInterfaceOrientationIsPortrait(orientation) &&
-            (source == 4 || source == 5)) {
-            CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=notification.ignored.nonAuthoritativePortrait hash=%014llx requested=%ld source=%@ sourceCode=%u",
-                                  bundleHash, (long)orientation,
-                                  CV3VideoOrientationSourceName(source), source);
-            for (CV3FloatingAppWindow *window in [floatingWindows copy]) {
-                if (![window isKindOfClass:[CV3FloatingAppWindow class]] || window.isClosing) continue;
-                if (CV3StableBundleHash(window.bundleID) != bundleHash) continue;
-                [window recordSplitWindowOrientationTrace:@"notification.ignored.nonAuthoritativePortrait"
-                                     requestedOrientation:orientation
-                                                   source:CV3VideoOrientationSourceName(source)];
-                break;
-            }
-            return;
-        }
-
-        // An app process that predates the source-aware bridge can still emit
-        // the legacy orientation-only payload. Some video players publish a
-        // stale portrait callback immediately after requesting landscape. Hold
-        // the accepted landscape state across that one transition tail so the
-        // portrait callback cannot undo fullscreen before it is drawn.
-        if (source == 0) {
-            if (!CV3LegacyLandscapeHoldUntilByBundleHash) {
-                CV3LegacyLandscapeHoldUntilByBundleHash = [NSMutableDictionary dictionary];
-            }
-            NSNumber *key = @(bundleHash);
-            if (UIInterfaceOrientationIsLandscape(orientation)) {
-                CV3LegacyLandscapeHoldUntilByBundleHash[key] = @(now + 1.25);
-            } else if (UIInterfaceOrientationIsPortrait(orientation)) {
-                CFTimeInterval holdUntil = [CV3LegacyLandscapeHoldUntilByBundleHash[key] doubleValue];
-                if (now < holdUntil) {
-                    CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=notification.suppressed.legacyPortraitAfterLandscape hash=%014llx requested=%ld remaining=%.3f",
-                                          bundleHash, (long)orientation, holdUntil - now);
-                    return;
-                }
-                [CV3LegacyLandscapeHoldUntilByBundleHash removeObjectForKey:key];
-            }
-        }
-
-        // UIKit asks controllers to update supported orientations slightly
-        // before many players actually force UIDevice into landscape. Treat
-        // that controller callback as a short-lived fallback, so the hosted
-        // shell does not rotate ahead of the remote surface. DeviceKVC commits
-        // immediately when it arrives; apps without that callback still rotate
-        // after the bounded fallback interval.
-        if (source == 2 && UIInterfaceOrientationIsLandscape(orientation) &&
-            hasMatchingWindow) {
-            if (!CV3PendingControllerLandscapeByBundleHash) {
-                CV3PendingControllerLandscapeByBundleHash = [NSMutableDictionary dictionary];
-            }
-            NSUInteger generation = ++CV3PendingControllerLandscapeGeneration;
-            CV3PendingControllerLandscapeByBundleHash[bundleKey] = @{
-                @"generation": @(generation),
-                @"orientation": @(orientation),
-                @"createdAt": @(now)
-            };
-            CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=notification.arbitration.pendingControllerLandscape hash=%014llx requested=%ld generation=%lu fallbackMs=45",
-                                  bundleHash, (long)orientation, (unsigned long)generation);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.045 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                NSDictionary *current = CV3PendingControllerLandscapeByBundleHash[bundleKey];
-                if ([current[@"generation"] unsignedIntegerValue] != generation) return;
-                [CV3PendingControllerLandscapeByBundleHash removeObjectForKey:bundleKey];
-                CFTimeInterval elapsedMs = (CACurrentMediaTime() - [current[@"createdAt"] doubleValue]) * 1000.0;
-                UIInterfaceOrientation fallbackOrientation =
-                    (UIInterfaceOrientation)[current[@"orientation"] integerValue];
-                CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=notification.arbitration.controllerFallback hash=%014llx requested=%ld generation=%lu elapsedMs=%.3f",
-                                      bundleHash, (long)fallbackOrientation,
-                                      (unsigned long)generation, elapsedMs);
-                CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=notification.received hash=%014llx requested=%ld source=%@ sourceCode=%u windows=%lu",
-                                      bundleHash, (long)fallbackOrientation,
-                                      CV3VideoOrientationSourceName(2), 2,
-                                      (unsigned long)floatingWindows.count);
-                if (!CV3ApplyVideoOrientationNotification(bundleHash, fallbackOrientation, 2)) {
-                    CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=notification.unmatched hash=%014llx requested=%ld source=%@ sourceCode=%u",
-                                          bundleHash, (long)fallbackOrientation,
-                                          CV3VideoOrientationSourceName(2), 2);
-                }
-            });
-            return;
-        }
-
-        if (source == 5 && UIInterfaceOrientationIsLandscape(orientation) &&
-            pendingControllerLandscape) {
-            [CV3PendingControllerLandscapeByBundleHash removeObjectForKey:bundleKey];
-            CFTimeInterval elapsedMs =
-                (now - [pendingControllerLandscape[@"createdAt"] doubleValue]) * 1000.0;
-            CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=notification.arbitration.deviceKVCCommit hash=%014llx requested=%ld pendingGeneration=%lu elapsedMs=%.3f",
-                                  bundleHash, (long)orientation,
-                                  (unsigned long)[pendingControllerLandscape[@"generation"] unsignedIntegerValue],
-                                  elapsedMs);
-        }
 
         CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=notification.received hash=%014llx requested=%ld source=%@ sourceCode=%u windows=%lu",
                               bundleHash,
@@ -5403,8 +5226,8 @@ static CV3FloatingAppWindow *CV3TopmostFloatingWindowAtScenePoint(CGPoint sceneP
     return nil;
 }
 
-static void CV3PromoteFloatingWindowForGlobalTouch(UIEvent *event) {
-    if (event.type != UIEventTypeTouches || !floatingWindows || floatingWindows.count < 2) return;
+static void CV3HandleFloatingWindowGlobalTouch(UIEvent *event) {
+    if (event.type != UIEventTypeTouches || !floatingWindows || floatingWindows.count == 0) return;
 
     for (UITouch *touch in event.allTouches) {
         if (touch.phase != UITouchPhaseBegan) continue;
@@ -5431,6 +5254,19 @@ static void CV3PromoteFloatingWindowForGlobalTouch(UIEvent *event) {
                      NSStringFromCGRect(scene ? scene.coordinateSpace.bounds : CGRectZero),
                      (long)(scene ? scene.interfaceOrientation : UIInterfaceOrientationUnknown),
                      [hitDiagnostics componentsJoinedByString:@", "]);
+        if (target) {
+            // This SpringBoard-side hit is the universal interaction signal.
+            // Remote scene hosts do not always route touches through the
+            // injected UIApplication (for example hardened or multi-process
+            // apps), but every visible floating window is still identifiable
+            // here by its physical content bounds.
+            CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=globalTouch.contentWake bundle=%@ sourceWindow=%@ alpha=%.3f hidden=%d",
+                                    target.bundleID ?: @"nil",
+                                    sourceWindow ? NSStringFromClass(sourceWindow.class) : @"nil",
+                                    target.homeBarView.alpha,
+                                    target.homeBarAutoHidden);
+            [target noteFloatingHomeBarInteraction];
+        }
         if (target && (!target.isFocused || !modelTopmost)) {
             CV3LogToFile(@"[ZOrder] phase=globalTouch.promote target=%@ sourceWindow=%@ point=%@ frame=%@ sceneBounds=%@ orientation=%ld focused=%d modelTopmost=%d",
                          target.bundleID ?: @"nil",
@@ -5449,7 +5285,7 @@ static void CV3PromoteFloatingWindowForGlobalTouch(UIEvent *event) {
 
 %hook SpringBoard
 - (void)sendEvent:(UIEvent *)event {
-    CV3PromoteFloatingWindowForGlobalTouch(event);
+    CV3HandleFloatingWindowGlobalTouch(event);
     %orig(event);
 }
 
