@@ -1624,22 +1624,28 @@ void CV3ToggleExposeMode(void) {
     CGFloat longSide = MAX(displayBounds.size.width, displayBounds.size.height);
     CGFloat aspect = longSide / MAX(shortSide, 1.0);
     CGSize logicalSize = CGSizeMake(MAX(1.0, logicalWidth), MAX(1.0, logicalWidth * aspect));
-    CGSize physicalSize = UIInterfaceOrientationIsLandscape(orientation)
+    BOOL sceneShellLandscape = CV3ShellShouldBeLandscape(self, orientation);
+    CGSize sceneSize = sceneShellLandscape
         ? CGSizeMake(logicalSize.height, logicalSize.width)
         : logicalSize;
 
-    UIEdgeInsets safeArea = [self currentSafeAreaInsets];
-    CGFloat breath = CV3Style.safeAreaBreath;
-    CGFloat visibleW = MAX(1.0, displayBounds.size.width - safeArea.left - safeArea.right - breath * 2.0);
-    CGFloat visibleH = MAX(1.0, displayBounds.size.height - safeArea.top - safeArea.bottom - breath * 2.0);
-    CGFloat fitScale = MIN(1.0, MIN(visibleW / MAX(physicalSize.width, 1.0),
-                                   visibleH / MAX(physicalSize.height, 1.0)));
+    id<UICoordinateSpace> sceneSpace = self.windowScene.coordinateSpace;
+    id<UICoordinateSpace> displaySpace = self.windowScene.screen.coordinateSpace;
+    CGRect sceneRect = CGRectMake(0, 0, sceneSize.width, sceneSize.height);
+    CGRect displayRect = (sceneSpace && displaySpace)
+        ? [displaySpace convertRect:sceneRect fromCoordinateSpace:sceneSpace]
+        : sceneRect;
+    CGRect safeRect = CGRectInset([self physicalDisplaySafeRect],
+                                  CV3Style.safeAreaBreath,
+                                  CV3Style.safeAreaBreath);
+    CGFloat fitScale = MIN(1.0, MIN(safeRect.size.width / MAX(displayRect.size.width, 1.0),
+                                   safeRect.size.height / MAX(displayRect.size.height, 1.0)));
     if (fitScale < 1.0) {
-        physicalSize.width *= fitScale;
-        physicalSize.height *= fitScale;
+        sceneSize.width *= fitScale;
+        sceneSize.height *= fitScale;
     }
 
-    return CGSizeMake(MAX(1.0, physicalSize.width), MAX(1.0, physicalSize.height));
+    return CGSizeMake(MAX(1.0, sceneSize.width), MAX(1.0, sceneSize.height));
 }
 
 - (CGSize)defaultPhysicalFloatingSizeForOrientation:(UIInterfaceOrientation)orientation displayBounds:(CGRect)displayBounds {
@@ -1783,37 +1789,9 @@ void CV3ToggleExposeMode(void) {
 }
 
 - (CGRect)safeAreaClampedFrame:(CGRect)frame preferredCenter:(CGPoint)preferredCenter preserveSize:(BOOL)preserveSize {
-    CGRect screenBounds = CV3DisplayBoundsForWindow(self);
-    UIEdgeInsets safeArea = [self currentSafeAreaInsets];
-    CGFloat breath = CV3Style.safeAreaBreath;
-    CGFloat maxWidth = screenBounds.size.width - safeArea.left - safeArea.right - breath * 2.0;
-    CGFloat maxHeight = screenBounds.size.height - safeArea.top - safeArea.bottom - breath * 2.0;
-    CGSize targetSize = frame.size;
-
-    if (!preserveSize && targetSize.width > 0.0 && targetSize.height > 0.0) {
-        CGFloat widthScale = maxWidth / targetSize.width;
-        CGFloat heightScale = maxHeight / targetSize.height;
-        CGFloat scale = MIN(1.0, MIN(widthScale, heightScale));
-        if (scale > 0.0 && scale < 1.0) {
-            targetSize = CGSizeMake(targetSize.width * scale, targetSize.height * scale);
-        }
-    }
-
-    targetSize.width = MAX(1.0, targetSize.width);
-    targetSize.height = MAX(1.0, targetSize.height);
-    CGRect targetFrame = CGRectMake(preferredCenter.x - targetSize.width * 0.5,
-                                    preferredCenter.y - targetSize.height * 0.5,
-                                    targetSize.width,
-                                    targetSize.height);
-    CGFloat minX = safeArea.left + breath;
-    CGFloat minY = safeArea.top + breath;
-    CGFloat maxX = screenBounds.size.width - safeArea.right - breath - targetFrame.size.width;
-    CGFloat maxY = screenBounds.size.height - safeArea.bottom - breath - targetFrame.size.height;
-    if (maxX < minX) maxX = minX;
-    if (maxY < minY) maxY = minY;
-    targetFrame.origin.x = MIN(MAX(targetFrame.origin.x, minX), maxX);
-    targetFrame.origin.y = MIN(MAX(targetFrame.origin.y, minY), maxY);
-    return targetFrame;
+    return [self physicalSafeAreaClampedFrame:frame
+                               preferredCenter:preferredCenter
+                                  preserveSize:preserveSize];
 }
 
 - (CGRect)restorableFramePreservingStashedSizeForOrientation:(UIInterfaceOrientation)orientation preferredCenter:(CGPoint)preferredCenter {
@@ -2909,14 +2887,21 @@ static NSString *CV3OrientationResolverTrace(id settings) {
     return localPlacement;
 }
 
+- (UIInterfaceOrientation)effectiveResizeOrientation {
+    if (CV3IsValidInterfaceOrientation(self.hostedContentOrientation)) {
+        return self.hostedContentOrientation;
+    }
+    if (CV3IsValidInterfaceOrientation(self.targetOrientation)) {
+        return self.targetOrientation;
+    }
+    return CV3TrustedInterfaceOrientation(self.windowScene);
+}
+
 - (CGRect)orientedDisplayBoundsForCurrentOrientation {
     CGRect screenBounds = CV3DisplayBoundsForWindow(self);
     CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
     CGFloat longSide = MAX(screenBounds.size.width, screenBounds.size.height);
-    UIInterfaceOrientation orientation = self.targetOrientation;
-    if (!CV3IsValidInterfaceOrientation(orientation)) {
-        orientation = CV3TrustedInterfaceOrientation(self.windowScene);
-    }
+    UIInterfaceOrientation orientation = [self effectiveResizeOrientation];
 
     CGSize orientedSize = UIInterfaceOrientationIsLandscape(orientation)
         ? CGSizeMake(longSide, shortSide)
@@ -2924,18 +2909,140 @@ static NSString *CV3OrientationResolverTrace(id settings) {
     return CGRectMake(0, 0, orientedSize.width, orientedSize.height);
 }
 
-- (void)homeBarResizeLimitsForAspect:(CGFloat)aspect minWidth:(CGFloat *)minWidth maxWidth:(CGFloat *)maxWidth {
-    CGRect screenBounds = [self orientedDisplayBoundsForCurrentOrientation];
-    UIEdgeInsets safeArea = [self currentSafeAreaInsets];
-    CGFloat breath = CV3Style.safeAreaBreath;
-    CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
-    CGFloat visibleWidth = MAX(1.0, screenBounds.size.width - safeArea.left - safeArea.right - breath * 2.0);
-    CGFloat visibleHeight = MAX(1.0, screenBounds.size.height - safeArea.top - safeArea.bottom - breath * 2.0);
-    CGFloat minW = shortSide * 0.4;
-    CGFloat maxW = shortSide * 0.75;
+- (CGRect)physicalDisplaySafeRect {
+    UIScreen *screen = self.windowScene.screen ?: self.screen ?: [UIScreen mainScreen];
+    id<UICoordinateSpace> displaySpace = screen.coordinateSpace;
+    CGRect displayBounds = displaySpace.bounds;
+    CGRect bestSafeRect = CGRectZero;
+    CGFloat bestSafeArea = CGFLOAT_MAX;
 
-    maxW = MIN(maxW, visibleWidth);
-    maxW = MIN(maxW, visibleHeight / MAX(aspect, 1.0));
+    // The floating window can remain in a portrait Scene while the display is
+    // physically landscape. Read the safe region from a full-display system
+    // window whose Scene follows the physical display, then convert it into the
+    // display coordinate space. Never reuse the floating window's own insets.
+    for (UIScene *connectedScene in [UIApplication sharedApplication].connectedScenes) {
+        if (![connectedScene isKindOfClass:[UIWindowScene class]]) continue;
+        UIWindowScene *scene = (UIWindowScene *)connectedScene;
+        if (scene.screen != screen) continue;
+        CGRect sceneBounds = scene.coordinateSpace.bounds;
+        if (CGRectIsEmpty(sceneBounds) ||
+            fabs(sceneBounds.size.width - displayBounds.size.width) > 1.0 ||
+            fabs(sceneBounds.size.height - displayBounds.size.height) > 1.0) continue;
+
+        for (UIWindow *candidate in scene.windows) {
+            if (candidate == self || [candidate isKindOfClass:[CV3FloatingAppWindow class]] ||
+                candidate.hidden || candidate.alpha < 0.01) continue;
+            UIEdgeInsets insets = candidate.safeAreaInsets;
+            if (insets.top <= 0.0 && insets.bottom <= 0.0 &&
+                insets.left <= 0.0 && insets.right <= 0.0) continue;
+
+            CGRect candidateDisplayFrame = [displaySpace convertRect:candidate.bounds fromCoordinateSpace:candidate];
+            CGRect coverage = CGRectIntersection(displayBounds, candidateDisplayFrame);
+            CGFloat displayArea = CGRectGetWidth(displayBounds) * CGRectGetHeight(displayBounds);
+            CGFloat coverageArea = CGRectGetWidth(coverage) * CGRectGetHeight(coverage);
+            if (displayArea <= 0.0 || coverageArea / displayArea < 0.80) continue;
+
+            CGRect localSafeRect = UIEdgeInsetsInsetRect(candidate.bounds, insets);
+            CGRect displaySafeRect = [displaySpace convertRect:localSafeRect fromCoordinateSpace:candidate];
+            displaySafeRect = CGRectIntersection(displayBounds, displaySafeRect);
+            CGFloat safeArea = CGRectGetWidth(displaySafeRect) * CGRectGetHeight(displaySafeRect);
+            if (!CGRectIsEmpty(displaySafeRect) && safeArea < bestSafeArea) {
+                bestSafeRect = displaySafeRect;
+                bestSafeArea = safeArea;
+            }
+        }
+    }
+
+    if (!CGRectIsEmpty(bestSafeRect)) return bestSafeRect;
+
+    // Conservative fallback for the brief interval where SpringBoard has
+    // rotated the display but has not yet published a matching system window.
+    UIEdgeInsets portraitInsets = [self currentSafeAreaInsets];
+    if (CGRectGetWidth(displayBounds) > CGRectGetHeight(displayBounds)) {
+        CGFloat protectedSide = MAX(47.0, MAX(portraitInsets.top, portraitInsets.bottom));
+        CGFloat protectedBottom = MAX(21.0, MIN(portraitInsets.top, portraitInsets.bottom));
+        return UIEdgeInsetsInsetRect(displayBounds,
+                                     UIEdgeInsetsMake(0.0, protectedSide,
+                                                      protectedBottom, protectedSide));
+    }
+    if (portraitInsets.top <= 0.0 && portraitInsets.bottom <= 0.0) {
+        portraitInsets = UIEdgeInsetsMake(47.0, 0.0, 34.0, 0.0);
+    }
+    return UIEdgeInsetsInsetRect(displayBounds, portraitInsets);
+}
+
+- (CGRect)physicalSafeAreaClampedFrame:(CGRect)frame
+                       preferredCenter:(CGPoint)preferredCenter
+                          preserveSize:(BOOL)preserveSize {
+    UIScreen *screen = self.windowScene.screen ?: self.screen ?: [UIScreen mainScreen];
+    id<UICoordinateSpace> displaySpace = screen.coordinateSpace;
+    id<UICoordinateSpace> sceneSpace = self.windowScene.coordinateSpace ?: displaySpace;
+    CGRect safeRect = [self physicalDisplaySafeRect];
+    CGFloat breath = CV3Style.safeAreaBreath;
+    safeRect = CGRectInset(safeRect, breath, breath);
+    if (safeRect.size.width < 1.0 || safeRect.size.height < 1.0) {
+        safeRect = displaySpace.bounds;
+    }
+
+    CGSize targetSize = frame.size;
+    targetSize.width = MAX(1.0, targetSize.width);
+    targetSize.height = MAX(1.0, targetSize.height);
+    CGRect sceneFrame = CGRectMake(preferredCenter.x - targetSize.width * 0.5,
+                                   preferredCenter.y - targetSize.height * 0.5,
+                                   targetSize.width, targetSize.height);
+    CGRect displayFrame = [displaySpace convertRect:sceneFrame fromCoordinateSpace:sceneSpace];
+
+    if (!preserveSize && displayFrame.size.width > 0.0 && displayFrame.size.height > 0.0) {
+        CGFloat scale = MIN(1.0, MIN(safeRect.size.width / displayFrame.size.width,
+                                     safeRect.size.height / displayFrame.size.height));
+        if (scale > 0.0 && scale < 1.0) {
+            targetSize.width *= scale;
+            targetSize.height *= scale;
+            sceneFrame = CGRectMake(preferredCenter.x - targetSize.width * 0.5,
+                                    preferredCenter.y - targetSize.height * 0.5,
+                                    targetSize.width, targetSize.height);
+            displayFrame = [displaySpace convertRect:sceneFrame fromCoordinateSpace:sceneSpace];
+        }
+    }
+    CGFloat maxX = CGRectGetMaxX(safeRect) - displayFrame.size.width;
+    CGFloat maxY = CGRectGetMaxY(safeRect) - displayFrame.size.height;
+    if (maxX < CGRectGetMinX(safeRect)) maxX = CGRectGetMinX(safeRect);
+    if (maxY < CGRectGetMinY(safeRect)) maxY = CGRectGetMinY(safeRect);
+    displayFrame.origin.x = MIN(MAX(displayFrame.origin.x, CGRectGetMinX(safeRect)), maxX);
+    displayFrame.origin.y = MIN(MAX(displayFrame.origin.y, CGRectGetMinY(safeRect)), maxY);
+
+    CGPoint clampedDisplayCenter = CGPointMake(CGRectGetMidX(displayFrame), CGRectGetMidY(displayFrame));
+    CGPoint clampedSceneCenter = [sceneSpace convertPoint:clampedDisplayCenter fromCoordinateSpace:displaySpace];
+    CV3LogToFile(@"[PhysicalSafeArea] bundle=%@ displayBounds=%@ safeRect=%@ sceneBounds=%@ requestedFrame=%@ displayFrame=%@ finalSceneCenter=%@ preserveSize=%d",
+                 self.bundleID ?: @"<nil>", NSStringFromCGRect(displaySpace.bounds),
+                 NSStringFromCGRect(safeRect), NSStringFromCGRect(sceneSpace.bounds),
+                 NSStringFromCGRect(frame), NSStringFromCGRect(displayFrame),
+                 NSStringFromCGPoint(clampedSceneCenter), preserveSize);
+    return CGRectMake(clampedSceneCenter.x - targetSize.width * 0.5,
+                      clampedSceneCenter.y - targetSize.height * 0.5,
+                      targetSize.width, targetSize.height);
+}
+
+- (void)resizeLimitsForAspect:(CGFloat)aspect minWidth:(CGFloat *)minWidth maxWidth:(CGFloat *)maxWidth {
+    CGRect screenBounds = self.windowScene.screen.coordinateSpace.bounds;
+    CGRect safeRect = CGRectInset([self physicalDisplaySafeRect],
+                                  CV3Style.safeAreaBreath,
+                                  CV3Style.safeAreaBreath);
+    CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
+    CGFloat visibleWidth = MAX(1.0, safeRect.size.width);
+    CGFloat visibleHeight = MAX(1.0, safeRect.size.height);
+    CGFloat minW = shortSide * 0.4;
+    UIInterfaceOrientation orientation = [self effectiveResizeOrientation];
+
+    // logicalWidth is the short edge of the portrait-shaped logical canvas.
+    // In landscape physicalFloatingSizeForLogicalWidth: swaps the axes, so the
+    // logical limit must be derived from {visibleWidth / aspect, visibleHeight}.
+    // The old shortSide * 0.75 cap survived that swap and kept a landscape
+    // video window constrained to the portrait scale even with ample width.
+    CGFloat normalizedAspect = MAX(aspect, 1.0);
+    CGFloat maxW = UIInterfaceOrientationIsLandscape(orientation)
+        ? MIN(visibleHeight, visibleWidth / normalizedAspect)
+        : MIN(visibleWidth, visibleHeight / normalizedAspect);
     if (maxW < minW) minW = maxW;
 
     if (minWidth) *minWidth = MAX(1.0, minW);
@@ -2943,23 +3050,12 @@ static NSString *CV3OrientationResolverTrace(id settings) {
 }
 
 - (CGRect)constrainedFloatingFrameForSize:(CGSize)size preferredCenter:(CGPoint)center {
-    CGRect screenBounds = [self orientedDisplayBoundsForCurrentOrientation];
-    UIEdgeInsets safeArea = [self currentSafeAreaInsets];
-    CGFloat breath = CV3Style.safeAreaBreath;
     CGRect frame = CGRectMake(center.x - size.width * 0.5,
                               center.y - size.height * 0.5,
-                              size.width,
-                              size.height);
-    CGFloat minX = safeArea.left + breath;
-    CGFloat minY = safeArea.top + breath;
-    CGFloat maxX = screenBounds.size.width - safeArea.right - breath - size.width;
-    CGFloat maxY = screenBounds.size.height - safeArea.bottom - breath - size.height;
-
-    if (maxX < minX) maxX = minX;
-    if (maxY < minY) maxY = minY;
-    frame.origin.x = MIN(MAX(frame.origin.x, minX), maxX);
-    frame.origin.y = MIN(MAX(frame.origin.y, minY), maxY);
-    return frame;
+                              size.width, size.height);
+    return [self physicalSafeAreaClampedFrame:frame
+                               preferredCenter:center
+                                  preserveSize:NO];
 }
 
 - (void)startHomeBarResizeSessionIfNeeded {
@@ -3231,7 +3327,7 @@ static NSString *CV3OrientationResolverTrace(id settings) {
         CGFloat aspect = longSide / MAX(shortSide, 1.0);
         CGFloat minAllowedWidth = 1.0;
         CGFloat maxAllowedWidth = 1.0;
-        [self homeBarResizeLimitsForAspect:aspect minWidth:&minAllowedWidth maxWidth:&maxAllowedWidth];
+        [self resizeLimitsForAspect:aspect minWidth:&minAllowedWidth maxWidth:&maxAllowedWidth];
 
         CGPoint axis = self.homeBarResizeAxis;
         CGFloat axisLength = sqrt(axis.x * axis.x + axis.y * axis.y);
@@ -3249,6 +3345,13 @@ static NSString *CV3OrientationResolverTrace(id settings) {
         if (self.homeBarPanMode == 0) {
             CGFloat movement = sqrt(translation.x * translation.x + translation.y * translation.y);
             if (movement < 8.0) return;
+
+            CV3LogToFile(@"[ResizeLimits] phase=homeBar.begin bundle=%@ sceneBounds=%@ orientedBounds=%@ initialFrame=%@ orientation=%ld initialLogical=%.3f minLogical=%.3f maxLogical=%.3f",
+                         self.bundleID ?: @"<nil>", NSStringFromCGRect(self.windowScene.coordinateSpace.bounds),
+                         NSStringFromCGRect(screenBounds), NSStringFromCGRect(self.initialResizeFrame),
+                         (long)self.targetOrientation,
+                         MIN(self.initialResizeFrame.size.width, self.initialResizeFrame.size.height),
+                         minAllowedWidth, maxAllowedWidth);
 
             if (fabs(commandTranslation) > fabs(dominantTranslation) * 1.15) {
                 self.homeBarPanMode = 2;
@@ -3284,7 +3387,7 @@ static NSString *CV3OrientationResolverTrace(id settings) {
         CGPoint preferredCenter = CGPointMake(CGRectGetMidX(self.initialResizeFrame), CGRectGetMidY(self.initialResizeFrame));
         CGSize physicalSize = [self physicalFloatingSizeForLogicalWidth:finalWidth
                                                            displayBounds:screenBounds
-                                                            orientation:self.targetOrientation];
+                                                            orientation:[self effectiveResizeOrientation]];
         CGRect newFrame = [self constrainedFloatingFrameForSize:physicalSize preferredCenter:preferredCenter];
 
         [CATransaction begin];
@@ -3412,7 +3515,7 @@ static NSString *CV3OrientationResolverTrace(id settings) {
 
             CGFloat minAllowedWidth = 1.0;
             CGFloat maxAllowedWidth = 1.0;
-            [self homeBarResizeLimitsForAspect:aspect minWidth:&minAllowedWidth maxWidth:&maxAllowedWidth];
+            [self resizeLimitsForAspect:aspect minWidth:&minAllowedWidth maxWidth:&maxAllowedWidth];
             finalWidth = MAX(minAllowedWidth, MIN(maxAllowedWidth, finalWidth));
 
             CGFloat previousLogicalWidth = finalWidth;
@@ -3429,7 +3532,7 @@ static NSString *CV3OrientationResolverTrace(id settings) {
 
             CGSize finalSize = [self physicalFloatingSizeForLogicalWidth:finalWidth
                                                             displayBounds:screenBounds
-                                                             orientation:self.targetOrientation];
+                                                             orientation:[self effectiveResizeOrientation]];
             snapFrame.size = finalSize;
 
             if (fabs(finalWidth - previousLogicalWidth) > 0.1) {
@@ -3438,6 +3541,12 @@ static NSString *CV3OrientationResolverTrace(id settings) {
             }
 
             snapFrame = [self constrainedFloatingFrameForSize:finalSize preferredCenter:CGPointMake(CGRectGetMidX(snapFrame), CGRectGetMidY(snapFrame))];
+
+            CV3LogToFile(@"[ResizeLimits] phase=homeBar.end bundle=%@ orientedBounds=%@ safeArea=%@ orientation=%ld requestedLogical=%.3f minLogical=%.3f maxLogical=%.3f finalSize=%@ finalFrame=%@",
+                         self.bundleID ?: @"<nil>", NSStringFromCGRect(screenBounds),
+                         NSStringFromUIEdgeInsets(safeArea), (long)self.targetOrientation,
+                         finalWidth, minAllowedWidth, maxAllowedWidth,
+                         NSStringFromCGSize(finalSize), NSStringFromCGRect(snapFrame));
 
             CGFloat springVelocity = MIN(3.5, MAX(0.6, fabs(axisVelocity) / 750.0));
             // Stage Manager 级流体 Spring 阻尼与动量过渡
@@ -4172,9 +4281,9 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         UIPanGestureRecognizer *restorePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleStashPan:)];
         [self.stashGrabber addGestureRecognizer:restorePan];
 
-        // 核心功能：长按结束分屏
         UILongPressGestureRecognizer *stashClose = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleStashLongPress:)];
-        stashClose.minimumPressDuration = 0.8; 
+        stashClose.minimumPressDuration = 0.8;
+        stashClose.allowableMovement = 12.0;
         [self.stashGrabber addGestureRecognizer:stashClose];
 
         self.stashGrabber.userInteractionEnabled = YES;
@@ -6302,17 +6411,26 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 }
 
 - (void)handleStashLongPress:(UILongPressGestureRecognizer *)gesture {
-    if (!self.isStashed) return;
-    if (gesture.state == UIGestureRecognizerStateBegan) {
-        CV3ExitExposeModeIfNeeded(self, NO);
-        
-        [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:0 animations:^{
-            self.transform = CGAffineTransformMakeScale(0.01, 0.01);
-            self.alpha = 0;
-        } completion:^(BOOL finished) {
-            [self closeWindow];
-        }];
-    }
+    if (!self.isStashed || self.isClosing || gesture.state != UIGestureRecognizerStateBegan) return;
+    CV3ExitExposeModeIfNeeded(self, NO);
+    CV3LogStashAnimation(@"[StashAnimation] direction=close phase=longPressRecognized bundle=%@ duration=%.2f location=%@",
+                         self.bundleID ?: @"unknown",
+                         gesture.minimumPressDuration,
+                         NSStringFromCGPoint([gesture locationInView:self.stashGrabber]));
+
+    [UIView animateWithDuration:0.4
+                          delay:0
+         usingSpringWithDamping:0.8
+          initialSpringVelocity:0.5
+                        options:UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{
+        self.transform = CGAffineTransformMakeScale(0.01, 0.01);
+        self.alpha = 0;
+    } completion:^(BOOL finished) {
+        CV3LogStashAnimation(@"[StashAnimation] direction=close phase=completion bundle=%@ finished=%d",
+                             self.bundleID ?: @"unknown", finished);
+        [self closeWindow];
+    }];
 }
 
 - (void)handleStashPan:(UIPanGestureRecognizer *)gesture {
@@ -6531,6 +6649,20 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         self.initialResizeFrame = self.frame;
         [gesture setTranslation:CGPointZero inView:nil];
 
+        CGRect displayBounds = [self orientedDisplayBoundsForCurrentOrientation];
+        CGFloat displayShortSide = MIN(displayBounds.size.width, displayBounds.size.height);
+        CGFloat displayLongSide = MAX(displayBounds.size.width, displayBounds.size.height);
+        CGFloat resizeAspect = displayLongSide / MAX(displayShortSide, 1.0);
+        CGFloat minLogicalWidth = 1.0;
+        CGFloat maxLogicalWidth = 1.0;
+        [self resizeLimitsForAspect:resizeAspect minWidth:&minLogicalWidth maxWidth:&maxLogicalWidth];
+        CV3LogToFile(@"[ResizeLimits] phase=corner.begin bundle=%@ sceneBounds=%@ orientedBounds=%@ initialFrame=%@ orientation=%ld initialLogical=%.3f minLogical=%.3f maxLogical=%.3f",
+                     self.bundleID ?: @"<nil>", NSStringFromCGRect(self.windowScene.coordinateSpace.bounds),
+                     NSStringFromCGRect(displayBounds), NSStringFromCGRect(self.initialResizeFrame),
+                     (long)self.targetOrientation,
+                     MIN(self.initialResizeFrame.size.width, self.initialResizeFrame.size.height),
+                     minLogicalWidth, maxLogicalWidth);
+
         self.isLiveResizing = YES;
         CALayer *shadowLayer = [self visualShadowLayer];
         shadowLayer.shadowPath = nil;
@@ -6570,13 +6702,14 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     CGPoint translation = [gesture translationInView:nil];
     
     if (gesture.state == UIGestureRecognizerStateChanged) {
-        CGRect screenBounds = CV3DisplayBoundsForWindow(self);
+        CGRect screenBounds = [self orientedDisplayBoundsForCurrentOrientation];
         CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
         CGFloat longSide = MAX(screenBounds.size.width, screenBounds.size.height);
         CGFloat aspect = longSide / MAX(shortSide, 1.0);
         
-        CGFloat minAllowedWidth = shortSide * 0.4;
-        CGFloat maxAllowedWidth = shortSide * 0.75;
+        CGFloat minAllowedWidth = 1.0;
+        CGFloat maxAllowedWidth = 1.0;
+        [self resizeLimitsForAspect:aspect minWidth:&minAllowedWidth maxWidth:&maxAllowedWidth];
         
         CGPoint initialCenter = CGPointMake(CGRectGetMidX(self.initialResizeFrame), CGRectGetMidY(self.initialResizeFrame));
         CGPoint initialHandlePos = CGPointMake(CGRectGetMaxX(self.initialResizeFrame), CGRectGetMaxY(self.initialResizeFrame));
@@ -6588,7 +6721,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         CGFloat rawScaleFactor = initialDist > 0 ? (currentDist / initialDist) : 1.0;
         CGFloat scaleFactor = 1.0 + (rawScaleFactor - 1.0) * 1.25; 
         
-        CGFloat initialLogicalWidth = self.initialResizeFrame.size.width;
+        CGFloat initialLogicalWidth = MIN(self.initialResizeFrame.size.width, self.initialResizeFrame.size.height);
         CGFloat targetWidth = initialLogicalWidth * scaleFactor;
         
         // Use copy to avoid mutation during enumeration
@@ -6611,19 +6744,15 @@ static void CV3CollectReceptionLayers(CALayer *layer,
             finalWidth = maxAllowedWidth + (targetWidth - maxAllowedWidth) * 0.3;
         }
         
-        CGFloat finalHeight = finalWidth * aspect;
-        CGFloat outerWidth = finalWidth;
-        CGFloat outerHeight = finalHeight;
-        
-        CGRect newFrame;
-        newFrame.size = CGSizeMake(outerWidth, outerHeight);
-        newFrame.origin.x = initialCenter.x - outerWidth / 2.0;
-        newFrame.origin.y = initialCenter.y - outerHeight / 2.0;
+        CGSize physicalSize = [self physicalFloatingSizeForLogicalWidth:finalWidth
+                                                           displayBounds:screenBounds
+                                                            orientation:[self effectiveResizeOrientation]];
+        CGRect newFrame = [self constrainedFloatingFrameForSize:physicalSize preferredCenter:initialCenter];
         
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         
-        self.bounds = CGRectMake(0, 0, outerWidth, outerHeight);
+        self.bounds = CGRectMake(0, 0, newFrame.size.width, newFrame.size.height);
         self.center = CGPointMake(CGRectGetMidX(newFrame), CGRectGetMidY(newFrame));
         [CATransaction commit];
         
@@ -6652,7 +6781,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
             } completion:nil];
         }
         
-        CGRect screenBounds = CV3DisplayBoundsForWindow(self);
+        CGRect screenBounds = [self orientedDisplayBoundsForCurrentOrientation];
         CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
         CGFloat longSide = MAX(screenBounds.size.width, screenBounds.size.height);
         CGFloat aspect = longSide / MAX(shortSide, 1.0);
@@ -6694,7 +6823,7 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 
         // Snapping and constraints for Ended state
         if (gesture.state == UIGestureRecognizerStateEnded) {
-            CGFloat finalWidth = self.bounds.size.width;
+            CGFloat finalWidth = MIN(self.bounds.size.width, self.bounds.size.height);
             
             // 惯性滑行动量优化
             CGPoint gestureVel = [gesture velocityInView:nil];
@@ -6709,8 +6838,9 @@ static void CV3CollectReceptionLayers(CALayer *layer,
             finalWidth += widthMomentum;
 
             // 限制惯性后的宽度范围，避免拉伸越界
-            CGFloat minAllowedWidth = shortSide * 0.4;
-            CGFloat maxAllowedWidth = shortSide * 0.75;
+            CGFloat minAllowedWidth = 1.0;
+            CGFloat maxAllowedWidth = 1.0;
+            [self resizeLimitsForAspect:aspect minWidth:&minAllowedWidth maxWidth:&maxAllowedWidth];
             if (finalWidth < minAllowedWidth) finalWidth = minAllowedWidth;
             if (finalWidth > maxAllowedWidth) finalWidth = maxAllowedWidth;
 
@@ -6727,26 +6857,25 @@ static void CV3CollectReceptionLayers(CALayer *layer,
             CGFloat currentRatio = finalWidth / shortSide;
             if (fabs(currentRatio - 0.5) < 0.03) finalWidth = shortSide * 0.5;
             else if (fabs(currentRatio - 0.75) < 0.03) finalWidth = shortSide * 0.75;
-
-            CGFloat finalHeight = finalWidth * aspect;
-            CGFloat outerWidth = finalWidth;
-            CGFloat outerHeight = finalHeight;
-            snapFrame.size = CGSizeMake(outerWidth, outerHeight);
+            finalWidth = MAX(minAllowedWidth, MIN(maxAllowedWidth, finalWidth));
+            CGSize finalSize = [self physicalFloatingSizeForLogicalWidth:finalWidth
+                                                            displayBounds:screenBounds
+                                                             orientation:[self effectiveResizeOrientation]];
+            snapFrame.size = finalSize;
             
             // Re-center if ratio snapped
             if (fabs(finalWidth - previousLogicalWidth) > 0.1) {
-                snapFrame.origin.x = initialCenter.x - outerWidth / 2.0;
-                snapFrame.origin.y = initialCenter.y - outerHeight / 2.0;
+                snapFrame.origin.x = initialCenter.x - finalSize.width / 2.0;
+                snapFrame.origin.y = initialCenter.y - finalSize.height / 2.0;
             }
+            snapFrame = [self constrainedFloatingFrameForSize:finalSize
+                                              preferredCenter:CGPointMake(CGRectGetMidX(snapFrame), CGRectGetMidY(snapFrame))];
 
-            // Safety clamp with breath padding to enforce Safe Area Constraint
-            CGFloat breath = CV3Style.safeAreaBreath;
-            if (snapFrame.origin.x < safeArea.left + breath) snapFrame.origin.x = safeArea.left + breath;
-            if (snapFrame.origin.y < safeArea.top + breath) snapFrame.origin.y = safeArea.top + breath;
-            if (CGRectGetMaxX(snapFrame) > screenBounds.size.width - safeArea.right - breath) 
-                snapFrame.origin.x = screenBounds.size.width - safeArea.right - breath - outerWidth;
-            if (CGRectGetMaxY(snapFrame) > screenBounds.size.height - safeArea.bottom - breath) 
-                snapFrame.origin.y = screenBounds.size.height - safeArea.bottom - breath - outerHeight;
+            CV3LogToFile(@"[ResizeLimits] phase=corner.end bundle=%@ orientedBounds=%@ safeArea=%@ orientation=%ld requestedLogical=%.3f minLogical=%.3f maxLogical=%.3f finalSize=%@ finalFrame=%@",
+                         self.bundleID ?: @"<nil>", NSStringFromCGRect(screenBounds),
+                         NSStringFromUIEdgeInsets(safeArea), (long)self.targetOrientation,
+                         finalWidth, minAllowedWidth, maxAllowedWidth,
+                         NSStringFromCGSize(finalSize), NSStringFromCGRect(snapFrame));
 
             // Final bounce animation with dynamic spring velocity matching gesture release speed
             CGFloat springVelocity = MIN(4.0, MAX(0.5, speed / 800.0));
