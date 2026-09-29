@@ -5,11 +5,8 @@
 #import <objc/runtime.h>
 #import <notify.h>
 #import <substrate.h>
+#import "CV3BridgeSupport.h"
 
-static const char *CV3VideoOrientationNotification = "com.xu.chevronv3.video-orientation";
-static const char *CV3PlaybackTraceNotification = "com.xu.chevronv3.playback-trace";
-static const char *CV3HostedInteractionNotification = "com.xu.chevronv3.hosted-interaction";
-static const char *CV3HostGenerationNotification = "com.xu.chevronv3.host-generation";
 static int CV3VideoOrientationNotificationToken = -1;
 static int CV3PlaybackTraceNotificationToken = -1;
 static int CV3HostedInteractionNotificationToken = -1;
@@ -391,17 +388,6 @@ typedef NS_ENUM(uint8_t, CV3PlaybackTraceEvent) {
 static void CV3InstallLifecycleDelegateHooks(void);
 static void CV3InstallHostedAppHooksIfNeeded(void);
 
-static uint64_t CV3StableBundleHash(NSString *bundleID) {
-    const unsigned char *bytes = (const unsigned char *)[bundleID UTF8String];
-    uint64_t hash = 1469598103934665603ULL;
-    if (!bytes) return hash;
-    while (*bytes) {
-        hash ^= (uint64_t)*bytes++;
-        hash *= 1099511628211ULL;
-    }
-    return hash & 0x00FFFFFFFFFFFFFFULL;
-}
-
 static uint64_t CV3EffectiveHostedBundleHash(NSString *runtimeBundleID) {
     if (CV3HostedLeaseBundleHash != 0) return CV3HostedLeaseBundleHash;
     return runtimeBundleID.length > 0 ? CV3StableBundleHash(runtimeBundleID) : 0;
@@ -411,7 +397,7 @@ static NSString *CV3HostedStateNotificationName(void) {
     NSString *bundleID = [NSBundle mainBundle].bundleIdentifier;
     if (bundleID.length == 0) return nil;
     CV3HostedLeaseBundleHash = CV3StableBundleHash(bundleID);
-    return [NSString stringWithFormat:@"com.xu.chevronv3.hosted.%014llx", CV3HostedLeaseBundleHash];
+    return CV3BundleScopedNotificationName(@"com.xu.chevronv3.hosted", bundleID);
 }
 
 static void CV3PostPlaybackTrace(CV3PlaybackTraceEvent event) {
@@ -453,9 +439,7 @@ static void CV3PostHostedInteraction(void) {
 
 static NSString *CV3BridgeReadyNotificationName(void) {
     NSString *bundleID = [NSBundle mainBundle].bundleIdentifier;
-    if (bundleID.length == 0) return nil;
-    return [NSString stringWithFormat:@"com.xu.chevronv3.bridge-ready.%014llx",
-                                      CV3StableBundleHash(bundleID)];
+    return CV3BundleScopedNotificationName(@"com.xu.chevronv3.bridge-ready", bundleID);
 }
 
 static void CV3PublishBridgeReadyState(void) {

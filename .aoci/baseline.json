@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-09-18T11:17:40Z",
-  "updated_at": "2026-09-23T12:15:23Z",
+  "updated_at": "2026-09-24T10:30:02Z",
   "files": {
     ".agents/skills/animate/SKILL.md": {
       "sha256": "2a99870e61971553c0af3185a194c0e557f33aaa81e0422ca2fcec52195a4341",
@@ -108,6 +108,11 @@
       "size": 14067,
       "normalized_sha256": "340a4d4c00961967cfe4d0cba15e380a2d57a39aacdc1e6d8e18cc6683564b33"
     },
+    "CV3BridgeSupport.h": {
+      "sha256": "b4123f5cbb9fdee93298716b29e55c9961b6c4afcd90071dbfb6281b99a2b26f",
+      "size": 1388,
+      "normalized_sha256": "b4123f5cbb9fdee93298716b29e55c9961b6c4afcd90071dbfb6281b99a2b26f"
+    },
     "CV3CameraBridge.x": {
       "sha256": "350b931d087e3b9054092aaf38cef07baa361673b721582e1c8735b2d765a8f7",
       "size": 7496,
@@ -124,9 +129,9 @@
       "normalized_sha256": "a07a15f9514b461b20f967175ac201b9c5b4ad6e1175857dff897aeb59cf065a"
     },
     "CV3FloatingAppWindow.inc": {
-      "sha256": "d257fdd6afd383a03caad6b24619bf5b2cf849ece8e7a7d8724cf3c13897277b",
-      "size": 395162,
-      "normalized_sha256": "d257fdd6afd383a03caad6b24619bf5b2cf849ece8e7a7d8724cf3c13897277b"
+      "sha256": "f3e564dccca1ed0f296c672af7793ced3808185655ab02ec8c2e0d973ae3a900",
+      "size": 372776,
+      "normalized_sha256": "f3e564dccca1ed0f296c672af7793ced3808185655ab02ec8c2e0d973ae3a900"
     },
     "CV3PrivateAPI.h": {
       "sha256": "18b97990fe381351e296e7f85cc2e0dd80d75707c189b2d69db25a8383f5f6e4",
@@ -134,14 +139,14 @@
       "normalized_sha256": "18b97990fe381351e296e7f85cc2e0dd80d75707c189b2d69db25a8383f5f6e4"
     },
     "CV3VideoBridge.x": {
-      "sha256": "1759e741430215a5ffa42e8b78d30d3215153fb3b7ddf3bf7e9e4b86e75ffd80",
-      "size": 64065,
-      "normalized_sha256": "1759e741430215a5ffa42e8b78d30d3215153fb3b7ddf3bf7e9e4b86e75ffd80"
+      "sha256": "a86f9438726cf5571076065b0a1a88060c6c1d9abd1bd4f8d4de03e03e6decae",
+      "size": 51221,
+      "normalized_sha256": "a86f9438726cf5571076065b0a1a88060c6c1d9abd1bd4f8d4de03e03e6decae"
     },
     "CV3Window.inc": {
-      "sha256": "575a12bb0b3609feed8f746c7ced71d43d555d5c329a3d9952bd6be15b6fb6a6",
-      "size": 189015,
-      "normalized_sha256": "575a12bb0b3609feed8f746c7ced71d43d555d5c329a3d9952bd6be15b6fb6a6"
+      "sha256": "660ec200e3964474da9674186f6cf4e8493ef8729d891327ad8a4c4fcec4b7e1",
+      "size": 185014,
+      "normalized_sha256": "660ec200e3964474da9674186f6cf4e8493ef8729d891327ad8a4c4fcec4b7e1"
     },
     "CV3WorkspaceSupport.h": {
       "sha256": "bbec80a6655c85d06f8dd6e680030952761ad5bc20d95dbc5e04236b84064e98",
@@ -199,14 +204,14 @@
       "normalized_sha256": "b66fc920a9fcdcbef4ab79b8c911c6d79c761de709cc32cc6526280bf94ea9ed"
     },
     "Tweak.x": {
-      "sha256": "d23a836deb3f35220979caff73e5fa34d887c5ba834690e1d456086c4ce4eb85",
-      "size": 265411,
-      "normalized_sha256": "d23a836deb3f35220979caff73e5fa34d887c5ba834690e1d456086c4ce4eb85"
+      "sha256": "bc3c037b322916b08fb6ce3eed438a86830238644f15ca07f72892a99828a674",
+      "size": 247430,
+      "normalized_sha256": "bc3c037b322916b08fb6ce3eed438a86830238644f15ca07f72892a99828a674"
     },
     "aoci.code.txt": {
-      "sha256": "d10a9cb1f4c6a8e46d1497125afee7ab7be7356952c56284fa996a665626d186",
-      "size": 19288,
-      "normalized_sha256": "d10a9cb1f4c6a8e46d1497125afee7ab7be7356952c56284fa996a665626d186"
+      "sha256": "b056737983f94d1b2d70ab4216effd2620216ce08097cd78346f10211ee60335",
+      "size": 19469,
+      "normalized_sha256": "b056737983f94d1b2d70ab4216effd2620216ce08097cd78346f10211ee60335"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -226,9 +231,9 @@
       "normalized_sha256": "4f565e314f82e8d09b2b31ed9b509daac2795ef17c58641dbe59bf6d90ececf4"
     },
     "control": {
-      "sha256": "c15a50ec56888d713e95eb5745e8b0c83b8cdd55c9bd3cb471fdbb81f88b352a",
-      "size": 233,
-      "normalized_sha256": "c15a50ec56888d713e95eb5745e8b0c83b8cdd55c9bd3cb471fdbb81f88b352a"
+      "sha256": "bb0cf142029dab665144b7779f4c5cb2d26da294de5d232e7b9833b26f225472",
+      "size": 239,
+      "normalized_sha256": "bb0cf142029dab665144b7779f4c5cb2d26da294de5d232e7b9833b26f225472"
     },
     "layout/Library/PreferenceLoader/Preferences/ChevronV3.plist": {
       "sha256": "fe196c32859eb4a531d70f7de490a3087177f19f58f9de187e6c214ff97fc401",

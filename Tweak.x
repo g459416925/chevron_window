@@ -6,6 +6,7 @@
 #import "CV3PrivateAPI.h"
 #import "CV3CoreSupport.h"
 #import "CV3CameraSupport.h"
+#import "CV3BridgeSupport.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -235,7 +236,6 @@ static void CV3PostHostedState(NSString *bundleID, BOOL hosted);
 @property (nonatomic, copy) NSString *name;
 @property (nonatomic, copy) NSString *bundleId;
 @property (nonatomic, strong) UIImage *icon;
-@property (nonatomic, strong) id sbIcon; 
 @property (nonatomic, copy) NSString *pinyinInitial;
 @property (nonatomic, copy) NSString *category; 
 @property (nonatomic, assign) BOOL isPinned;
@@ -982,36 +982,37 @@ static void CV3WriteFocusedDiagnostic(NSString *message) {
         [entry dataUsingEncoding:NSUTF8StringEncoding], @"focused");
 }
 
+static void CV3WriteFormattedDiagnostic(NSString *format, va_list arguments) {
+    NSString *message = [[NSString alloc] initWithFormat:format arguments:arguments];
+    CV3WriteFocusedDiagnostic(message);
+}
+
 static void CV3LogStashAnimation(NSString *format, ...) {
     va_list args;
     va_start(args, format);
-    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+    CV3WriteFormattedDiagnostic(format, args);
     va_end(args);
-    CV3WriteFocusedDiagnostic(message);
 }
 
 static void CV3LogVideoFullscreen(NSString *format, ...) {
     va_list args;
     va_start(args, format);
-    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+    CV3WriteFormattedDiagnostic(format, args);
     va_end(args);
-    CV3WriteFocusedDiagnostic(message);
 }
 
 static void CV3LogHomeBarVisibility(NSString *format, ...) {
     va_list args;
     va_start(args, format);
-    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+    CV3WriteFormattedDiagnostic(format, args);
     va_end(args);
-    CV3WriteFocusedDiagnostic(message);
 }
 
 static void CV3LogWindowOrientation(NSString *format, ...) {
     va_list args;
     va_start(args, format);
-    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+    CV3WriteFormattedDiagnostic(format, args);
     va_end(args);
-    CV3WriteFocusedDiagnostic(message);
 }
 
 @implementation CV3RootViewController
@@ -1102,9 +1103,6 @@ static void CV3ApplyGlassAccentStyle(UIView *surface,
 #pragma mark - Floating App Window (MilkyWay2-style)
 static NSString * const CV3FloatingWindowsDidChangeNotification = @"CV3FloatingWindowsDidChangeNotification";
 static NSMutableArray *floatingWindows = nil;
-static const char *CV3VideoOrientationNotification = "com.xu.chevronv3.video-orientation";
-static const char *CV3PlaybackTraceNotification = "com.xu.chevronv3.playback-trace";
-static const char *CV3HostedInteractionNotification = "com.xu.chevronv3.hosted-interaction";
 static int CV3VideoOrientationNotificationToken = -1;
 static int CV3PlaybackTraceNotificationToken = -1;
 static int CV3HostedInteractionNotificationToken = -1;
@@ -1122,7 +1120,6 @@ static BOOL CV3ControlCenterPresented = NO;
 static BOOL CV3CoverSheetManagerPresented = NO;
 static BOOL CV3CoverSheetControllerPresented = NO;
 static __weak UIViewController *CV3GestureCoverSheetController;
-static const char *CV3HostGenerationNotification = "com.xu.chevronv3.host-generation";
 static uint32_t CV3HostGeneration = 0;
 
 static void CV3BeginFullscreenLaunchBypass(NSString *bundleID) {
@@ -1193,26 +1190,13 @@ static BOOL CV3IdentifierContainsExactBundleID(NSString *identifier, NSString *b
     return NO;
 }
 
-static uint64_t CV3StableBundleHash(NSString *bundleID) {
-    const unsigned char *bytes = (const unsigned char *)bundleID.UTF8String;
-    uint64_t hash = 1469598103934665603ULL;
-    if (!bytes) return hash;
-    while (*bytes) {
-        hash ^= (uint64_t)*bytes++;
-        hash *= 1099511628211ULL;
-    }
-    return hash & 0x00FFFFFFFFFFFFFFULL;
-}
-
 static const uint64_t CV3RequiredClientBridgeProtocolVersion = 0x2026090603ULL;
 static const uint64_t CV3CanvasReadyFlag = (1ULL << 63);
 static NSMutableSet<NSString *> *CV3ClientBridgeRelaunchPendingBundleIDs = nil;
 static NSMutableSet<NSString *> *CV3ClientBridgeRelaunchAuthorizedBundleIDs = nil;
 
 static NSString *CV3BridgeReadyNotificationNameForBundleID(NSString *bundleID) {
-    if (bundleID.length == 0) return nil;
-    return [NSString stringWithFormat:@"com.xu.chevronv3.bridge-ready.%014llx",
-                                      CV3StableBundleHash(bundleID)];
+    return CV3BundleScopedNotificationName(@"com.xu.chevronv3.bridge-ready", bundleID);
 }
 
 static uint64_t CV3ClientBridgeProtocolVersionForBundleID(NSString *bundleID) {
@@ -1272,7 +1256,7 @@ static BOOL CV3EnsureFreshClientBridgeBeforeHosting(NSString *bundleID,
     return YES;
 }
 
-__attribute__((unused)) static UIInterfaceOrientation CV3InterfaceOrientationFromDevice(void) {
+static UIInterfaceOrientation CV3InterfaceOrientationFromDevice(void) {
     UIDeviceOrientation deviceOrientation = [UIDevice currentDevice].orientation;
     switch (deviceOrientation) {
         case UIDeviceOrientationPortrait:
@@ -1288,7 +1272,7 @@ __attribute__((unused)) static UIInterfaceOrientation CV3InterfaceOrientationFro
     }
 }
 
-__attribute__((unused)) static UIDeviceOrientation CV3DeviceOrientationFromInterface(UIInterfaceOrientation orientation) {
+static UIDeviceOrientation CV3DeviceOrientationFromInterface(UIInterfaceOrientation orientation) {
     switch (orientation) {
         case UIInterfaceOrientationPortrait:
             return UIDeviceOrientationPortrait;
@@ -1938,8 +1922,11 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 - (void)homeBarAutoHideTimerFired:(NSTimer *)timer;
 - (void)layoutFloatingHomeBarForBounds:(CGRect)bounds;
 - (NSInteger)preferredHomeBarPlacementForScreenFrame:(CGRect)frame;
+- (UIInterfaceOrientation)effectiveResizeOrientation;
 - (CGRect)orientedDisplayBoundsForCurrentOrientation;
-- (void)homeBarResizeLimitsForAspect:(CGFloat)aspect minWidth:(CGFloat *)minWidth maxWidth:(CGFloat *)maxWidth;
+- (CGRect)physicalDisplaySafeRect;
+- (void)resizeLimitsForAspect:(CGFloat)aspect minWidth:(CGFloat *)minWidth maxWidth:(CGFloat *)maxWidth;
+- (CGRect)physicalSafeAreaClampedFrame:(CGRect)frame preferredCenter:(CGPoint)preferredCenter preserveSize:(BOOL)preserveSize;
 - (CGRect)constrainedFloatingFrameForSize:(CGSize)size preferredCenter:(CGPoint)center;
 - (void)startHomeBarResizeSessionIfNeeded;
 - (void)handleHomeBarTap:(UITapGestureRecognizer *)gesture;
@@ -1972,10 +1959,9 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 static void CV3ReleaseKeyboardHostingForWindow(CV3FloatingAppWindow *window);
 
 static void CV3PostHostedStateValue(NSString *bundleID, uint64_t state) {
-    if (bundleID.length == 0) return;
-
-    NSString *notificationName = [NSString stringWithFormat:@"com.xu.chevronv3.hosted.%014llx",
-                                  CV3StableBundleHash(bundleID)];
+    NSString *notificationName = CV3BundleScopedNotificationName(@"com.xu.chevronv3.hosted",
+                                                                  bundleID);
+    if (notificationName.length == 0) return;
     int token = -1;
     if (notify_register_check(notificationName.UTF8String, &token) != NOTIFY_STATUS_OK) return;
     uint64_t encodedState = ((uint64_t)CV3HostGeneration << 32) | (state & 0xFFFFFFFFULL);
@@ -3449,7 +3435,6 @@ static CV3AppInfo *CV3CopyAppInfo(CV3AppInfo *source) {
     info.name = source.name;
     info.bundleId = source.bundleId;
     info.icon = source.icon;
-    info.sbIcon = source.sbIcon;
     info.pinyinInitial = source.pinyinInitial;
     info.category = source.category;
     info.isPinned = source.isPinned;
@@ -3800,70 +3785,7 @@ static BOOL CV3HandleUnlockedBannerTap(id primaryObject, id secondaryObject, NSS
 }
 
 static const char *CV3SimulatedNotificationName = "com.xu.chevronv3.simulate-notification";
-static id CV3CapturedBulletinServer = nil;
 static id CV3CapturedBulletinNotificationSource = nil;
-
-static void CV3SetUnsignedIntegerArgument(NSInvocation *invocation, NSUInteger index, unsigned long long value) {
-    if (!invocation || index >= invocation.methodSignature.numberOfArguments) return;
-
-    const char *type = [invocation.methodSignature getArgumentTypeAtIndex:index];
-    while (type && (*type == 'r' || *type == 'n' || *type == 'N' || *type == 'o' ||
-                    *type == 'O' || *type == 'R' || *type == 'V')) {
-        type++;
-    }
-
-    if (!type) return;
-    switch (type[0]) {
-        case 'Q': {
-            unsigned long long argument = value;
-            [invocation setArgument:&argument atIndex:index];
-            break;
-        }
-        case 'q': {
-            long long argument = (long long)value;
-            [invocation setArgument:&argument atIndex:index];
-            break;
-        }
-        case 'L':
-        case 'I': {
-            unsigned int argument = (unsigned int)value;
-            [invocation setArgument:&argument atIndex:index];
-            break;
-        }
-        case 'l':
-        case 'i': {
-            int argument = (int)value;
-            [invocation setArgument:&argument atIndex:index];
-            break;
-        }
-        case 'S': {
-            unsigned short argument = (unsigned short)value;
-            [invocation setArgument:&argument atIndex:index];
-            break;
-        }
-        case 's': {
-            short argument = (short)value;
-            [invocation setArgument:&argument atIndex:index];
-            break;
-        }
-        case 'C':
-        case 'B': {
-            BOOL argument = value != 0;
-            [invocation setArgument:&argument atIndex:index];
-            break;
-        }
-        case 'c': {
-            char argument = value != 0;
-            [invocation setArgument:&argument atIndex:index];
-            break;
-        }
-        default: {
-            unsigned long long argument = value;
-            [invocation setArgument:&argument atIndex:index];
-            break;
-        }
-    }
-}
 
 static void CV3SetBulletinValue(id bulletin, NSString *key, id value) {
     if (!bulletin || key.length == 0 || !value) return;
@@ -3875,7 +3797,7 @@ static void CV3SetBulletinValue(id bulletin, NSString *key, id value) {
     }
 }
 
-static __attribute__((unused)) id CV3CreateNativeTestBulletin(NSString *bundleID) {
+static id CV3CreateNativeTestBulletin(NSString *bundleID) {
     Class bulletinClass = CV3ClassNamed(@"BBBulletinRequest");
     if (!bulletinClass) {
         CV3LogToFile(@"[NotificationSplit][NativeTest] BBBulletinRequest 不存在");
@@ -3926,96 +3848,6 @@ static __attribute__((unused)) id CV3CreateNativeTestBulletin(NSString *bundleID
     }
 
     return bulletin;
-}
-
-static id CV3BulletinServerFromObject(id object) {
-    if (!object) return nil;
-    if ([object respondsToSelector:NSSelectorFromString(@"publishBulletin:destinations:")]) return object;
-
-    NSArray<NSString *> *selectors = @[
-        @"bulletinServer", @"_bulletinServer", @"bbServer", @"_bbServer", @"server", @"_server"
-    ];
-    for (NSString *selectorName in selectors) {
-        id candidate = CV3InvokeObject(object, NSSelectorFromString(selectorName));
-        if ([candidate respondsToSelector:NSSelectorFromString(@"publishBulletin:destinations:")]) {
-            return candidate;
-        }
-    }
-    return nil;
-}
-
-static __attribute__((unused)) id CV3ResolveBulletinServer(void) {
-    if ([CV3CapturedBulletinServer respondsToSelector:NSSelectorFromString(@"publishBulletin:destinations:")]) {
-        return CV3CapturedBulletinServer;
-    }
-
-    Class serverClass = CV3ClassNamed(@"BBServer");
-    id server = CV3BulletinServerFromObject(CV3InvokeObject(serverClass, @selector(sharedInstance)));
-    if (server) return server;
-
-    id bannerController = CV3InvokeObject(CV3ClassNamed(@"SBBulletinBannerController"), @selector(sharedInstance));
-    id applicationDelegate = [UIApplication sharedApplication].delegate;
-    id mainWorkspace = CV3InvokeObject(CV3ClassNamed(@"SBMainWorkspace"), @selector(sharedInstance));
-    NSArray *roots = @[
-        bannerController ?: [NSNull null],
-        [UIApplication sharedApplication],
-        applicationDelegate ?: [NSNull null],
-        mainWorkspace ?: [NSNull null]
-    ];
-    for (id root in roots) {
-        if (root == [NSNull null]) continue;
-        server = CV3BulletinServerFromObject(root);
-        if (server) return server;
-    }
-    return nil;
-}
-
-static __attribute__((unused)) BOOL CV3PublishBulletinWithServer(id server, id bulletin) {
-    SEL selector = NSSelectorFromString(@"publishBulletin:destinations:");
-    if (!server || !bulletin || ![server respondsToSelector:selector]) return NO;
-
-    @try {
-        NSMethodSignature *signature = [server methodSignatureForSelector:selector];
-        if (!signature || signature.numberOfArguments < 4) return NO;
-        NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
-        invocation.target = server;
-        invocation.selector = selector;
-        __unsafe_unretained id bulletinArgument = bulletin;
-        [invocation setArgument:&bulletinArgument atIndex:2];
-        CV3SetUnsignedIntegerArgument(invocation, 3, 15ULL);
-        [invocation invoke];
-        return YES;
-    } @catch (NSException *exception) {
-        CV3LogToFile(@"[NotificationSplit][NativeTest] BBServer 发布异常: %@", exception);
-        return NO;
-    }
-}
-
-static __attribute__((unused)) BOOL CV3PublishBulletinWithBannerController(id bulletin) {
-    id controller = CV3InvokeObject(CV3ClassNamed(@"SBBulletinBannerController"), @selector(sharedInstance));
-    SEL selector = NSSelectorFromString(@"observer:addBulletin:forFeed:playLightsAndSirens:withReply:");
-    if (!controller || ![controller respondsToSelector:selector]) return NO;
-
-    @try {
-        NSMethodSignature *signature = [controller methodSignatureForSelector:selector];
-        if (!signature || signature.numberOfArguments < 7) return NO;
-        NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
-        invocation.target = controller;
-        invocation.selector = selector;
-        __unsafe_unretained id observer = nil;
-        __unsafe_unretained id bulletinArgument = bulletin;
-        __unsafe_unretained id reply = nil;
-        [invocation setArgument:&observer atIndex:2];
-        [invocation setArgument:&bulletinArgument atIndex:3];
-        CV3SetUnsignedIntegerArgument(invocation, 4, 2);
-        CV3SetUnsignedIntegerArgument(invocation, 5, 1);
-        [invocation setArgument:&reply atIndex:6];
-        [invocation invoke];
-        return YES;
-    } @catch (NSException *exception) {
-        CV3LogToFile(@"[NotificationSplit][NativeTest] BannerController 发布异常: %@", exception);
-        return NO;
-    }
 }
 
 static BOOL CV3PublishBulletinThroughNotificationSource(id bulletin) {
