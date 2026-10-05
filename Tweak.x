@@ -5711,10 +5711,10 @@ static BOOL CV3ShouldSuppressHostedCameraRouteChangeHUD(id event) {
         CV3WriteBootstrapProbe();
         (void)CV3LogQueue();
         CV3LogToFile(@"[ChevronProbe] springboard.ctor pid=%d", NSProcessInfo.processInfo.processIdentifier);
-        CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=logger.ready version=1.0.18-79+rotation-window-layout");
-        CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=logger.ready version=1.0.18-79+rotation-window-layout");
-        CV3LogWindowOrientation(@"[WindowOrientationTrace] phase=logger.ready version=1.0.18-79+rotation-window-layout");
-        CV3LogToFile(@"[NotificationSplit] phase=logger.ready version=1.0.18-94+geometry-release path=/rootfs/var/mobile/Library/Logs/ChevronV3_Logs.txt");
+        CV3LogVideoFullscreen([NSString stringWithFormat:@"[DEBUG-VIDEOFULLSCREEN] phase=logger.ready version=%@", CV3_VERSION_STRING]);
+        CV3LogHomeBarVisibility([NSString stringWithFormat:@"[HomeBarTrace] phase=logger.ready version=%@", CV3_VERSION_STRING]);
+        CV3LogWindowOrientation([NSString stringWithFormat:@"[WindowOrientationTrace] phase=logger.ready version=%@", CV3_VERSION_STRING]);
+        CV3LogToFile([NSString stringWithFormat:@"[NotificationSplit] phase=logger.ready version=%@ path=/rootfs/var/mobile/Library/Logs/ChevronV3_Logs.txt", CV3_VERSION_STRING]);
         CV3SetCameraGrantMutationLogger(CV3LogCameraGrantMutation);
         CV3ResetCameraForegroundGrants();
         CV3PublishHostGeneration();

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-09-18T11:17:40Z",
-  "updated_at": "2026-09-24T10:30:02Z",
+  "updated_at": "2026-10-05T11:57:08Z",
   "files": {
     ".agents/skills/animate/SKILL.md": {
       "sha256": "2a99870e61971553c0af3185a194c0e557f33aaa81e0422ca2fcec52195a4341",
@@ -129,9 +129,9 @@
       "normalized_sha256": "a07a15f9514b461b20f967175ac201b9c5b4ad6e1175857dff897aeb59cf065a"
     },
     "CV3FloatingAppWindow.inc": {
-      "sha256": "f3e564dccca1ed0f296c672af7793ced3808185655ab02ec8c2e0d973ae3a900",
-      "size": 372776,
-      "normalized_sha256": "f3e564dccca1ed0f296c672af7793ced3808185655ab02ec8c2e0d973ae3a900"
+      "sha256": "b3fcc390376107c07841be8f1fe0f44b1e4d9c5f43feb1eb7f3393337955b6a0",
+      "size": 385083,
+      "normalized_sha256": "b3fcc390376107c07841be8f1fe0f44b1e4d9c5f43feb1eb7f3393337955b6a0"
     },
     "CV3PrivateAPI.h": {
       "sha256": "18b97990fe381351e296e7f85cc2e0dd80d75707c189b2d69db25a8383f5f6e4",
@@ -204,9 +204,9 @@
       "normalized_sha256": "b66fc920a9fcdcbef4ab79b8c911c6d79c761de709cc32cc6526280bf94ea9ed"
     },
     "Tweak.x": {
-      "sha256": "bc3c037b322916b08fb6ce3eed438a86830238644f15ca07f72892a99828a674",
-      "size": 247430,
-      "normalized_sha256": "bc3c037b322916b08fb6ce3eed438a86830238644f15ca07f72892a99828a674"
+      "sha256": "6f893273cf45d04c09b9a530d6da1f01d67c817fe6431d35f05ba331b491dec8",
+      "size": 247639,
+      "normalized_sha256": "6f893273cf45d04c09b9a530d6da1f01d67c817fe6431d35f05ba331b491dec8"
     },
     "aoci.code.txt": {
       "sha256": "b056737983f94d1b2d70ab4216effd2620216ce08097cd78346f10211ee60335",
@@ -231,9 +231,9 @@
       "normalized_sha256": "4f565e314f82e8d09b2b31ed9b509daac2795ef17c58641dbe59bf6d90ececf4"
     },
     "control": {
-      "sha256": "bb0cf142029dab665144b7779f4c5cb2d26da294de5d232e7b9833b26f225472",
-      "size": 239,
-      "normalized_sha256": "bb0cf142029dab665144b7779f4c5cb2d26da294de5d232e7b9833b26f225472"
+      "sha256": "2e6c8f64e3587c474ec6d1cfe086055bb773bbc3e05b2e78f9b219c2e31edb48",
+      "size": 236,
+      "normalized_sha256": "2e6c8f64e3587c474ec6d1cfe086055bb773bbc3e05b2e78f9b219c2e31edb48"
     },
     "layout/Library/PreferenceLoader/Preferences/ChevronV3.plist": {
       "sha256": "fe196c32859eb4a531d70f7de490a3087177f19f58f9de187e6c214ff97fc401",
