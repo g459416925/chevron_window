@@ -15,6 +15,12 @@ static int CV3HostedStateNotificationToken = -1;
 static int CV3HostGenerationNotificationToken = -1;
 static BOOL CV3ApplicationIsChevronHosted = NO;
 static BOOL CV3WorkspaceTransitionShieldActive = NO;
+// Latched once the app has been hosted by Chevron. It stays set for the rest of
+// the process so orientation observations continue after the floating window is
+// closed: the real canvas can still be fullscreen video while nothing is hosted.
+static BOOL CV3HasEverBeenChevronHosted = NO;
+static int CV3RealContentOrientationToken = -1;
+static NSString *CV3RealContentOrientationName = nil;
 static NSTimeInterval CV3PlaybackTransitionGraceDeadline = 0;
 static const uint64_t CV3ClientBridgeProtocolVersion = 0x2026090603ULL;
 static const uint64_t CV3CanvasReadyFlag = (1ULL << 63);
@@ -400,6 +406,64 @@ static NSString *CV3HostedStateNotificationName(void) {
     return CV3BundleScopedNotificationName(@"com.xu.chevronv3.hosted", bundleID);
 }
 
+static BOOL CV3IsValidHostedOrientation(UIInterfaceOrientation orientation) {
+    return orientation == UIInterfaceOrientationPortrait ||
+           orientation == UIInterfaceOrientationPortraitUpsideDown ||
+           orientation == UIInterfaceOrientationLandscapeLeft ||
+           orientation == UIInterfaceOrientationLandscapeRight;
+}
+
+static BOOL CV3ShouldTrackRealContentOrientation(void) {
+    return CV3ApplicationIsChevronHosted || CV3HasEverBeenChevronHosted;
+}
+
+static NSString *CV3RealContentOrientationNotificationName(void) {
+    NSString *bundleID = [NSBundle mainBundle].bundleIdentifier;
+    if (bundleID.length == 0) return nil;
+    return CV3BundleScopedNotificationName(
+        [NSString stringWithUTF8String:CV3RealContentOrientationNotificationPrefix], bundleID);
+}
+
+// The floating shell is only a simulated device frame, so its orientation has
+// to follow the canvas the app actually draws. Publish the orientation the app
+// last requested into a per-bundle Darwin state that SpringBoard can read even
+// while the app is not being hosted.
+static void CV3PublishRealContentOrientation(UIInterfaceOrientation orientation) {
+    if (!CV3IsValidHostedOrientation(orientation)) return;
+
+    NSString *name = CV3RealContentOrientationNotificationName();
+    if (name.length == 0) return;
+
+    if (![CV3RealContentOrientationName isEqualToString:name]) {
+        if (CV3RealContentOrientationToken >= 0) notify_cancel(CV3RealContentOrientationToken);
+        CV3RealContentOrientationToken = -1;
+        if (notify_register_check(name.UTF8String, &CV3RealContentOrientationToken) != NOTIFY_STATUS_OK) {
+            CV3RealContentOrientationToken = -1;
+            CV3RealContentOrientationName = nil;
+            return;
+        }
+        CV3RealContentOrientationName = [name copy];
+    }
+    // Hold the token for the process lifetime: Darwin notification state is
+    // dropped once the last registration goes away, and SpringBoard has to read
+    // this value while the app is no longer hosted.
+    notify_set_state(CV3RealContentOrientationToken, (uint64_t)orientation);
+    notify_post(name.UTF8String);
+}
+
+// A restarted app must not inherit the previous session's direction, so clear
+// the state to Unknown before the bridge publishes anything new.
+static void CV3ResetRealContentOrientation(void) {
+    NSString *name = CV3RealContentOrientationNotificationName();
+    if (name.length == 0) return;
+
+    int token = -1;
+    if (notify_register_check(name.UTF8String, &token) != NOTIFY_STATUS_OK) return;
+    notify_set_state(token, (uint64_t)UIInterfaceOrientationUnknown);
+    notify_post(name.UTF8String);
+    notify_cancel(token);
+}
+
 static void CV3PostPlaybackTrace(CV3PlaybackTraceEvent event) {
     NSString *bundleID = [NSBundle mainBundle].bundleIdentifier;
     uint64_t bundleHash = CV3EffectiveHostedBundleHash(bundleID);
@@ -471,6 +535,9 @@ static void CV3RefreshHostedState(int token) {
         BOOL previousHosted = CV3ApplicationIsChevronHosted;
         CV3ApplicationIsChevronHosted = (flags & 1) != 0;
         CV3WorkspaceTransitionShieldActive = (flags & 2) != 0;
+        // Latch permanently: orientation must keep being observed after hosting
+        // ends, so a re-created shell can match the app's real canvas.
+        if (CV3ApplicationIsChevronHosted) CV3HasEverBeenChevronHosted = YES;
         if (previousHosted != CV3ApplicationIsChevronHosted) {
             [CV3CanvasTimer invalidate];
             CV3CanvasTimer = nil;
@@ -733,24 +800,37 @@ static void CV3PostVideoOrientation(UIInterfaceOrientation orientation,
     if ([runtimeBundleID isEqualToString:@"com.apple.springboard"]) return;
     uint64_t bundleHash = CV3EffectiveHostedBundleHash(runtimeBundleID);
     if (bundleHash == 0) return;
+    // Keep observing the app after its floating window closes, so an app that
+    // is still showing fullscreen video can report the moment its real canvas
+    // returns to portrait. Apps that were never hosted stay untouched.
+    if (!CV3ShouldTrackRealContentOrientation()) return;
 
-    CV3AppendCanvasTrace([NSString stringWithFormat:
-        @"[ChevronProbe] orientation.post requested=%ld previous=%ld source=%u hosted=%d hash=%014llx runtimeBundle=%@",
-        (long)orientation, (long)CV3RequestedInterfaceOrientation, (unsigned int)source,
-        CV3ApplicationIsChevronHosted, bundleHash, runtimeBundleID ?: @"<nil>"]);
+    if (CV3ApplicationIsChevronHosted) {
+        CV3AppendCanvasTrace([NSString stringWithFormat:
+            @"[ChevronProbe] orientation.post requested=%ld previous=%ld source=%u hosted=%d hash=%014llx runtimeBundle=%@",
+            (long)orientation, (long)CV3RequestedInterfaceOrientation, (unsigned int)source,
+            CV3ApplicationIsChevronHosted, bundleHash, runtimeBundleID ?: @"<nil>"]);
+    }
     if (orientation == UIInterfaceOrientationUnknown) return;
     if (orientation == CV3RequestedInterfaceOrientation) {
-        CV3AppendCanvasTrace([NSString stringWithFormat:
-            @"[OrientationRequest] requested=%ld source=%u mode=duplicateSuppressed",
-            (long)orientation, (unsigned int)source]);
+        if (CV3ApplicationIsChevronHosted) {
+            CV3AppendCanvasTrace([NSString stringWithFormat:
+                @"[OrientationRequest] requested=%ld source=%u mode=duplicateSuppressed",
+                (long)orientation, (unsigned int)source]);
+        }
         return;
     }
 
-    CV3AppendCanvasTrace([NSString stringWithFormat:
-        @"[OrientationRequest] requested=%ld previous=%ld source=%u hosted=%d mode=signalDriven",
-        (long)orientation, (long)CV3RequestedInterfaceOrientation, (unsigned int)source,
-        CV3ApplicationIsChevronHosted]);
+    if (CV3ApplicationIsChevronHosted) {
+        CV3AppendCanvasTrace([NSString stringWithFormat:
+            @"[OrientationRequest] requested=%ld previous=%ld source=%u hosted=%d mode=signalDriven",
+            (long)orientation, (long)CV3RequestedInterfaceOrientation, (unsigned int)source,
+            CV3ApplicationIsChevronHosted]);
+    }
     CV3RequestedInterfaceOrientation = orientation;
+    // Publish the app's own last request so SpringBoard can read the real canvas
+    // direction when it hosts this app again, with no floating window present.
+    CV3PublishRealContentOrientation(orientation);
 
     if (CV3VideoOrientationNotificationToken < 0) {
         if (notify_register_check(CV3VideoOrientationNotification, &CV3VideoOrientationNotificationToken) != NOTIFY_STATUS_OK) {
@@ -798,13 +878,15 @@ static void CV3PostVideoOrientation(UIInterfaceOrientation orientation,
 - (void)requestGeometryUpdateWithPreferences:(id)preferences errorHandler:(id)errorHandler {
     SEL selector = NSSelectorFromString(@"interfaceOrientations");
     UIInterfaceOrientation resolved = UIInterfaceOrientationUnknown;
-    if (CV3ApplicationIsChevronHosted && preferences && [preferences respondsToSelector:selector]) {
+    if (CV3ShouldTrackRealContentOrientation() && preferences && [preferences respondsToSelector:selector]) {
         UIInterfaceOrientationMask mask = ((UIInterfaceOrientationMask (*)(id, SEL))objc_msgSend)(preferences, selector);
         resolved = CV3InterfaceOrientationForMask(mask, UIInterfaceOrientationUnknown);
-        CV3AppendCanvasTrace([NSString stringWithFormat:
-            @"[ChevronProbe] orientation.geometry mask=0x%lx preferred=%ld resolved=%ld hosted=%d",
-            (unsigned long)mask, (long)UIInterfaceOrientationUnknown, (long)resolved,
-            CV3ApplicationIsChevronHosted]);
+        if (CV3ApplicationIsChevronHosted) {
+            CV3AppendCanvasTrace([NSString stringWithFormat:
+                @"[ChevronProbe] orientation.geometry mask=0x%lx preferred=%ld resolved=%ld hosted=%d",
+                (unsigned long)mask, (long)UIInterfaceOrientationUnknown, (long)resolved,
+                CV3ApplicationIsChevronHosted]);
+        }
     }
     %orig(preferences, errorHandler);
     if (resolved != UIInterfaceOrientationUnknown && resolved != 0) {
@@ -819,15 +901,17 @@ static void CV3PostVideoOrientation(UIInterfaceOrientation orientation,
 
 %hook UIDevice
 - (void)setValue:(id)value forKey:(NSString *)key {
-    if (CV3ApplicationIsChevronHosted &&
+    if (CV3ShouldTrackRealContentOrientation() &&
         [key isEqualToString:@"orientation"] &&
         [value respondsToSelector:@selector(integerValue)]) {
         UIDeviceOrientation deviceOrientation = (UIDeviceOrientation)[value integerValue];
         UIInterfaceOrientation interfaceOrientation =
             CV3InterfaceOrientationForDeviceOrientation(deviceOrientation);
-        CV3AppendCanvasTrace([NSString stringWithFormat:
-            @"[ChevronProbe] orientation.callback api=deviceKVC device=%ld resolved=%ld",
-            (long)deviceOrientation, (long)interfaceOrientation]);
+        if (CV3ApplicationIsChevronHosted) {
+            CV3AppendCanvasTrace([NSString stringWithFormat:
+                @"[ChevronProbe] orientation.callback api=deviceKVC device=%ld resolved=%ld",
+                (long)deviceOrientation, (long)interfaceOrientation]);
+        }
         CV3PostVideoOrientation(interfaceOrientation,
                                 CV3VideoOrientationSourceDeviceKVC);
     }
@@ -1059,7 +1143,7 @@ static void CV3InstallHostedAppHooksIfNeeded(void) {
 
 %ctor {
     @autoreleasepool {
-        CV3AppendCanvasTrace([NSString stringWithFormat:@"[ChevronProbe] video.ctor pid=%d bundle=%@", NSProcessInfo.processInfo.processIdentifier, NSBundle.mainBundle.bundleIdentifier ?: @"<nil>"]);
+        CV3AppendCanvasTrace([NSString stringWithFormat:@"[ChevronProbe] video.ctor pid=%d bundle=%@ version=%@", NSProcessInfo.processInfo.processIdentifier, NSBundle.mainBundle.bundleIdentifier ?: @"<nil>", CV3_VERSION_STRING]);
         %init(CV3GlobalIconImageHooks);
 
         NSString *processBundleID = [NSBundle mainBundle].bundleIdentifier.lowercaseString;
@@ -1071,6 +1155,9 @@ static void CV3InstallHostedAppHooksIfNeeded(void) {
             return;
         }
         CV3PostPlaybackTrace(CV3PlaybackTraceBridgeLoaded);
+        // Clear any direction left behind by a previous process instance before
+        // SpringBoard can read it for a newly created floating window.
+        CV3ResetRealContentOrientation();
         CV3PublishBridgeReadyState();
         NSString *hostedStateName = CV3HostedStateNotificationName();
         if (hostedStateName.length > 0 &&

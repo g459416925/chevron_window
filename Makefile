@@ -3,18 +3,24 @@ TARGET := iphone:clang:16.5:14.0
 INSTALL_TARGET_PROCESSES = SpringBoard
 THEOS_PACKAGE_SCHEME = roothide
 
+# The Debian Version field in control is the single source of truth for the
+# build. Runtime logs report this instead of a hand-edited string that drifts
+# away from the actually installed package.
+CV3_PACKAGE_VERSION := $(shell awk -F ': ' '/^Version:/{print $$2; exit}' $(CURDIR)/control)
+CV3_VERSION_FLAG := -DCV3_PACKAGE_VERSION=\"$(CV3_PACKAGE_VERSION)\"
+
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = ChevronV3 ChevronV3VideoBridge ChevronV3CameraBridge
 
 ChevronV3_FILES = Tweak.x
-ChevronV3_CFLAGS = -fobjc-arc
+ChevronV3_CFLAGS = -fobjc-arc $(CV3_VERSION_FLAG)
 ChevronV3_ARCHS = arm64 arm64e
 ChevronV3_FRAMEWORKS = UIKit CoreGraphics CoreMotion QuartzCore
 ChevronV3_PRIVATE_FRAMEWORKS = AssertionServices
 
 ChevronV3VideoBridge_FILES = CV3VideoBridge.x
-ChevronV3VideoBridge_CFLAGS = -fobjc-arc
+ChevronV3VideoBridge_CFLAGS = -fobjc-arc $(CV3_VERSION_FLAG)
 ChevronV3VideoBridge_ARCHS = arm64 arm64e
 ChevronV3VideoBridge_FRAMEWORKS = UIKit AVFAudio AVFoundation
 
