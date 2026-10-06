@@ -124,6 +124,39 @@ static CGRect CV3DisplayBoundsForWindow(UIWindow *window) {
     return [UIScreen mainScreen].bounds;
 }
 
+// Rendered rotation of a transform, in radians. The restore snapshot is a render
+// of the window's VISIBLE space, so its true orientation is decided by the
+// transform actually applied to that space — not by the content orientation
+// value. The two only agree while the shell axes stay put.
+static CGFloat CV3RotationAngleOfTransform(CGAffineTransform transform) {
+    return atan2(transform.b, transform.a);
+}
+
+static CGFloat CV3NormalizedAngleDelta(CGFloat delta) {
+    while (delta > M_PI) delta -= (CGFloat)(M_PI * 2.0);
+    while (delta < -M_PI) delta += (CGFloat)(M_PI * 2.0);
+    return delta;
+}
+
+// preStashFrame is the single source of truth for "where the window was before
+// it became an icon". Every write to it therefore decides where the window
+// lands when the icon is tapped again, so each write is traced with its call
+// site. Without this, a restore that drifts can only be guessed at.
+static void CV3TracePreStashFrameWrite(CV3FloatingAppWindow *window,
+                                       NSString *source,
+                                       CGRect before) {
+    if (!window) return;
+    CV3LogToFile(@"[StashFrameTrace] phase=write bundle=%@ source=%@ before=%@ after=%@ delta=%@ stashed=%d windowFrame=%@ displayBounds=%@",
+                 window.bundleID ?: @"nil", source ?: @"nil",
+                 NSStringFromCGRect(before),
+                 NSStringFromCGRect(window.preStashFrame),
+                 NSStringFromCGPoint(CGPointMake(CGRectGetMidX(window.preStashFrame) - CGRectGetMidX(before),
+                                                 CGRectGetMidY(window.preStashFrame) - CGRectGetMidY(before))),
+                 window.isStashed,
+                 NSStringFromCGRect(window.frame),
+                 NSStringFromCGRect(CV3DisplayBoundsForWindow(window)));
+}
+
 // Resolve the minimized icon's final stack slot before the genie animation
 // starts. The old path animated to the window center and only then reflowed the
 // stack, which made the icon visibly jump when another icon occupied that side.
@@ -217,21 +250,29 @@ static BOOL CV3HostedLandscapeNeedsSceneCompensation(CV3FloatingAppWindow *windo
         CV3SceneAndDisplayAxesDiffer(window);
 }
 
+// THE single axis rule for the whole project — window, drop preview, rotation
+// and restore must all ask this one function.
+//
+// UIWindow bounds live in the SpringBoard Scene coordinate space. When the
+// physical display has rotated but that Scene did not (a fullscreen video in a
+// floating window is enough to reach that state), the shell's axes must be
+// inverted for EVERY hosted app: landscape content is TALL in Scene points and
+// only becomes wide after display mapping. Previously each call site re-derived
+// this rule with slightly different conditions, so the answers drifted apart and
+// fixing one path broke another.
+static BOOL CV3ShellLandscapeForContent(BOOL contentIsLandscape,
+                                        BOOL sceneAxesDiffer) {
+    return sceneAxesDiffer ? !contentIsLandscape : contentIsLandscape;
+}
+
 static BOOL CV3ShellShouldBeLandscape(CV3FloatingAppWindow *window,
                                       UIInterfaceOrientation presentationOrientation) {
     UIInterfaceOrientation contentOrientation =
         window && CV3IsValidInterfaceOrientation(window.hostedContentOrientation)
             ? window.hostedContentOrientation
             : presentationOrientation;
-    BOOL contentLandscape = UIInterfaceOrientationIsLandscape(contentOrientation);
-    // UIWindow bounds live in the SpringBoard Scene coordinate space. When the
-    // physical screen has rotated but that Scene remains portrait, the shell's
-    // axes must be inverted for every hosted App, not only landscape-only games.
-    // Example: on a landscape display, portrait content is wide in Scene points;
-    // landscape content is tall in Scene points and becomes wide after display
-    // mapping. Failing to invert here leaves video fullscreen portrait-shaped.
-    BOOL sceneAndDisplayAxesDiffer = CV3SceneAndDisplayAxesDiffer(window);
-    return sceneAndDisplayAxesDiffer ? !contentLandscape : contentLandscape;
+    return CV3ShellLandscapeForContent(UIInterfaceOrientationIsLandscape(contentOrientation),
+                                       CV3SceneAndDisplayAxesDiffer(window));
 }
 
 static UIInterfaceOrientation CV3HostedClientOrientation(CV3FloatingAppWindow *window) {
@@ -386,6 +427,72 @@ static void CV3SaveWindowLayout(CV3FloatingAppWindow *window) {
     [defaults synchronize];
     CV3LogToFile(@"[LayoutStore] 保存 %@ frame=%@ orientation=%ld",
                  window.bundleID, NSStringFromCGRect(window.frame), (long)window.targetOrientation);
+}
+
+#pragma mark - Single geometry authority
+
+// Every path that sizes a floating window — creation, drop preview, rotation,
+// restore — must ask THESE functions. The previous per-path implementations each
+// mixed Scene-space bounds with display-space insets, so a size that was legal
+// in one path became an overflow in another, and fixing one path broke the next.
+
+// Bounds of the coordinate space a UIWindow's frame lives in.
+static CGRect CV3SceneBoundsForScene(UIWindowScene *scene) {
+    if (scene && !CGRectIsEmpty(scene.coordinateSpace.bounds)) {
+        return scene.coordinateSpace.bounds;
+    }
+    if (scene.screen && !CGRectIsEmpty(scene.screen.bounds)) {
+        return scene.screen.bounds;
+    }
+    return [UIScreen mainScreen].bounds;
+}
+
+// The one answer to "how much room is there", expressed in Scene space.
+static CGSize CV3SceneVisibleSizeForScene(UIWindowScene *scene) {
+    CGRect bounds = CV3SceneBoundsForScene(scene);
+    UIEdgeInsets insets = CV3InitialFloatingSafeAreaInsets(scene); // same Scene space
+    CGFloat breath = CV3Style.safeAreaBreath;
+    return CGSizeMake(MAX(1.0, bounds.size.width - insets.left - insets.right - breath * 2.0),
+                      MAX(1.0, bounds.size.height - insets.top - insets.bottom - breath * 2.0));
+}
+
+// The one answer to "how big should this window be", in Scene space.
+//
+// Sources in order: the size the user last dialled in (persisted by
+// CV3SaveWindowLayout), then the caller's default logical size. Short/long edges
+// are re-laid-out for the requested axis, then fitted to the visible area. The
+// fit clamps at 1.0, so a legitimate user size survives untouched and only
+// over-sized values are pulled back.
+static CGSize CV3ResolvedFloatingSizeForBundle(NSString *bundleID,
+                                               BOOL targetLandscape,
+                                               CGSize fallbackLogicalSize,
+                                               CGSize visibleSceneSize) {
+    CGFloat shortEdge = 0.0;
+    CGFloat longEdge = 0.0;
+
+    NSDictionary *savedLayout = CV3SavedWindowLayout(bundleID);
+    NSString *savedFrameString = savedLayout[@"frame"];
+    if ([savedFrameString isKindOfClass:NSString.class]) {
+        CGRect savedFrame = CGRectFromString(savedFrameString);
+        if (!CGRectIsNull(savedFrame) && !CGRectIsEmpty(savedFrame) &&
+            savedFrame.size.width >= 1.0 && savedFrame.size.height >= 1.0) {
+            shortEdge = MIN(savedFrame.size.width, savedFrame.size.height);
+            longEdge = MAX(savedFrame.size.width, savedFrame.size.height);
+        }
+    }
+    if (shortEdge <= 0.0 || longEdge <= 0.0) {
+        shortEdge = MIN(fallbackLogicalSize.width, fallbackLogicalSize.height);
+        longEdge = MAX(fallbackLogicalSize.width, fallbackLogicalSize.height);
+    }
+
+    CGSize size = targetLandscape ? CGSizeMake(longEdge, shortEdge)
+                                  : CGSizeMake(shortEdge, longEdge);
+    CGFloat scale = MIN(1.0, MIN(visibleSceneSize.width / MAX(size.width, 1.0),
+                                 visibleSceneSize.height / MAX(size.height, 1.0)));
+    if (scale < 1.0) {
+        size = CGSizeMake(size.width * scale, size.height * scale);
+    }
+    return size;
 }
 
 static CGRect CV3CanonicalApplicationSceneFrame(id settings) {
@@ -1367,12 +1474,10 @@ void CV3ToggleExposeMode(void) {
     }
 }
 
-- (UIImage *)imageByRotatingImage:(UIImage *)image fromOrientation:(UIInterfaceOrientation)fromOrientation toOrientation:(UIInterfaceOrientation)toOrientation {
-    if (!image || fromOrientation == toOrientation) return image;
-
-    CGFloat delta = [self angleForInterfaceOrientation:toOrientation] - [self angleForInterfaceOrientation:fromOrientation];
-    while (delta > M_PI) delta -= (CGFloat)(M_PI * 2.0);
-    while (delta < -M_PI) delta += (CGFloat)(M_PI * 2.0);
+// The single image-rotation primitive: everything else routes through it.
+- (UIImage *)imageByRotatingImage:(UIImage *)image byAngle:(CGFloat)rawDelta {
+    if (!image) return image;
+    CGFloat delta = CV3NormalizedAngleDelta(rawDelta);
     if (fabs(delta) < 0.001) return image;
 
     CGSize sourceSize = image.size;
@@ -1393,6 +1498,12 @@ void CV3ToggleExposeMode(void) {
     UIImage *rotatedImage = UIGraphicsGetImageFromCurrentImageContext();
     UIGraphicsEndImageContext();
     return rotatedImage ?: image;
+}
+
+- (UIImage *)imageByRotatingImage:(UIImage *)image fromOrientation:(UIInterfaceOrientation)fromOrientation toOrientation:(UIInterfaceOrientation)toOrientation {
+    if (!image || fromOrientation == toOrientation) return image;
+    CGFloat delta = [self angleForInterfaceOrientation:toOrientation] - [self angleForInterfaceOrientation:fromOrientation];
+    return [self imageByRotatingImage:image byAngle:delta];
 }
 
 - (UIView *)stashAnimationSnapshotSourceView {
@@ -1448,15 +1559,59 @@ void CV3ToggleExposeMode(void) {
     return image;
 }
 
+// The rotation the content ACTUALLY renders with while the window is visible.
+//
+// This is the single source of truth for snapshot orientation. It is NOT
+// baseRotationTransform: for landscape content the live tree applies
+// CV3HostedContentRotationInScene to rootTransformContainer, which differs from
+// context.transform. Recording baseRotationTransform therefore rotated the
+// snapshot by the wrong amount (the logs showed a ±180° delta where the
+// orientation implied ±90°). The stashed branch resets rootTransformContainer to
+// identity, so its live transform cannot be read either — it has to be derived.
+- (CGAffineTransform)cv3EffectiveVisibleRotation {
+    if (self.prefersLandscapePresentation &&
+        UIInterfaceOrientationIsLandscape(self.hostedContentOrientation)) {
+        return CV3HostedContentRotationInScene(self);
+    }
+    return self.baseRotationTransform;
+}
+
 - (void)updateStashedRestoreSnapshotForOrientation:(UIInterfaceOrientation)orientation {
     if (!CV3IsValidInterfaceOrientation(orientation)) return;
-    if (!self.stashedRestoreSnapshotImage) {
+    CGAffineTransform currentRotation = [self cv3EffectiveVisibleRotation];
+    CGAffineTransform recorded = self.stashedRestoreSnapshotVisualRotation;
+    BOOL hasRecorded = !(recorded.a == 0.0 && recorded.b == 0.0 &&
+                         recorded.c == 0.0 && recorded.d == 0.0);
+
+    // Nothing captured yet: just remember the current rendered rotation.
+    if (!self.stashedRestoreSnapshotImage || !hasRecorded) {
         self.stashedRestoreSnapshotOrientation = orientation;
+        self.stashedRestoreSnapshotVisualRotation = currentRotation;
+        CV3LogToFile(@"[SnapshotOrient] phase=seed bundle=%@ orientation=%ld current=%@ hasImage=%d",
+                     self.bundleID ?: @"nil", (long)orientation,
+                     NSStringFromCGAffineTransform(currentRotation),
+                     self.stashedRestoreSnapshotImage != nil);
         return;
     }
-    UIInterfaceOrientation previousOrientation = CV3IsValidInterfaceOrientation(self.stashedRestoreSnapshotOrientation) ? self.stashedRestoreSnapshotOrientation : orientation;
-    self.stashedRestoreSnapshotImage = [self imageByRotatingImage:self.stashedRestoreSnapshotImage fromOrientation:previousOrientation toOrientation:orientation];
+
+    // Rotate by how much the RENDERED rotation actually changed. A shell-axis
+    // flip rotates the visible space by 90° while the orientation value itself
+    // stays the same, so keying off the orientation alone silently missed it and
+    // the restored snapshot came back sideways / upside down.
+    CGFloat delta = CV3RotationAngleOfTransform(currentRotation) -
+                    CV3RotationAngleOfTransform(recorded);
+    BOOL applied = fabs(delta) > 0.001;
+    if (applied) {
+        self.stashedRestoreSnapshotImage = [self imageByRotatingImage:self.stashedRestoreSnapshotImage
+                                                              byAngle:delta];
+    }
     self.stashedRestoreSnapshotOrientation = orientation;
+    self.stashedRestoreSnapshotVisualRotation = currentRotation;
+    CV3LogToFile(@"[SnapshotOrient] phase=update bundle=%@ orientation=%ld deltaDeg=%.1f applied=%d recorded=%@ current=%@",
+                 self.bundleID ?: @"nil", (long)orientation,
+                 delta * 180.0 / M_PI, applied,
+                 NSStringFromCGAffineTransform(recorded),
+                 NSStringFromCGAffineTransform(currentRotation));
 }
 
 - (CGRect)interpolatedRectFrom:(CGRect)fromRect to:(CGRect)toRect progress:(CGFloat)progress {
@@ -1769,15 +1924,27 @@ void CV3ToggleExposeMode(void) {
 
     if (self.isStashed) {
         CGPoint preferredCenter = CGRectIsEmpty(self.preStashFrame) ? self.center : CGPointMake(CGRectGetMidX(self.preStashFrame), CGRectGetMidY(self.preStashFrame));
+        CGRect preStashBeforeRotation = self.preStashFrame;
         if (CGRectIsEmpty(self.preStashFrame)) {
             self.preStashFrame = [self restorableFrameForOrientation:context.orientation preferredCenter:preferredCenter];
         } else {
             self.preStashFrame = [self safeAreaClampedFrame:self.preStashFrame preferredCenter:preferredCenter preserveSize:YES];
         }
-        if (orientationChanged || !CV3IsValidInterfaceOrientation(self.stashedRestoreSnapshotOrientation)) {
+        CV3TracePreStashFrameWrite(self,
+                                   [NSString stringWithFormat:@"applySceneRotationContext.stashed orient=%ld", (long)context.orientation],
+                                   preStashBeforeRotation);
+        // The rotation must be published BEFORE the snapshot is reconciled. The
+        // correction is the delta between the recorded and the CURRENT
+        // baseRotationTransform, so updating the transform afterwards left that
+        // delta at zero and the snapshot was never re-oriented.
+        self.baseRotationTransform = context.transform;
+        // rotationChanged matters as much as orientationChanged: a shell-axis
+        // flip rotates the visible space by 90° while the orientation value
+        // itself stays the same — exactly the case that used to slip through.
+        if (orientationChanged || rotationChanged ||
+            !CV3IsValidInterfaceOrientation(self.stashedRestoreSnapshotOrientation)) {
             [self updateStashedRestoreSnapshotForOrientation:context.orientation];
         }
-        self.baseRotationTransform = context.transform;
         self.lastLayoutOrientation = context.orientation;
         self.rootTransformContainer.transform = CGAffineTransformIdentity;
         [self normalizeStashedGrabberLayout];
@@ -1795,15 +1962,24 @@ void CV3ToggleExposeMode(void) {
     CGSize currentSize = self.bounds.size;
     BOOL currentLandscape = currentSize.width > currentSize.height;
     BOOL targetLandscape = CV3ShellShouldBeLandscape(self, context.orientation);
-    CGSize newSize = currentSize;
-    // Preserve the user's current logical window size. A physical rotation
-    // swaps the shell axes; recomputing the default size here loses custom
-    // sizing and can leave a portrait-shaped window in landscape.
+    // A shell that flips its axes needs the same re-centring as a plain
+    // orientation change; the window would otherwise keep its old centre.
+    BOOL shellAxisSwapped = (currentLandscape != targetLandscape);
+
+    // Same single authority as window creation and the drop preview: the stored
+    // user size (or the live/default logical size), laid out on the new shell
+    // axis, then fitted to the visible area. Rotation no longer carries its own
+    // copy of this logic, which is what let the paths drift apart.
+    CGSize fallbackLogicalSize = currentSize;
     if (currentSize.width <= 1.0 || currentSize.height <= 1.0) {
-        newSize = [self defaultPhysicalFloatingSizeForOrientation:context.orientation displayBounds:screenBounds];
-    } else if (currentLandscape != targetLandscape) {
-        newSize = CGSizeMake(currentSize.height, currentSize.width);
+        fallbackLogicalSize = [self defaultPhysicalFloatingSizeForOrientation:context.orientation
+                                                                displayBounds:screenBounds];
     }
+    CGSize rotationVisibleSize = CV3SceneVisibleSizeForScene(self.windowScene);
+    CGSize newSize = CV3ResolvedFloatingSizeForBundle(self.bundleID,
+                                                      targetLandscape,
+                                                      fallbackLogicalSize,
+                                                      rotationVisibleSize);
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
@@ -1819,32 +1995,54 @@ void CV3ToggleExposeMode(void) {
     
     [CATransaction commit];
 
-    // 转屏时将窗口像果冻一样平滑弹跳居中，加入级联偏移防止多窗口重叠，并保证安全区域避让
-    if (orientationChanged) {
-        NSInteger index = 0;
-        if (floatingWindows) {
-            index = [floatingWindows indexOfObject:self];
-            if (index == NSNotFound) index = 0;
-        }
-        CGFloat cascade = index * kCV3RotationCascadeStep;
-        CGRect displayBounds = CGRectIsEmpty(context.sceneBounds) ? CV3DisplayBoundsForWindow(self) : context.sceneBounds;
-        [UIView animateWithDuration:0.55
-                              delay:0
-             usingSpringWithDamping:0.48 // 果冻物理阻尼系数
-              initialSpringVelocity:0.6
-                            options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionBeginFromCurrentState
-                         animations:^{
-            self.center = CGPointMake(CGRectGetMidX(displayBounds) + cascade, CGRectGetMidY(displayBounds) + cascade);
-            [self clampToScreenBounds];
-        } completion:nil];
-    }
-
     self.lastLayoutOrientation = context.orientation;
     [self syncHostedSceneLayoutForce:YES];
     [self setNeedsLayout];
     [self layoutIfNeeded];
     [self clampToScreenBounds];
     [self syncWindowBoundsToClient];
+
+    // Centre LAST, after the synchronous layout above has settled. That pass
+    // re-derives the frame from the pre-rotation centre (via
+    // physicalSafeAreaClampedFrame) and parks the window against the display
+    // edge, so a spring started before it was always overwritten. Running it now
+    // makes the new orientation's centre the final authority. shellAxisSwapped
+    // is included because the shell can flip its axes without the orientation
+    // value itself changing.
+    if (orientationChanged || shellAxisSwapped) {
+        NSInteger index = 0;
+        if (floatingWindows) {
+            index = [floatingWindows indexOfObject:self];
+            if (index == NSNotFound) index = 0;
+        }
+        CGFloat cascade = index * kCV3RotationCascadeStep;
+        CGRect centreBounds = CV3DisplayBoundsForWindow(self);
+        UIEdgeInsets safeArea = [self currentSafeAreaInsets];
+        CGFloat breath = CV3Style.safeAreaBreath;
+        CGFloat halfW = newSize.width * 0.5;
+        CGFloat halfH = newSize.height * 0.5;
+        CGPoint target = CGPointMake(CGRectGetMidX(centreBounds) + cascade,
+                                     CGRectGetMidY(centreBounds) + cascade);
+        target.x = MIN(MAX(target.x, safeArea.left + breath + halfW),
+                       MAX(safeArea.left + breath + halfW,
+                           centreBounds.size.width - safeArea.right - breath - halfW));
+        target.y = MIN(MAX(target.y, safeArea.top + breath + halfH),
+                       MAX(safeArea.top + breath + halfH,
+                           centreBounds.size.height - safeArea.bottom - breath - halfH));
+        CV3LogToFile(@"[RotationCentre] bundle=%@ orientation=%ld swapped=%d size=%.1fx%.1f from=%@ to=%@ bounds=%@",
+                     self.bundleID ?: @"nil", (long)context.orientation, shellAxisSwapped,
+                     newSize.width, newSize.height,
+                     NSStringFromCGPoint(self.center), NSStringFromCGPoint(target),
+                     NSStringFromCGRect(centreBounds));
+        [UIView animateWithDuration:0.55
+                              delay:0
+             usingSpringWithDamping:0.48 // 果冻物理阻尼系数
+              initialSpringVelocity:0.6
+                            options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionBeginFromCurrentState
+                         animations:^{
+            self.center = target;
+        } completion:nil];
+    }
     [self recordOrientationTrace:@"applySceneRotationContext.end" force:YES];
 }
 
@@ -1870,10 +2068,27 @@ void CV3ToggleExposeMode(void) {
 }
 
 - (CGRect)restorableFramePreservingStashedSizeForOrientation:(UIInterfaceOrientation)orientation preferredCenter:(CGPoint)preferredCenter {
-    if (CGRectIsEmpty(self.preStashFrame)) {
-        return [self restorableFrameForOrientation:orientation preferredCenter:preferredCenter];
-    }
-    return [self safeAreaClampedFrame:self.preStashFrame preferredCenter:preferredCenter preserveSize:NO];
+    // Restore now goes through the same geometry authority as creation, the drop
+    // preview and rotation: the stored user size (laid out on the shell axis and
+    // fitted to the visible area) wins over whatever size the stashed frame
+    // happens to carry. Using the stashed frame's size made the icon round-trip
+    // reset an enlarged window.
+    BOOL shellLandscape = CV3ShellShouldBeLandscape(self, orientation);
+    CGSize fallbackLogicalSize = CGRectIsEmpty(self.preStashFrame)
+        ? (self.bounds.size.width > 1.0 ? self.bounds.size : CGSizeMake(200.0, 400.0))
+        : self.preStashFrame.size;
+    CGSize visibleSize = CV3SceneVisibleSizeForScene(self.windowScene);
+    CGSize size = CV3ResolvedFloatingSizeForBundle(self.bundleID,
+                                                   shellLandscape,
+                                                   fallbackLogicalSize,
+                                                   visibleSize);
+    CGRect frame = CGRectMake(preferredCenter.x - size.width * 0.5,
+                              preferredCenter.y - size.height * 0.5,
+                              size.width, size.height);
+    // preserveSize:YES — the size was already decided above; clamping must only
+    // move the frame, never re-fit it. Calling safeAreaClampedFrame with
+    // preserveSize:NO here would be a second, competing authority.
+    return [self safeAreaClampedFrame:frame preferredCenter:preferredCenter preserveSize:YES];
 }
 
 - (CGRect)visiblePortraitContentFrame {
@@ -4094,69 +4309,47 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 + (CGRect)initialFrameForBundleID:(NSString *)bundleID
                            center:(CGPoint)center
                       windowScene:(UIWindowScene *)windowScene {
-    CGRect sceneBounds = windowScene.coordinateSpace.bounds;
-    if (CGRectIsEmpty(sceneBounds)) sceneBounds = windowScene.screen.bounds;
-    if (CGRectIsEmpty(sceneBounds)) sceneBounds = UIScreen.mainScreen.bounds;
+    CGRect sceneBounds = CV3SceneBoundsForScene(windowScene);
+    UIEdgeInsets safeArea = CV3InitialFloatingSafeAreaInsets(windowScene);
+    CGSize visibleSize = CV3SceneVisibleSizeForScene(windowScene);
 
     UIInterfaceOrientation displayOrientation = CV3TrustedInterfaceOrientation(windowScene);
-    // Match the frame axis to the same authority the window itself uses, so a
-    // recreated shell cannot come back portrait while the app canvas is still
-    // landscape (for example an app left in fullscreen video).
     UIInterfaceOrientation hostedOrientation =
         CV3PreferredInitialHostedOrientation(bundleID, displayOrientation);
+
+    // Default logical canvas, used only when no user size has been stored yet.
     CGFloat shortSide = MIN(sceneBounds.size.width, sceneBounds.size.height);
     CGFloat longSide = MAX(sceneBounds.size.width, sceneBounds.size.height);
     CGFloat logicalWidth = shortSide * kCV3FloatingDefaultWidthRatio;
-    CGSize size = CGSizeMake(logicalWidth, logicalWidth * (longSide / MAX(shortSide, 1.0)));
-    if (UIInterfaceOrientationIsLandscape(hostedOrientation)) {
-        size = CGSizeMake(size.height, size.width);
-    }
+    CGSize defaultLogicalSize = CGSizeMake(logicalWidth, logicalWidth * (longSide / MAX(shortSide, 1.0)));
 
-    UIEdgeInsets safeArea = CV3InitialFloatingSafeAreaInsets(windowScene);
-    CGFloat breath = CV3Style.safeAreaBreath;
-    CGFloat visibleWidth = MAX(1.0, sceneBounds.size.width - safeArea.left - safeArea.right - breath * 2.0);
-    CGFloat visibleHeight = MAX(1.0, sceneBounds.size.height - safeArea.top - safeArea.bottom - breath * 2.0);
-    CGFloat fitScale = MIN(1.0, MIN(visibleWidth / MAX(size.width, 1.0),
-                                   visibleHeight / MAX(size.height, 1.0)));
-    if (fitScale < 1.0) {
-        size.width *= fitScale;
-        size.height *= fitScale;
-    }
+    BOOL shellLandscape = CV3ShellLandscapeForContent(
+        UIInterfaceOrientationIsLandscape(hostedOrientation),
+        CV3SceneAndDisplayAxesDifferForScene(windowScene));
 
-    BOOL shellLandscape = UIInterfaceOrientationIsLandscape(hostedOrientation);
-    BOOL requiresLandscapeContent = CV3BundleDeclaresLandscapeOnly(bundleID);
-    if (requiresLandscapeContent && CV3SceneAndDisplayAxesDifferForScene(windowScene)) {
-        shellLandscape = !shellLandscape;
-    }
-    if ((size.width > size.height) != shellLandscape) {
-        size = CGSizeMake(size.height, size.width);
-    }
-
-    CGPoint targetCenter = center;
-    NSDictionary *savedLayout = CV3SavedWindowLayout(bundleID);
-    NSNumber *savedOrientationNumber = savedLayout[@"orientation"];
-    NSString *savedFrameString = savedLayout[@"frame"];
-    if ([savedOrientationNumber isKindOfClass:NSNumber.class] &&
-        [savedFrameString isKindOfClass:NSString.class]) {
-        UIInterfaceOrientation savedOrientation =
-            (UIInterfaceOrientation)savedOrientationNumber.integerValue;
-        CGRect savedFrame = CGRectFromString(savedFrameString);
-        if (CV3IsValidInterfaceOrientation(savedOrientation) &&
-            UIInterfaceOrientationIsLandscape(savedOrientation) == UIInterfaceOrientationIsLandscape(hostedOrientation) &&
-            !CGRectIsNull(savedFrame) && !CGRectIsEmpty(savedFrame) &&
-            savedFrame.size.width >= 1.0 && savedFrame.size.height >= 1.0) {
-            size = savedFrame.size;
-            if ((size.width > size.height) != shellLandscape) {
-                size = CGSizeMake(size.height, size.width);
-            }
-            targetCenter = CGPointMake(CGRectGetMidX(savedFrame), CGRectGetMidY(savedFrame));
-        }
-    }
-
-    CGRect frame = CGRectMake(targetCenter.x - size.width * 0.5,
-                              targetCenter.y - size.height * 0.5,
+    // One call now decides the size: stored user size (or the default), laid out
+    // on the shell's axis, then fitted to the visible area. Axis rule, stored
+    // size lookup and fit living in a single place is the point — the drop
+    // preview and the window it creates can no longer disagree, and there are no
+    // per-path variants left to drift.
+    CGSize size = CV3ResolvedFloatingSizeForBundle(bundleID,
+                                                   shellLandscape,
+                                                   defaultLogicalSize,
+                                                   visibleSize);
+    CGRect frame = CGRectMake(center.x - size.width * 0.5,
+                              center.y - size.height * 0.5,
                               size.width, size.height);
-    return CV3ClampInitialFloatingFrame(frame, sceneBounds, safeArea);
+    CGRect clampedFrame = CV3ClampInitialFloatingFrame(frame, sceneBounds, safeArea);
+    CV3LogToFile(@"[SplitPreviewTrace] phase=initialFrame bundle=%@ displayOrientation=%ld hostedOrientation=%ld shellLandscape=%d sceneAxesDiffer=%d sceneBounds=%@ visible=%.1fx%.1f size=%.1fx%.1f final=%@",
+                 bundleID ?: @"nil",
+                 (long)displayOrientation, (long)hostedOrientation,
+                 shellLandscape,
+                 CV3SceneAndDisplayAxesDifferForScene(windowScene),
+                 NSStringFromCGRect(sceneBounds),
+                 visibleSize.width, visibleSize.height,
+                 size.width, size.height,
+                 NSStringFromCGRect(clampedFrame));
+    return clampedFrame;
 }
 
 - (void)recordOrientationTrace:(NSString *)phase force:(BOOL)force {
@@ -5415,10 +5608,23 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     self.stashAnimationTraceStartTime = CACurrentMediaTime();
     self.stashedRestoreSnapshotImage = [self snapshotImageForRestoreAnimation];
     self.stashedRestoreSnapshotOrientation = self.targetOrientation;
+    // Record the rotation the snapshot was actually rendered with, so a later
+    // shell-axis flip can correct it (see updateStashedRestoreSnapshot...).
+    // Must be the effective VISIBLE rotation, not baseRotationTransform.
+    self.stashedRestoreSnapshotVisualRotation = [self cv3EffectiveVisibleRotation];
     UIImage *genieImage = self.stashedRestoreSnapshotImage;
+    CV3LogToFile(@"[StashIconTrace] phase=minimizeSnapshot bundle=%@ snapshotSize=%@ snapshotOrientation=%ld targetOrientation=%ld deviceOrientation=%ld baseRotation=%@",
+                 self.bundleID ?: @"nil",
+                 NSStringFromCGSize(genieImage.size),
+                 (long)self.stashedRestoreSnapshotOrientation,
+                 (long)self.targetOrientation,
+                 (long)CV3TrustedInterfaceOrientation(self.windowScene),
+                 NSStringFromCGAffineTransform(self.baseRotationTransform));
 
+    CGRect preStashBeforeMinimize = self.preStashFrame;
     self.preStashFrame = initialFrame;
     self.isStashed = YES;
+    CV3TracePreStashFrameWrite(self, @"handleHideAction.minimize", preStashBeforeMinimize);
     CV3SetCameraForegroundGrant(self.bundleID, NO);
     self.stashedSide = isNearLeft ? 1 : 2;
     CGRect targetFrame = CV3StackedStashFrameForWindow(self, proposedTargetFrame);
@@ -5550,6 +5756,33 @@ static void CV3CollectReceptionLayers(CALayer *layer,
                                                               CGAffineTransformInvert(sceneTransform));
 }
 
+- (void)cv3ScheduleSettledStashIconOrientation {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                             selector:@selector(cv3ApplySettledStashIconOrientation)
+                                               object:nil];
+    [self performSelector:@selector(cv3ApplySettledStashIconOrientation)
+               withObject:nil
+               afterDelay:0.20];
+}
+
+- (void)cv3ApplySettledStashIconOrientation {
+    if (self.isClosing || !self.isStashed) return;
+    // A direction only counts as settled when the gyroscope agrees with the
+    // screen's actual axis. Intermediate states (screen still mid-turn) are
+    // dropped rather than painted — that is what removed the double flip.
+    UIInterfaceOrientation settled = CV3InterfaceOrientationFromDevice();
+    CGSize screenSize = self.windowScene.screen.bounds.size;
+    BOOL screenLandscape = screenSize.width > screenSize.height;
+    if (!CV3IsValidInterfaceOrientation(settled) ||
+        UIInterfaceOrientationIsLandscape(settled) != screenLandscape) {
+        return;
+    }
+    [UIView performWithoutAnimation:^{
+        [self updateStashIconAppearance];
+        [self applyStashedGrabberOrientation];
+    }];
+}
+
 - (void)physicalDeviceOrientationDidChange:(NSNotification *)notification {
     (void)notification;
     UIInterfaceOrientation current = CV3InterfaceOrientationFromDevice();
@@ -5559,20 +5792,25 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     if (self.isClosing || !CV3IsValidInterfaceOrientation(current)) return;
 
     if (self.isStashed) {
-        [UIView performWithoutAnimation:^{
-            [self updateStashIconAppearance];
-            [self applyStashedGrabberOrientation];
-        }];
+        // The gyroscope reports several intermediate orientations during a single
+        // physical turn (portrait → landscape → portrait → landscape). Applying
+        // each one immediately made the icon flip two or three times per turn.
+        // Debounce instead: wait for the direction to settle, then apply once.
+        [self cv3ScheduleSettledStashIconOrientation];
         return;
     }
 
-    // A landscape-only game's target/content orientation is already landscape
-    // while the device is portrait. Comparing orientation values alone therefore
-    // reports "no change" when the display later rotates to landscape, even
-    // though the SpringBoard Scene/display axes have changed and the shell must
-    // be transposed. Force a geometry re-evaluation for this one presentation
-    // mode; ordinary floating apps continue through the shared Scene path.
-    if (self.prefersLandscapePresentation && self.requiresLandscapeContent) {
+    // Whenever the hosted content is landscape, comparing orientation values
+    // alone reports "no change" as the display rotates: SpringBoard can keep a
+    // portrait Scene on a landscape display (a fullscreen video is enough to
+    // reach that state), so nothing in the Scene moves while the Scene/display
+    // axes have in fact changed and the shell must be transposed. This used to
+    // be limited to landscape-only games, which left video apps frozen in their
+    // old orientation until the icon was stashed and restored again. Ordinary
+    // portrait floating apps still go through the shared Scene path.
+    BOOL hostedContentIsLandscape = self.prefersLandscapePresentation &&
+        UIInterfaceOrientationIsLandscape(self.hostedContentOrientation);
+    if (hostedContentIsLandscape) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (self.isClosing || self.isStashed) return;
             [self applyInterfaceOrientation:current force:YES];
@@ -6433,6 +6671,11 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         UIView *snapshotSourceView = [self stashAnimationSnapshotSourceView];
         CGRect endFrameInWindow = [self convertRect:snapshotSourceView.bounds fromView:snapshotSourceView];
         CGRect startFrameInWindow = CGRectOffset(iconFrame, -targetFrame.origin.x, -targetFrame.origin.y);
+        // Reconcile the snapshot with the rotation the window is about to
+        // present. This is the single place the restore animation reads its
+        // image, so correcting it here means the genie can never fly out upside
+        // down even if no orientation update reached us while stashed.
+        [self updateStashedRestoreSnapshotForOrientation:self.targetOrientation];
         UIImage *genieImage = self.stashedRestoreSnapshotImage ?: [self snapshotImageForRestoreAnimation];
 
         self.appContentWrapper.alpha = 0.0;
@@ -6475,6 +6718,19 @@ static void CV3CollectReceptionLayers(CALayer *layer,
             iconProxy.frame = startFrameInWindow;
             iconProxy.transform = self.baseRotationTransform;
         }
+        // The proxy is the picture the user sees fly out of the icon. If it
+        // leaves at a different angle than the window it expands into, the
+        // culprit is this transform or the cached snapshot, not the geometry.
+        CV3LogToFile(@"[StashIconTrace] phase=restoreProxy bundle=%@ iconFrame=%@ startFrameInWindow=%@ targetFrame=%@ baseRotation=%@ contentOrientation=%ld targetOrientation=%ld snapshotOrientation=%ld snapshotSize=%@",
+                     self.bundleID ?: @"nil",
+                     NSStringFromCGRect(iconFrame),
+                     NSStringFromCGRect(startFrameInWindow),
+                     NSStringFromCGRect(targetFrame),
+                     NSStringFromCGAffineTransform(self.baseRotationTransform),
+                     (long)self.hostedContentOrientation,
+                     (long)self.targetOrientation,
+                     (long)self.stashedRestoreSnapshotOrientation,
+                     NSStringFromCGSize(self.stashedRestoreSnapshotImage.size));
         [self addSubview:iconProxy];
         CGAffineTransform iconBaseTransform = self.baseRotationTransform;
 
@@ -6570,7 +6826,9 @@ static void CV3CollectReceptionLayers(CALayer *layer,
             CGRect psf = self.preStashFrame;
             psf.origin.x = self.frame.origin.x + (kCV3StashIconSize * 0.5) - psf.size.width / 2.0;
             psf.origin.y = self.frame.origin.y + (kCV3StashIconSize * 0.5) - psf.size.height / 2.0;
+            CGRect preStashBeforePan = self.preStashFrame;
             self.preStashFrame = psf;
+            CV3TracePreStashFrameWrite(self, @"handleStashPan.reanchorToIcon", preStashBeforePan);
             
             // 重新判定 stashedSide 以便堆叠逻辑参考 (以中线为界)
             self.stashedSide = (self.center.x < screen.size.width / 2.0) ? 1 : 2;
