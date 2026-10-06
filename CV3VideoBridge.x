@@ -52,6 +52,7 @@ typedef NS_ENUM(uint8_t, CV3VideoOrientationSource) {
 };
 
 static void CV3AppendCanvasTrace(NSString *line) {
+    if (!CV3DiagnosticLoggingEnabled()) return;
     BOOL isProbe = [line hasPrefix:@"[ChevronProbe]"];
     if (!isProbe && (![line hasPrefix:@"[ReceptionTrace][Client]"] ||
         (![line containsString:@"phase=hosted."] &&

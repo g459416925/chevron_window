@@ -4,6 +4,7 @@
 #import <objc/runtime.h>
 #import <substrate.h>
 #include <stdarg.h>
+#import "CV3BridgeSupport.h"
 #import "CV3CameraSupport.h"
 
 typedef BOOL (*CV3CameraAccessGetterIMP)(id, SEL);
@@ -16,6 +17,7 @@ static NSMutableDictionary<NSString *, NSNumber *> *CV3CachedCameraGrantStates;
 static CFAbsoluteTime CV3LastHostedCameraAccessNotificationTimestamp;
 
 static void CV3CameraProbe(NSString *format, ...) {
+    if (!CV3DiagnosticLoggingEnabled()) return;
     va_list args;
     va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];

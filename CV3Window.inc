@@ -1564,9 +1564,25 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 
 
 - (CGRect)splitDropPreviewFrameForCenter:(CGPoint)center {
-    return [CV3FloatingAppWindow initialFrameForBundleID:self.draggedAppInfo.bundleId
-                                                  center:center
-                                             windowScene:self.windowScene];
+    CGRect frame = [CV3FloatingAppWindow initialFrameForBundleID:self.draggedAppInfo.bundleId
+                                                         center:center
+                                                    windowScene:self.windowScene];
+    // The drop preview is the user's only prediction of the window they are
+    // about to create. Trace it against the orientation the window itself will
+    // pick, so "the frame promised a different axis than the window became" can
+    // be attributed to a source instead of inferred from the picture.
+    UIInterfaceOrientation displayOrientation = CV3TrustedInterfaceOrientation(self.windowScene);
+    UIInterfaceOrientation previewOrientation =
+        CV3PreferredInitialHostedOrientation(self.draggedAppInfo.bundleId, displayOrientation);
+    CV3LogToFile(@"[SplitPreviewTrace] phase=frame bundle=%@ center=%@ frame=%@ axis=%dx%d displayOrientation=%ld previewOrientation=%ld previewLandscape=%d requiresLandscape=%d",
+                 self.draggedAppInfo.bundleId ?: @"nil",
+                 NSStringFromCGPoint(center),
+                 NSStringFromCGRect(frame),
+                 (int)(frame.size.width + 0.5), (int)(frame.size.height + 0.5),
+                 (long)displayOrientation, (long)previewOrientation,
+                 UIInterfaceOrientationIsLandscape(previewOrientation),
+                 CV3BundleDeclaresLandscapeOnly(self.draggedAppInfo.bundleId));
+    return frame;
 }
 
 - (void)layoutSplitDropPreviewLayer {

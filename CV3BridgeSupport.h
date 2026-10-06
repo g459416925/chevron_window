@@ -40,3 +40,35 @@ static inline NSString *CV3BundleScopedNotificationName(NSString *prefix,
 #define CV3_PACKAGE_VERSION "unknown"
 #endif
 #define CV3_VERSION_STRING @CV3_PACKAGE_VERSION
+
+// Runtime diagnostics gate shared by the SpringBoard host and the injected
+// client. Logging is off by default so a long-running installation does not
+// keep growing the log file; create the sentinel file to switch it back on
+// without rebuilding anything:
+//   touch /var/mobile/Library/Logs/ChevronV3_Logs.enabled
+// The answer is cached for a couple of seconds so the hot logging path does not
+// touch the filesystem on every call, while toggling still takes effect within
+// roughly two seconds. The per-process boot record is written outside this gate
+// so a restart stays visible even while logging is off.
+static inline BOOL CV3DiagnosticLoggingEnabled(void) {
+    static BOOL enabled = NO;
+    static CFAbsoluteTime lastCheck = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (lastCheck != 0 && now - lastCheck < 2.0) return enabled;
+
+    lastCheck = now;
+    enabled = NO;
+    NSArray<NSString *> *sentinels = @[
+        @"/rootfs/var/mobile/Library/Logs/ChevronV3_Logs.enabled",
+        @"/var/mobile/Library/Logs/ChevronV3_Logs.enabled",
+        @"/private/var/mobile/Library/Logs/ChevronV3_Logs.enabled",
+    ];
+    NSFileManager *manager = [NSFileManager defaultManager];
+    for (NSString *path in sentinels) {
+        if ([manager fileExistsAtPath:path]) {
+            enabled = YES;
+            break;
+        }
+    }
+    return enabled;
+}

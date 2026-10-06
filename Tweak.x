@@ -756,9 +756,11 @@ static BOOL CV3AppendDiagnosticDataDirectly(NSData *data, NSString *label) {
 }
 
 static void CV3WriteBootstrapProbe(void) {
+    // Deliberately outside the diagnostics gate: one line per launch keeps the
+    // installed build and the restart history visible while logging is off.
     NSString *entry = [NSString stringWithFormat:
-        @"[%@][ChevronProbe] springboard.bootstrap pid=%d\n",
-        NSDate.date, NSProcessInfo.processInfo.processIdentifier];
+        @"[%@][ChevronProbe] springboard.bootstrap pid=%d version=%@\n",
+        NSDate.date, NSProcessInfo.processInfo.processIdentifier, CV3_VERSION_STRING];
     NSData *data = [entry dataUsingEncoding:NSUTF8StringEncoding];
     BOOL wrote = CV3AppendDiagnosticDataDirectly(data, @"bootstrap");
     NSLog(@"[ChevronProbe] bootstrap-write success=%d", wrote);
@@ -768,6 +770,7 @@ static void CV3WriteBootstrapProbe(void) {
 // function active is important: Scene discovery, hosting, settings rewrites,
 // first-frame gates and recovery failures were previously discarded here.
 static void CV3LogToFile(NSString *format, ...) {
+    if (!CV3DiagnosticLoggingEnabled()) return;
     va_list args;
     va_start(args, format);
     NSString *details = [[NSString alloc] initWithFormat:format arguments:args];
@@ -930,6 +933,7 @@ static BOOL CV3ShouldForceSceneContentState(FBScene *scene, NSString *bundleID) 
 }
 
 static void CV3WriteFocusedDiagnostic(NSString *message) {
+    if (!CV3DiagnosticLoggingEnabled()) return;
     BOOL relevant = [message hasPrefix:@"[ChevronProbe]"] ||
         [message hasPrefix:@"[HomeBarTrace]"] ||
         [message hasPrefix:@"[SplitTrace] [Error]"] ||
@@ -943,6 +947,16 @@ static void CV3WriteFocusedDiagnostic(NSString *message) {
         [message hasPrefix:@"[SplitTrace] [RotationLayout]"] ||
         [message hasPrefix:@"[SplitTrace] [ExposeRotation]"] ||
         [message hasPrefix:@"[SplitTrace] [OrientationShellPolicy]"] ||
+        // Geometry attribution channels. These carry the numbers that decide
+        // where a restored window lands and which axis the drop preview and the
+        // icon proxy use; without them only the symptom is observable.
+        [message hasPrefix:@"[SplitTrace] [OrientationSource]"] ||
+        [message hasPrefix:@"[SplitTrace] [PhysicalSafeArea]"] ||
+        [message hasPrefix:@"[SplitTrace] [StashFrameTrace]"] ||
+        [message hasPrefix:@"[SplitTrace] [SplitPreviewTrace]"] ||
+        [message hasPrefix:@"[SplitTrace] [StashIconTrace]"] ||
+        [message hasPrefix:@"[SplitTrace] [RotationCentre]"] ||
+        [message hasPrefix:@"[SplitTrace] [SnapshotOrient]"] ||
         ([message hasPrefix:@"[SplitTrace] [Strict]"] &&
          ([message containsString:@"phase=orientation.shellSurfaceSync.begin"] ||
           [message containsString:@"phase=orientation.shellSurfaceSync.completed"] ||
@@ -983,6 +997,7 @@ static void CV3WriteFocusedDiagnostic(NSString *message) {
 }
 
 static void CV3WriteFormattedDiagnostic(NSString *format, va_list arguments) {
+    if (!CV3DiagnosticLoggingEnabled()) return;
     NSString *message = [[NSString alloc] initWithFormat:format arguments:arguments];
     CV3WriteFocusedDiagnostic(message);
 }
@@ -1844,6 +1859,11 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, assign) CGFloat basePitch;
 @property (nonatomic, strong) UIImage *stashedRestoreSnapshotImage;
 @property (nonatomic, assign) UIInterfaceOrientation stashedRestoreSnapshotOrientation;
+// Rendered rotation of the visible space when the snapshot was captured. The
+// content orientation alone is not enough: a shell-axis flip rotates what the
+// user actually sees without changing the orientation value, which is why a
+// fullscreen video restored out of the icon came back upside down.
+@property (nonatomic, assign) CGAffineTransform stashedRestoreSnapshotVisualRotation;
 @property (nonatomic, copy) NSString *stashAnimationTraceID;
 @property (nonatomic, assign) CFTimeInterval stashAnimationTraceStartTime;
 @property (nonatomic, copy) NSString *lastOrientationTraceSignature;
