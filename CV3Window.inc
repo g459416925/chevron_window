@@ -1568,20 +1568,21 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
                                                          center:center
                                                     windowScene:self.windowScene];
     // The drop preview is the user's only prediction of the window they are
-    // about to create. Trace it against the orientation the window itself will
-    // pick, so "the frame promised a different axis than the window became" can
-    // be attributed to a source instead of inferred from the picture.
+    // about to create, so it asks the same presentation decision that creation
+    // asks. Deriving the axis here from the display orientation instead is what
+    // let a portrait App promise a landscape frame and then open portrait.
     UIInterfaceOrientation displayOrientation = CV3TrustedInterfaceOrientation(self.windowScene);
-    UIInterfaceOrientation previewOrientation =
-        CV3PreferredInitialHostedOrientation(self.draggedAppInfo.bundleId, displayOrientation);
-    CV3LogToFile(@"[SplitPreviewTrace] phase=frame bundle=%@ center=%@ frame=%@ axis=%dx%d displayOrientation=%ld previewOrientation=%ld previewLandscape=%d requiresLandscape=%d",
+    CV3InitialPresentation presentation =
+        CV3ResolveInitialPresentation(self.draggedAppInfo.bundleId, displayOrientation);
+    CV3LogToFile(@"[SplitPreviewTrace] phase=frame bundle=%@ center=%@ frame=%@ axis=%dx%d displayOrientation=%ld contentOrientation=%ld prefersLandscape=%d requiresLandscape=%d",
                  self.draggedAppInfo.bundleId ?: @"nil",
                  NSStringFromCGPoint(center),
                  NSStringFromCGRect(frame),
                  (int)(frame.size.width + 0.5), (int)(frame.size.height + 0.5),
-                 (long)displayOrientation, (long)previewOrientation,
-                 UIInterfaceOrientationIsLandscape(previewOrientation),
-                 CV3BundleDeclaresLandscapeOnly(self.draggedAppInfo.bundleId));
+                 (long)displayOrientation,
+                 (long)presentation.contentOrientation,
+                 presentation.prefersLandscape,
+                 presentation.requiresLandscape);
     return frame;
 }
 
