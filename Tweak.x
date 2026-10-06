@@ -956,6 +956,7 @@ static void CV3WriteFocusedDiagnostic(NSString *message) {
         [message hasPrefix:@"[SplitTrace] [SplitPreviewTrace]"] ||
         [message hasPrefix:@"[SplitTrace] [StashIconTrace]"] ||
         [message hasPrefix:@"[SplitTrace] [RotationCentre]"] ||
+        [message hasPrefix:@"[SplitTrace] [ViewportFit]"] ||
         [message hasPrefix:@"[SplitTrace] [SnapshotOrient]"] ||
         ([message hasPrefix:@"[SplitTrace] [Strict]"] &&
          ([message containsString:@"phase=orientation.shellSurfaceSync.begin"] ||

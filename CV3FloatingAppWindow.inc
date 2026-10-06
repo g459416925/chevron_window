@@ -2077,11 +2077,22 @@ void CV3ToggleExposeMode(void) {
         target.y = MIN(MAX(target.y, safeArea.top + breath + halfH),
                        MAX(safeArea.top + breath + halfH,
                            centreBounds.size.height - safeArea.bottom - breath - halfH));
-        CV3LogToFile(@"[RotationCentre] bundle=%@ orientation=%ld swapped=%d size=%.1fx%.1f from=%@ to=%@ bounds=%@",
+        UIWindowScene *axisScene = self.windowScene;
+        CGRect axisSceneBounds = axisScene ? axisScene.coordinateSpace.bounds : CGRectZero;
+        CGRect axisScreenBounds = axisScene.screen ? axisScene.screen.bounds : CGRectZero;
+        CGRect axisScreenSpaceBounds = axisScene.screen ? axisScene.screen.coordinateSpace.bounds : CGRectZero;
+        CV3LogToFile(@"[RotationCentre] bundle=%@ orientation=%ld swapped=%d size=%.1fx%.1f from=%@ to=%@ bounds=%@ hosted=%ld prefersLandscape=%d scenePtr=%p sceneBounds=%@ screenBounds=%@ screenSpaceBounds=%@ axesDiffer=%d targetLandscape=%d",
                      self.bundleID ?: @"nil", (long)context.orientation, shellAxisSwapped,
                      newSize.width, newSize.height,
                      NSStringFromCGPoint(self.center), NSStringFromCGPoint(target),
-                     NSStringFromCGRect(centreBounds));
+                     NSStringFromCGRect(centreBounds),
+                     (long)self.hostedContentOrientation, self.prefersLandscapePresentation,
+                     axisScene,
+                     NSStringFromCGRect(axisSceneBounds),
+                     NSStringFromCGRect(axisScreenBounds),
+                     NSStringFromCGRect(axisScreenSpaceBounds),
+                     CV3SceneAndDisplayAxesDifferForScene(axisScene),
+                     targetLandscape);
         [UIView animateWithDuration:0.55
                               delay:0
              usingSpringWithDamping:0.48 // 果冻物理阻尼系数
@@ -6046,8 +6057,14 @@ static void CV3CollectReceptionLayers(CALayer *layer,
                                   preferredCenter:self.center preserveSize:NO];
         self.bounds = CGRectMake(0, 0, fitted.size.width, fitted.size.height);
         self.center = CGPointMake(CGRectGetMidX(fitted), CGRectGetMidY(fitted));
-        CV3LogToFile(@"[ViewportFit] phase=orientationSwap bundle=%@ requestedSize=%@ fitted=%@",
-                     self.bundleID, NSStringFromCGSize(requested.size), NSStringFromCGRect(fitted));
+        UIWindowScene *swapScene = self.windowScene;
+        CV3LogToFile(@"[ViewportFit] phase=orientationSwap bundle=%@ requestedSize=%@ fitted=%@ wantsLandscape=%d shellWasLandscape=%d active=%ld hosted=%ld scenePtr=%p sceneBounds=%@ screenBounds=%@ axesDiffer=%d",
+                     self.bundleID, NSStringFromCGSize(requested.size), NSStringFromCGRect(fitted),
+                     wantsLandscape, shellIsLandscape, (long)activeOrientation,
+                     (long)self.hostedContentOrientation, swapScene,
+                     NSStringFromCGRect(swapScene ? swapScene.coordinateSpace.bounds : CGRectZero),
+                     NSStringFromCGRect(swapScene.screen ? swapScene.screen.bounds : CGRectZero),
+                     CV3SceneAndDisplayAxesDifferForScene(swapScene));
     }
 
     UIInterfaceOrientation sceneOrientation = self.windowScene
