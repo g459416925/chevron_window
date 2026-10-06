@@ -704,14 +704,62 @@ static UIInterfaceOrientation CV3RealContentOrientationForBundleID(NSString *bun
     return CV3IsValidInterfaceOrientation(orientation) ? orientation : UIInterfaceOrientationUnknown;
 }
 
-// Seed a newly created shell from the client's own last request first: both the
-// Scene and the display orientation can be stale once the previous window has
-// been closed. Fall back to the live client Scene, then to the display.
-static UIInterfaceOrientation CV3PreferredInitialHostedOrientation(NSString *bundleID,
-                                                                   UIInterfaceOrientation displayFallback) {
-    UIInterfaceOrientation realContentOrientation = CV3RealContentOrientationForBundleID(bundleID);
-    if (CV3IsValidInterfaceOrientation(realContentOrientation)) return realContentOrientation;
-    return CV3InitialHostedOrientationForBundleID(bundleID, displayFallback);
+// THE single decision for "how does a newly created shell for this bundle
+// present", consumed by creation, the drop preview and the shell's first
+// geometry pass.
+//
+// The drop preview is the user's only prediction of the window that is about to
+// appear, so it must not derive the shell axis on its own. When the preview read
+// the display orientation while creation read the client's own evidence, a
+// portrait App dragged out under a rotated display got a landscape dashed frame
+// and a portrait window: the promise and the delivery disagreed. Both paths now
+// ask this one function.
+//
+// Display rotation is NOT evidence about this App's canvas. A fullscreen video
+// rotates the physical display while SpringBoard's Scene stays portrait, so
+// "display is landscape" says nothing about a WeChat window. Only the client's
+// own last request (real/live) or a landscape-only bundle makes the shell
+// landscape; without that the App is portrait however the phone is held.
+typedef struct {
+    UIInterfaceOrientation resolvedOrientation;     // what the shell seeds itself with
+    UIInterfaceOrientation contentOrientation;      // what the canvas will actually be
+    UIInterfaceOrientation realContentOrientation;  // Unknown when the client never published one
+    UIInterfaceOrientation liveSceneOrientation;    // Unknown when the App has no live Scene
+    BOOL prefersLandscape;
+    BOOL hasRealContent;
+    BOOL hasLiveScene;
+    BOOL requiresLandscape;
+} CV3InitialPresentation;
+
+static CV3InitialPresentation CV3ResolveInitialPresentation(NSString *bundleID,
+                                                            UIInterfaceOrientation displayOrientation) {
+    CV3InitialPresentation presentation;
+    presentation.requiresLandscape = CV3BundleDeclaresLandscapeOnly(bundleID);
+
+    // Seed from the client's own last request first: both the Scene and the
+    // display orientation can be stale once the previous window has been closed.
+    presentation.realContentOrientation = CV3RealContentOrientationForBundleID(bundleID);
+    presentation.hasRealContent = CV3IsValidInterfaceOrientation(presentation.realContentOrientation);
+    presentation.liveSceneOrientation = CV3LiveApplicationOrientationForBundleID(bundleID);
+    presentation.hasLiveScene = CV3IsValidInterfaceOrientation(presentation.liveSceneOrientation);
+
+    if (presentation.hasRealContent) {
+        presentation.resolvedOrientation = presentation.realContentOrientation;
+    } else if (presentation.hasLiveScene) {
+        presentation.resolvedOrientation = presentation.liveSceneOrientation;
+    } else {
+        presentation.resolvedOrientation =
+            CV3InitialHostedOrientationForBundleID(bundleID, displayOrientation);
+    }
+
+    presentation.prefersLandscape =
+        UIInterfaceOrientationIsLandscape(presentation.resolvedOrientation) &&
+        (presentation.hasRealContent || presentation.hasLiveScene ||
+         presentation.requiresLandscape);
+    presentation.contentOrientation = presentation.prefersLandscape
+        ? presentation.resolvedOrientation
+        : UIInterfaceOrientationPortrait;
+    return presentation;
 }
 
 static BOOL isGlobalExposeActive = NO;
@@ -4314,8 +4362,8 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     CGSize visibleSize = CV3SceneVisibleSizeForScene(windowScene);
 
     UIInterfaceOrientation displayOrientation = CV3TrustedInterfaceOrientation(windowScene);
-    UIInterfaceOrientation hostedOrientation =
-        CV3PreferredInitialHostedOrientation(bundleID, displayOrientation);
+    CV3InitialPresentation presentation =
+        CV3ResolveInitialPresentation(bundleID, displayOrientation);
 
     // Default logical canvas, used only when no user size has been stored yet.
     CGFloat shortSide = MIN(sceneBounds.size.width, sceneBounds.size.height);
@@ -4323,9 +4371,13 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     CGFloat logicalWidth = shortSide * kCV3FloatingDefaultWidthRatio;
     CGSize defaultLogicalSize = CGSizeMake(logicalWidth, logicalWidth * (longSide / MAX(shortSide, 1.0)));
 
+    BOOL sceneAxesDiffer = CV3SceneAndDisplayAxesDifferForScene(windowScene);
+    // The shell axis follows the CONTENT this App will actually draw — the same
+    // value the created window seeds itself with — never the display's current
+    // rotation, which a fullscreen video can flip while the Scene stays portrait.
     BOOL shellLandscape = CV3ShellLandscapeForContent(
-        UIInterfaceOrientationIsLandscape(hostedOrientation),
-        CV3SceneAndDisplayAxesDifferForScene(windowScene));
+        UIInterfaceOrientationIsLandscape(presentation.contentOrientation),
+        sceneAxesDiffer);
 
     // One call now decides the size: stored user size (or the default), laid out
     // on the shell's axis, then fitted to the visible area. Axis rule, stored
@@ -4340,11 +4392,17 @@ static void CV3CollectReceptionLayers(CALayer *layer,
                               center.y - size.height * 0.5,
                               size.width, size.height);
     CGRect clampedFrame = CV3ClampInitialFloatingFrame(frame, sceneBounds, safeArea);
-    CV3LogToFile(@"[SplitPreviewTrace] phase=initialFrame bundle=%@ displayOrientation=%ld hostedOrientation=%ld shellLandscape=%d sceneAxesDiffer=%d sceneBounds=%@ visible=%.1fx%.1f size=%.1fx%.1f final=%@",
+    CV3LogToFile(@"[SplitPreviewTrace] phase=initialFrame bundle=%@ displayOrientation=%ld resolvedOrientation=%ld contentOrientation=%ld prefersLandscape=%d real=%ld/%d live=%ld/%d requiresLandscape=%d shellLandscape=%d sceneAxesDiffer=%d sceneBounds=%@ visible=%.1fx%.1f size=%.1fx%.1f final=%@",
                  bundleID ?: @"nil",
-                 (long)displayOrientation, (long)hostedOrientation,
+                 (long)displayOrientation,
+                 (long)presentation.resolvedOrientation,
+                 (long)presentation.contentOrientation,
+                 presentation.prefersLandscape,
+                 (long)presentation.realContentOrientation, presentation.hasRealContent,
+                 (long)presentation.liveSceneOrientation, presentation.hasLiveScene,
+                 presentation.requiresLandscape,
                  shellLandscape,
-                 CV3SceneAndDisplayAxesDifferForScene(windowScene),
+                 sceneAxesDiffer,
                  NSStringFromCGRect(sceneBounds),
                  visibleSize.width, visibleSize.height,
                  size.width, size.height,
@@ -4390,40 +4448,27 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         [self recordColdLaunchMilestone:@"WINDOW_INIT_BEGIN" details:nil];
 
         UIInterfaceOrientation currentOrientation = CV3TrustedInterfaceOrientation(windowScene);
-        UIInterfaceOrientation liveApplicationOrientation =
-            CV3LiveApplicationOrientationForBundleID(bundleID);
-        BOOL hasLiveApplicationOrientation =
-            CV3IsValidInterfaceOrientation(liveApplicationOrientation);
-        // The app's own last request describes the canvas the user actually
-        // sees. It must win over the display Scene and over a client Scene that
-        // was already reset when the previous floating window closed, otherwise
-        // an app left in fullscreen video gets wrapped in a portrait shell.
-        UIInterfaceOrientation realContentOrientation =
-            CV3RealContentOrientationForBundleID(bundleID);
-        BOOL hasRealContentOrientation =
-            CV3IsValidInterfaceOrientation(realContentOrientation);
-        UIInterfaceOrientation initialOrientation = hasRealContentOrientation
-            ? realContentOrientation
-            : (hasLiveApplicationOrientation
-                ? liveApplicationOrientation
-                : CV3InitialHostedOrientationForBundleID(bundleID, currentOrientation));
+        // One decision for both the dashed drop preview and this window: the
+        // frame below is built by initialFrameForBundleID through this very
+        // presentation, so the box the user released can no longer promise an
+        // axis that this window then refuses to become.
+        CV3InitialPresentation presentation =
+            CV3ResolveInitialPresentation(bundleID, currentOrientation);
         self.frame = [[self class] initialFrameForBundleID:bundleID center:center windowScene:windowScene];
-        self.lastLayoutOrientation = initialOrientation;
-        self.targetOrientation = initialOrientation;
+        self.lastLayoutOrientation = presentation.resolvedOrientation;
+        self.targetOrientation = presentation.resolvedOrientation;
         
         self.hostedSession = [[CV3HostedSceneSession alloc] initWithWindow:self];
-        self.requiresLandscapeContent = CV3BundleDeclaresLandscapeOnly(bundleID);
-        self.prefersLandscapePresentation = UIInterfaceOrientationIsLandscape(initialOrientation) &&
-            (hasRealContentOrientation || hasLiveApplicationOrientation || self.requiresLandscapeContent);
-        self.hostedContentOrientation = self.prefersLandscapePresentation
-            ? initialOrientation
-            : UIInterfaceOrientationPortrait;
+        self.requiresLandscapeContent = presentation.requiresLandscape;
+        self.prefersLandscapePresentation = presentation.prefersLandscape;
+        self.hostedContentOrientation = presentation.contentOrientation;
         CV3LogToFile(@"[OrientationShellPolicy] phase=initial bundle=%@ source=%@ real=%ld live=%ld display=%ld selected=%ld prefersLandscape=%d requiresLandscape=%d",
                      bundleID ?: @"nil",
-                     hasRealContentOrientation ? @"realContent" : (hasLiveApplicationOrientation ? @"liveClientScene" : @"fallback"),
-                     (long)realContentOrientation, (long)liveApplicationOrientation, (long)currentOrientation,
-                     (long)initialOrientation, self.prefersLandscapePresentation,
-                     self.requiresLandscapeContent);
+                     presentation.hasRealContent ? @"realContent" : (presentation.hasLiveScene ? @"liveClientScene" : @"fallback"),
+                     (long)presentation.realContentOrientation, (long)presentation.liveSceneOrientation,
+                     (long)currentOrientation,
+                     (long)presentation.resolvedOrientation, presentation.prefersLandscape,
+                     presentation.requiresLandscape);
         self.allowProcessTerminationOnClose = NO;
         [self enforcePortraitWindowGeometry];
         self.windowLevel = CV3Style.floatingApp; // 高于普通 App，但低于通知栏/控制中心
