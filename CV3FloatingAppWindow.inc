@@ -6768,33 +6768,51 @@ static void CV3CollectReceptionLayers(CALayer *layer,
             return;
         }
 
+        // A stashed icon is DEVICE UI, not hosted-app content. Its visible
+        // rotation is already baked in by applyStashedGrabberOrientation
+        // (device x inverse(scene)), and the snapshot below faithfully carries
+        // that picture. Multiplying it by baseRotationTransform — the SHELL
+        // rotation of the window's content, ±90° whenever the display is
+        // landscape — rotated it a second time: the "icon spins 90° before the
+        // genie flies out" report. Shell rotation and icon-device compensation
+        // are different quantities; they must never be interchanged.
         if (!iconProxy) {
             UIImageView *fallbackIconProxy = [[UIImageView alloc] initWithFrame:CGRectInset(startFrameInWindow, 4, 4)];
             fallbackIconProxy.image = self.appIconMiniView.image;
             fallbackIconProxy.layer.cornerRadius = CV3Style.iconCornerRadius;
             fallbackIconProxy.layer.masksToBounds = YES;
             fallbackIconProxy.contentMode = UIViewContentModeScaleAspectFill;
-            fallbackIconProxy.transform = self.baseRotationTransform;
+            // This proxy is a BARE icon image with no rotation of its own, so
+            // it takes the icon's own compensating transform — never the shell's.
+            fallbackIconProxy.transform = self.appIconMiniView.transform;
             iconProxy = fallbackIconProxy;
         } else {
             iconProxy.frame = startFrameInWindow;
-            iconProxy.transform = self.baseRotationTransform;
+            // snapshotViewAfterScreenUpdates already captured the icon at its
+            // final on-screen orientation; any rotation added here is a
+            // double-apply.
+            iconProxy.transform = CGAffineTransformIdentity;
         }
         // The proxy is the picture the user sees fly out of the icon. If it
         // leaves at a different angle than the window it expands into, the
         // culprit is this transform or the cached snapshot, not the geometry.
-        CV3LogToFile(@"[StashIconTrace] phase=restoreProxy bundle=%@ iconFrame=%@ startFrameInWindow=%@ targetFrame=%@ baseRotation=%@ contentOrientation=%ld targetOrientation=%ld snapshotOrientation=%ld snapshotSize=%@",
+        CV3LogToFile(@"[StashIconTrace] phase=restoreProxy bundle=%@ iconFrame=%@ startFrameInWindow=%@ targetFrame=%@ baseRotation=%@ iconMiniRotation=%@ proxyRotation=%@ contentOrientation=%ld targetOrientation=%ld snapshotOrientation=%ld snapshotSize=%@",
                      self.bundleID ?: @"nil",
                      NSStringFromCGRect(iconFrame),
                      NSStringFromCGRect(startFrameInWindow),
                      NSStringFromCGRect(targetFrame),
                      NSStringFromCGAffineTransform(self.baseRotationTransform),
+                     NSStringFromCGAffineTransform(self.appIconMiniView.transform),
+                     NSStringFromCGAffineTransform(iconProxy.transform),
                      (long)self.hostedContentOrientation,
                      (long)self.targetOrientation,
                      (long)self.stashedRestoreSnapshotOrientation,
                      NSStringFromCGSize(self.stashedRestoreSnapshotImage.size));
         [self addSubview:iconProxy];
-        CGAffineTransform iconBaseTransform = self.baseRotationTransform;
+        // Single source for the fade animation below: scale whatever rotation
+        // the proxy actually carries. Re-deriving it here was the second half
+        // of the double-rotation bug.
+        CGAffineTransform iconBaseTransform = iconProxy.transform;
 
         CGRect startIconFrameInWindow = CGRectInset(startFrameInWindow, kCV3StashIconInset, kCV3StashIconInset);
         [self animateGenieSurfaceImage:genieImage sourceFrame:endFrameInWindow iconFrame:startIconFrameInWindow presenting:YES completion:^{
