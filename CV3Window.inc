@@ -274,6 +274,8 @@ static BOOL CV3ApplicationHasLiveScene(NSString *bundleID) {
 
 static void CV3LogPanelStateDebugForBundleID(NSString *bundleID, CV3AppPanelProtectionState resolvedState, NSString *source) {
     if (bundleID.length == 0 || !sharedWindow || !sharedWindow.isPanelShowing) return;
+    // 纯诊断：日志关着时不要白算工作区枚举（本函数每秒会被可见 Cell 各调一次）。
+    if (!CV3DiagnosticLoggingEnabled()) return;
 
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
     if (!CV3PanelStateLastDebugLogTimes) {
@@ -770,6 +772,9 @@ static void CV3FinalizePanelHiddenState(CV3Window *launcherWindow) {
         [CATransaction commit];
     }];
     [CATransaction flush];
+
+    // 面板收起的唯一收口：连图标呼吸一起停，隐藏期间不再空转。
+    [launcherWindow syncAppCellBreathing];
 }
 
 static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
@@ -2971,6 +2976,9 @@ static inline CGFloat CV3AppleRubberband(CGFloat x, CGFloat dimension) {
         };
         void (^presentationCompletion)(BOOL) = ^(BOOL finished) {
             if (finished && self.isPanelShowing) self.isAnimating = NO;
+            // 呈现前调用的 CV3RemoveViewAnimationsRecursively 会连带摘掉
+            // Cell 上的呼吸动画；布局落定后按面板状态统一重挂。
+            [self syncAppCellBreathing];
         };
 
         [UIView animateWithDuration:kCV3PanelPresentDuration
@@ -3476,19 +3484,55 @@ static NSUInteger CV3IconCacheCost(UIImage *image) {
     if (!self.isPanelShowing || self.collectionView.hidden) return;
     if (CV3ScrollViewIsActivelyControlled(self.collectionView)) return;
 
+    CFTimeInterval passStart = CACurrentMediaTime();
+
+    BOOL badgeChanged = NO;
     NSDictionary<NSString *, NSNumber *> *badgeSnapshot = CV3SpringBoardIconBadgeSnapshot();
     if (badgeSnapshot) {
         for (CV3AppInfo *info in self.apps) {
-            info.unreadCount = [badgeSnapshot[info.bundleId] integerValue];
+            NSInteger unread = [badgeSnapshot[info.bundleId] integerValue];
+            if (info.unreadCount != unread) badgeChanged = YES;
+            info.unreadCount = unread;
         }
     }
 
-    NSArray<NSIndexPath *> *visibleIndexPaths = [self.collectionView indexPathsForVisibleItems];
-    if (visibleIndexPaths.count == 0) return;
+    NSArray<UICollectionViewCell *> *visibleCells = self.collectionView.visibleCells;
+    if (visibleCells.count == 0) return;
 
-    [UIView performWithoutAnimation:^{
-        [self.collectionView reloadItemsAtIndexPaths:visibleIndexPaths];
-    }];
+    // 就地刷新可见 Cell 的外观。绝不能再用 reloadItemsAtIndexPaths: —— 它会重建 Cell，
+    // 把挂在 contentView.layer 上的图标呼吸动画每 1 秒打断重掷一次；而滚动期间本方法被
+    // 上面的 guard 跳过，所以症状正是「停止滚动后才一卡一卡」。
+    NSString *searchText = self.searchField.text;
+    NSUInteger updated = 0;
+    NSUInteger readded = 0;
+    for (UICollectionViewCell *cell in visibleCells) {
+        if (![cell isKindOfClass:[CV3AppCell class]]) continue;
+        CV3AppCell *appCell = (CV3AppCell *)cell;
+
+        NSIndexPath *indexPath = [self.collectionView indexPathForCell:appCell];
+        if (!indexPath || indexPath.item >= (NSInteger)self.filteredApps.count) continue;
+
+        CV3AppInfo *info = self.filteredApps[indexPath.item];
+        // Cell 可能正在复用中（数据源已换成别的 App 但 configure 未跑完），交给后续 configure。
+        if (![appCell.representedBundleId isEqualToString:info.bundleId]) continue;
+
+        BOOL isFirst = (indexPath.item == 0 && searchText.length > 0);
+        BOOL hadBreathing = [appCell hasBreathingAnimation];
+        [appCell applyDynamicAppearanceWithInfo:info
+                                     searchText:searchText
+                                        isFirst:isFirst
+                               protectionState:CV3AppPanelProtectionStateForBundleID(info.bundleId)];
+        // readded 是「呼吸动画被谁拆掉了」的探测器：稳定状态下必须恒为 0。
+        if (!hadBreathing && [appCell hasBreathingAnimation]) readded++;
+        updated++;
+    }
+
+    CGFloat elapsedMs = (CACurrentMediaTime() - passStart) * 1000.0;
+    if (badgeChanged || readded > 0 || elapsedMs > 8.0) {
+        CV3LogToFile(@"[BreathingTrace] phase=markerRefresh badgeChanged=%d updated=%lu readded=%lu visible=%lu elapsedMs=%.2f",
+                     badgeChanged, (unsigned long)updated, (unsigned long)readded,
+                     (unsigned long)visibleCells.count, elapsedMs);
+    }
 }
 
 - (void)startPanelStateRefreshTimer {
@@ -3830,8 +3874,52 @@ static NSUInteger CV3IconCacheCost(UIImage *image) {
 
     // 应用“熵减”衰老视觉效果
     [self applyAgingEffectToCell:cell withInfo:info];
-    
+
+    // 复用池里的 Cell 可能还带着上一轮的呼吸动画，按当前面板状态对齐。
+    // 面板出现前由 CV3RemoveViewAnimationsRecursively 清过一次，这里是唯一重挂点之一。
+    [self applyBreathingToCell:cell];
+
     return cell;
+}
+
+- (BOOL)applyBreathingToCell:(CV3AppCell *)cell {
+    if (![cell isKindOfClass:[CV3AppCell class]]) return NO;
+    if (self.isPanelShowing) return [cell startBreathing];
+    [cell stopBreathing];
+    return NO;
+}
+
+- (void)syncAppCellBreathing {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self syncAppCellBreathing];
+        });
+        return;
+    }
+
+    NSUInteger visible = 0;
+    NSUInteger breathing = 0;
+    NSUInteger readded = 0;
+    for (UICollectionViewCell *cell in self.collectionView.visibleCells) {
+        if (![cell isKindOfClass:[CV3AppCell class]]) continue;
+        visible++;
+        if ([self applyBreathingToCell:(CV3AppCell *)cell]) readded++;
+        if ([((CV3AppCell *)cell) hasBreathingAnimation]) breathing++;
+    }
+
+    CV3LogToFile(@"[BreathingTrace] phase=sync panelShowing=%d visible=%lu breathing=%lu readded=%lu reduceMotion=%d",
+                 self.isPanelShowing,
+                 (unsigned long)visible,
+                 (unsigned long)breathing,
+                 (unsigned long)readded,
+                 UIAccessibilityIsReduceMotionEnabled());
+}
+
+- (void)collectionView:(id)c didEndDisplayingCell:(UICollectionViewCell *)cell forItemAtIndexPath:(id)i {
+    // 离屏 Cell 不需要继续呼吸，复用池里的残留动画在 cellForItem 时统一对齐。
+    if ([cell isKindOfClass:[CV3AppCell class]]) {
+        [(CV3AppCell *)cell stopBreathing];
+    }
 }
 
 

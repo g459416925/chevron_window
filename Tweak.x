@@ -439,10 +439,14 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
 @property (nonatomic, assign) BOOL isFirstResult; // 新增：是否为搜索首项
 @property (nonatomic, copy) NSString *representedBundleId;
 - (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst protectionState:(CV3AppPanelProtectionState)protectionState;
+// 只刷新随外部状态变化的外观（保护态 / 未读 / 搜索高亮），不碰图标图与布局。
+// 面板每秒一次的标记刷新走这里，避免 reloadItemsAtIndexPaths 重建 Cell。
+- (void)applyDynamicAppearanceWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst protectionState:(CV3AppPanelProtectionState)protectionState;
 - (void)setIconImage:(UIImage *)image forBundleId:(NSString *)bundleId;
 - (void)setUnreadCount:(NSInteger)unreadCount;
-- (void)startBreathing;
+- (BOOL)startBreathing;
 - (void)stopBreathing;
+- (BOOL)hasBreathingAnimation;
 @end
 
 @implementation CV3AppCell
@@ -508,8 +512,8 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
             self.nameBackdrop.layer.cornerCurve = kCACornerCurveContinuous;
         }
 
-        // 性能优化：在 Cell 初始化时启动动画，而不是在滚动 configure 时重复添加
-        [self startBreathing];
+        // 呼吸动画不再在初始化时自启：面板显隐是唯一开关。
+        // CV3Window -syncAppCellBreathing 负责在面板出现时挂上、收起时摘掉。
     }
     return self;
 }
@@ -541,6 +545,10 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
     self.isFirstResult = isFirst;
     if (info.isPinned) [self.iconView bringSubviewToFront:self.pinnedIndicator];
 
+    [self applyDynamicAppearanceWithInfo:info searchText:searchText isFirst:isFirst protectionState:protectionState];
+}
+
+- (void)applyDynamicAppearanceWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst protectionState:(CV3AppPanelProtectionState)protectionState {
     UIColor *splitColor = [UIColor colorWithRed:0.0 green:0.62 blue:1.0 alpha:1.0];
     UIColor *foregroundColor = [UIColor colorWithRed:1.0 green:0.28 blue:0.24 alpha:1.0];
     BOOL isProtected = (protectionState != CV3AppPanelProtectionStateNone);
@@ -657,17 +665,23 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
     [self.nameBackdrop.layer addAnimation:glassPulse forKey:@"unreadGlassPulse"];
 }
 
-- (void)stopBreathing {
-    [self.contentView.layer removeAnimationForKey:@"breathing"];
-    [self.iconBackdrop.layer removeAnimationForKey:@"breathing"];
-    [self.iconView.layer removeAnimationForKey:@"breathing"];
+- (BOOL)hasBreathingAnimation {
+    return [self.contentView.layer animationForKey:@"breathing"] != nil;
 }
 
-- (void)startBreathing {
-    [self stopBreathing];
+- (void)stopBreathing {
+    [self.contentView.layer removeAnimationForKey:@"breathing"];
+}
+
+- (BOOL)startBreathing {
+    // 面板收起时不再为空转；无障碍「减弱动态」下也不挂动画。
+    if (UIAccessibilityIsReduceMotionEnabled()) return NO;
+    // 幂等：同一轮可见期内重复调用不再重掷随机相位，避免图标跳变。
+    if ([self.contentView.layer animationForKey:@"breathing"]) return NO;
 
     CGFloat lift = 7.0 + (arc4random_uniform(18) / 10.0);
-    CGFloat duration = 6.8 + (arc4random_uniform(18) / 10.0);
+    // 一个完整呼吸周期。原来 6.8~8.6s 观感近乎静止，中位压到 ~5.0s。
+    CGFloat duration = 4.4 + (arc4random_uniform(14) / 10.0);
     CFTimeInterval beginTime = CACurrentMediaTime() + (arc4random_uniform(80) / 100.0);
 
     CAAnimationGroup *(^makeFloatGroup)(void) = ^CAAnimationGroup *{
@@ -692,6 +706,7 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
     };
 
     [self.contentView.layer addAnimation:makeFloatGroup() forKey:@"breathing"];
+    return YES;
 }
 @end
 
@@ -955,6 +970,7 @@ static void CV3WriteFocusedDiagnostic(NSString *message) {
         [message hasPrefix:@"[SplitTrace] [StashFrameTrace]"] ||
         [message hasPrefix:@"[SplitTrace] [SplitPreviewTrace]"] ||
         [message hasPrefix:@"[SplitTrace] [StashIconTrace]"] ||
+        [message hasPrefix:@"[SplitTrace] [BreathingTrace]"] ||
         [message hasPrefix:@"[SplitTrace] [RotationCentre]"] ||
         [message hasPrefix:@"[SplitTrace] [ViewportFit]"] ||
         [message hasPrefix:@"[SplitTrace] [SnapshotOrient]"] ||
@@ -2612,6 +2628,9 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 - (void)applySceneRotationContext:(CV3SceneRotationContext)context force:(BOOL)force;
 - (BOOL)isSystemUIActive;
 - (void)setSystemUILevelSuppressed:(BOOL)suppressed;
+// 图标呼吸动画的唯一裁决：读 isPanelShowing，命中就挂、否则摘。返回是否新挂了动画。
+- (BOOL)applyBreathingToCell:(CV3AppCell *)cell;
+- (void)syncAppCellBreathing;
 @end
 
 static NSCache *cv3IconCache = nil; 
