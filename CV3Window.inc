@@ -851,7 +851,6 @@ static BOOL CV3OpenBundleInFloatingWindow(NSString *bundleID, NSString *reason) 
         [floatingWindow setWindowFocused:YES];
     }
     if (!CV3LockScreenPresented) CV3RefreshFloatingHomeBarAfterPresentation(floatingWindow);
-    CV3UpdateFloatingBackdrop(scene);
     [[NSNotificationCenter defaultCenter] postNotificationName:CV3FloatingWindowsDidChangeNotification object:nil];
     CV3LogToFile(@"[NotificationSplit] 开启分屏: %@ (%@) locked=%d",
                  bundleID, reason ?: @"Unknown", CV3LockScreenPresented);
@@ -2083,7 +2082,6 @@ static void CV3LogPanelCollectionState(CV3Window *window, NSString *phase) {
                         [floatingWindows addObject:floatingWindow];
                         [floatingWindow setWindowFocused:YES];
                         CV3RefreshFloatingHomeBarAfterPresentation(floatingWindow);
-                        CV3UpdateFloatingBackdrop(self.windowScene);
                         [[NSNotificationCenter defaultCenter] postNotificationName:CV3FloatingWindowsDidChangeNotification object:nil];
                     }
                 });

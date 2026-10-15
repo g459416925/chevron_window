@@ -138,15 +138,9 @@ static void CV3PostHostedState(NSString *bundleID, BOOL hosted);
 @property (assign, nonatomic) BOOL foreground;
 @property (assign, nonatomic) BOOL backgrounded;
 @property (assign, nonatomic) CGRect frame;
-@property (assign, nonatomic) NSInteger interruptionPolicy; // 0: None, 1: Suppress, 2: Defer
 @end
 
 @interface UIMutableApplicationSceneSettings : FBSMutableSceneSettings
-@property (assign, nonatomic) UIEdgeInsets safeAreaInsetsPortrait;
-@property (assign, nonatomic) UIEdgeInsets safeAreaInsetsLandscapeLeft;
-@property (assign, nonatomic) UIEdgeInsets safeAreaInsetsLandscapeRight;
-@property (assign, nonatomic) UIEdgeInsets safeAreaInsetsPortraitUpsideDown;
-@property (assign, nonatomic) NSUInteger deactivationReasons;
 - (void)setInLiveResize:(BOOL)inLiveResize;
 @end
 
@@ -216,13 +210,9 @@ static void CV3PostHostedState(NSString *bundleID, BOOL hosted);
 @end
 
 @interface FBProcessTerminationContext : NSObject
-@property (assign, nonatomic) unsigned long long exceptionCode;
-@property (copy, nonatomic) NSString *explanation;
-@property (assign, nonatomic) BOOL reportTermination;
 @end
 
 @interface FBProcess : NSObject
-@property (nonatomic, readonly) int pid;
 @property (nonatomic, readonly) NSString *bundleIdentifier;
 - (void)terminateWithContext:(FBProcessTerminationContext *)arg1;
 - (void)terminate;
@@ -274,24 +264,10 @@ struct {
     CGFloat iconCornerRadius;
     CGFloat iconShadowOpacity;
     CGFloat iconShadowRadius;
-    CGFloat highlightAlpha;
     // 物理引擎参数
-    CGFloat parallaxPanelFactor;
-    CGFloat parallaxDecoFactor;
-    CGFloat lerpFactor;
-    CGFloat tiltMaxAngle;
-    CGFloat scrollTiltFactor;
-    CGFloat momentumDamping;
-    CGFloat maxStretch;
-    CGFloat stretchDamping;
     // 动画参数
-    CGFloat durationShort;
     CGFloat durationMedium;
-    CGFloat durationLong;
-    CGFloat springDamping;
-    CGFloat springVelocity;
     // 窗口层级
-    CGFloat maxBound;
     CGFloat floatingApp;
     CGFloat panel;
     CGFloat background;
@@ -300,7 +276,6 @@ struct {
     CGFloat panelW;
     CGFloat panelH;
     CGFloat triggerHotzoneWidth;
-    CGFloat triggerVisualWidth;
     CGFloat triggerBottomOffset;
     CGFloat safeAreaBreath;
     CGFloat cornerRadius;
@@ -314,20 +289,6 @@ struct {
     CGFloat floatingChromeCornerRadius;
     CGFloat resizeHandleHitArea;
     CGFloat resizeHandleWindowExpansion;
-    CGFloat multitaskingMenuFontSize;
-    CGFloat multitaskingMenuIconSize;
-    CGFloat menuTintR;
-    CGFloat menuTintG;
-    CGFloat menuTintB;
-    CGFloat menuTintA;
-    CGFloat menuBtnScale;
-    CGFloat menuStartScale;
-    CGFloat menuAnimDuration;
-    CGFloat menuAnimDamping;
-    CGFloat menuParabolicOffset;
-    CGFloat menuSpecularAlpha;
-    CGFloat transitionParallaxExpand;
-    CGFloat transitionParallaxShrink;
     CGFloat shadowOpacityFocused;
     CGFloat shadowOpacityUnfocused;
     CGFloat shadowRadiusFocused;
@@ -348,24 +309,10 @@ struct {
     .iconCornerRadius = 13.0,
     .iconShadowOpacity = 0.3,
     .iconShadowRadius = 5.0,
-    .highlightAlpha = 0.35,
     // 物理引擎参数
-    .parallaxPanelFactor = 8.0,
-    .parallaxDecoFactor = 11.0,
-    .lerpFactor = 0.15,
-    .tiltMaxAngle = 0.12,
-    .scrollTiltFactor = 0.0015,
-    .momentumDamping = 0.92,
-    .maxStretch = 0.12,
-    .stretchDamping = 3500.0,
     // 动画参数
-    .durationShort = 0.15,
     .durationMedium = 0.3,
-    .durationLong = 0.5,
-    .springDamping = 0.6,
-    .springVelocity = 0.8,
     // 窗口层级
-    .maxBound = 2100.0,
     .floatingApp = 999.0,
     .panel = 2099.0,
     .background = -1.0,
@@ -374,7 +321,6 @@ struct {
     .panelW = 370.0,
     .panelH = 520.0,
     .triggerHotzoneWidth = 30.0,
-    .triggerVisualWidth = 20.0,
     .triggerBottomOffset = 100.0,
     .safeAreaBreath = 10.0,
     .cornerRadius = 28.0,
@@ -388,20 +334,6 @@ struct {
     .floatingChromeCornerRadius = 18.0,
     .resizeHandleHitArea = 80.0,
     .resizeHandleWindowExpansion = 40.0,
-    .multitaskingMenuFontSize = 11.0,
-    .multitaskingMenuIconSize = 13.0,
-    .menuTintR = 0.0,
-    .menuTintG = 0.8,
-    .menuTintB = 1.0,
-    .menuTintA = 0.02,
-    .menuBtnScale = 0.94,
-    .menuStartScale = 0.15,
-    .menuAnimDuration = 0.38,
-    .menuAnimDamping = 0.72,
-    .menuParabolicOffset = 60.0,
-    .menuSpecularAlpha = 0.25,
-    .transitionParallaxExpand = 0.93,
-    .transitionParallaxShrink = 1.05,
     .shadowOpacityFocused = 0.18,
     .shadowOpacityUnfocused = 0.12,
     .shadowRadiusFocused = 26.0,
@@ -1816,7 +1748,6 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, strong) UIView *hostView;
 @property (nonatomic, copy) NSString *sceneHostingRequester;
 @property (nonatomic, strong) CV3HostedSceneSession *hostedSession;
-@property (nonatomic, strong) UIVisualEffectView *multitaskingMenuView;
 @property (nonatomic, strong) UIView *homeBarView;
 @property (nonatomic, strong) UIVisualEffectView *homeBarBlurView;
 @property (nonatomic, strong) CAGradientLayer *homeBarGlowLayer;
@@ -1834,7 +1765,6 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, strong) UIView *resizeHandle;
 @property (nonatomic, strong) CAShapeLayer *resizeHandleLayer;
 @property (nonatomic, assign) CGSize resizeHandleVisualSize;
-@property (nonatomic, strong) UIPanGestureRecognizer *windowResizePan;
 @property (nonatomic, strong) FBScene *targetScene;
 @property (nonatomic, assign) CGRect initialResizeFrame;
 @property (nonatomic, assign) BOOL isStashed;
@@ -1846,7 +1776,6 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, strong) UIImageView *appIconMiniView;
 
 // Snap & Visual FX Enhancements
-@property (nonatomic, strong) UIVisualEffectView *snapPreviewView;
 @property (nonatomic, strong) CALayer *innerGlowLayer;
 @property (nonatomic, strong) CALayer *cyanLayer;
 @property (nonatomic, strong) CALayer *magentaLayer;
@@ -1861,8 +1790,6 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, assign) BOOL isInLayout;
 @property (nonatomic, assign) BOOL isMovingWindow;
 @property (nonatomic, assign) NSTimeInterval moveSceneSyncSuppressedUntil;
-@property (nonatomic, assign) CGPoint lastVelocity;
-@property (nonatomic, strong) UIView *crystalPreviewContainer;
 @property (nonatomic, strong) UIView *splashView;
 @property (nonatomic, strong) UIImageView *largeSplashIcon;
 @property (nonatomic, assign) UIInterfaceOrientation targetOrientation;
@@ -1899,9 +1826,7 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 @property (nonatomic, assign) NSUInteger pendingRepublishedStableCount;
 @property (nonatomic, assign) UIInterfaceOrientation lastLayoutOrientation;
 @property (nonatomic, assign) CGAffineTransform baseRotationTransform;
-@property (nonatomic, assign) CGRect preFullscreenFrame;
 @property (nonatomic, assign) CGRect preHostedLandscapePortraitFrame;
-@property (nonatomic, assign) CGRect preCompactFrame;
 @property (nonatomic, assign) BOOL isFullscreenMode;
 @property (nonatomic, assign) BOOL fullscreenLaunchPending;
 @property (nonatomic, assign) BOOL preserveSceneForegroundOnClose;
@@ -1964,8 +1889,6 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 - (void)stopLiquidMotion;
 - (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene;
 - (void)updateSovereigntyAssertion;
-- (void)menuBtnTouchDown:(UIButton *)sender;
-- (void)menuBtnTouchUp:(UIButton *)sender;
 - (void)updateAdaptiveColor;
 - (void)setWindowFocused:(BOOL)focused;
 - (void)promoteFloatingWindowInZOrder;
@@ -2038,8 +1961,6 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 - (void)handleHomeBarTap:(UITapGestureRecognizer *)gesture;
 - (void)handleHomeBarResizePan:(UIPanGestureRecognizer *)gesture;
 - (void)activateHostedAppFullscreenAndClose;
-- (void)handleCopyHostedContentAction:(id)sender;
-- (void)dismissMultitaskingMenu;
 - (void)ensureLaunchSplashVisible;
 - (void)recordColdLaunchMilestone:(NSString *)milestone details:(NSString *)details;
 - (void)recordOrientationTrace:(NSString *)phase force:(BOOL)force;
@@ -2052,7 +1973,6 @@ static NSString *CV3HostLifecycleStateName(CV3HostLifecycleState state) {
 - (void)enforcePortraitWindowGeometry;
 - (void)applySceneRotationContext:(CV3SceneRotationContext)context force:(BOOL)force;
 - (void)applyInterfaceOrientation:(UIInterfaceOrientation)orientation force:(BOOL)force;
-- (void)applyTrustedOrientationNow;
 - (CGRect)visiblePortraitContentFrame;
 - (CGRect)currentHostedSceneBounds;
 - (BOOL)applyHostedSceneLayoutToSettings:(id)settings force:(BOOL)force;
@@ -2115,69 +2035,6 @@ static void CV3PublishHostGeneration(void) {
     return CGRectContainsPoint(hitFrame, point);
 }
 @end
-
-// --- Custom iPadOS Multitasking Capsule with Touch Redirection ---
-@interface CV3TrafficCapsule : UIView
-@property (nonatomic, strong) UIVisualEffectView *blurView;
-@end
-
-@implementation CV3TrafficCapsule
-- (instancetype)initWithFrame:(CGRect)frame {
-    self = [super initWithFrame:frame];
-    if (self) {
-        self.backgroundColor = [UIColor clearColor];
-        self.clipsToBounds = NO; // 不裁切超出的物理按钮热区
-        
-        UIBlurEffect *blurEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial];
-        self.blurView = [[UIVisualEffectView alloc] initWithEffect:blurEffect];
-        self.blurView.frame = self.bounds;
-        self.blurView.layer.cornerRadius = frame.size.height / 2.0;
-        self.blurView.layer.masksToBounds = YES;
-        self.blurView.layer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.08].CGColor;
-        self.blurView.layer.borderWidth = 0.5;
-        self.blurView.userInteractionEnabled = NO; // 极其重要：不阻拦子按钮的事件流
-        [self addSubview:self.blurView];
-    }
-    return self;
-}
-
-- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
-    // 隐形判定盾牌：判定范围向外扩充 15.0 pt，提升边缘盲按响应率
-    CGRect hitFrame = CGRectInset(self.bounds, -15.0, -15.0);
-    return CGRectContainsPoint(hitFrame, point);
-}
-
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    if (self.hidden || !self.userInteractionEnabled || self.alpha < 0.01) return nil;
-    
-    // 如果在扩大的判定区域内，但点偏了没直接命中按钮，则根据横坐标区间，智能转发给对应的子按钮
-    if ([self pointInside:point withEvent:event]) {
-        UIView *hit = [super hitTest:point withEvent:event];
-        if (hit && [hit isKindOfClass:[UIButton class]]) {
-            return hit;
-        }
-        
-        // 坐标重映射：根据局部的 X 坐标分配到 3 等分区间 (0 = 左, 1 = 中, 2 = 右)
-        CGFloat x = point.x;
-        x = MIN(MAX(0.0, x), self.bounds.size.width);
-        NSInteger index = (NSInteger)(x / (self.bounds.size.width / 3.0));
-        index = MIN(2, MAX(0, index));
-        
-        // 查找 tag 匹配 of 子按钮并重定向触控
-        for (UIView *sub in self.subviews) {
-            if ([sub isKindOfClass:[UIButton class]] && sub.tag == index) {
-                return sub;
-            }
-        }
-    }
-    return [super hitTest:point withEvent:event];
-}
-@end
-
-
-static void CV3UpdateFloatingBackdrop(UIWindowScene *preferredScene) {
-    (void)preferredScene;
-}
 
 %hook UIWindow
 - (NSString *)_role {
@@ -3536,12 +3393,6 @@ static void CV3SetKeyboardSuppressedByPanel(BOOL suppressed);
 }
 @end
 
-// Colors will be generated via macro/functions to avoid static constant color allocation issues, but for basic values we can define them as macros or functions.
-#define kCV3ColorSystemGreen [UIColor colorWithRed:0.15 green:0.79 blue:0.25 alpha:1.0]
-#define kCV3ColorSystemRed   [UIColor colorWithRed:1.00 green:0.37 blue:0.33 alpha:1.0]
-#define kCV3ColorSystemYellow [UIColor colorWithRed:1.00 green:0.75 blue:0.18 alpha:1.0]
-
-
 #pragma mark - Quick Access View (Keyboard Accessory)
 @interface CV3QuickAccessView : UIView
 @property (nonatomic, strong) NSArray<CV3AppInfo *> *apps;
@@ -3926,153 +3777,6 @@ static BOOL CV3PublishBulletinThroughNotificationSource(id bulletin) {
     });
     return YES;
 }
-
-@interface CV3NotificationTestWindow : UIWindow
-@property (nonatomic, weak) UIView *interactiveView;
-@end
-
-@implementation CV3NotificationTestWindow
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *interactiveView = self.interactiveView;
-    if (!interactiveView || interactiveView.hidden || interactiveView.alpha < 0.01) return nil;
-    CGPoint localPoint = [interactiveView convertPoint:point fromView:self];
-    if (!CGRectContainsPoint(interactiveView.bounds, localPoint)) return nil;
-    return [super hitTest:point withEvent:event];
-}
-@end
-
-@interface CV3NotificationTestController : NSObject
-@property (nonatomic, strong) CV3NotificationTestWindow *window;
-@property (nonatomic, strong) UIControl *banner;
-@property (nonatomic, copy) NSString *bundleID;
-+ (instancetype)sharedController;
-- (void)showForBundleID:(NSString *)bundleID;
-@end
-
-@implementation CV3NotificationTestController
-
-+ (instancetype)sharedController {
-    static CV3NotificationTestController *controller;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        controller = [[self alloc] init];
-    });
-    return controller;
-}
-
-- (void)dismissBanner {
-    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(dismissBanner) object:nil];
-    CV3NotificationTestWindow *window = self.window;
-    UIControl *banner = self.banner;
-    self.banner = nil;
-    self.window = nil;
-    [UIView animateWithDuration:0.2 animations:^{
-        banner.alpha = 0.0;
-        banner.transform = CGAffineTransformMakeTranslation(0, -24.0);
-    } completion:^(__unused BOOL finished) {
-        window.hidden = YES;
-    }];
-}
-
-- (void)openTestNotification {
-    NSString *bundleID = [self.bundleID copy];
-    [self dismissBanner];
-    if (bundleID.length == 0) return;
-    CV3HandleUnlockedBannerTap(@{ @"bundleIdentifier": bundleID }, nil, @"ChevronV3SafeTestBanner.tap");
-}
-
-- (void)showForBundleID:(NSString *)bundleID {
-    [self dismissBanner];
-    self.bundleID = bundleID;
-
-    UIWindowScene *activeScene = nil;
-    if (@available(iOS 13.0, *)) {
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]] &&
-                scene.activationState == UISceneActivationStateForegroundActive) {
-                activeScene = (UIWindowScene *)scene;
-                break;
-            }
-        }
-    }
-
-    CV3NotificationTestWindow *window;
-    if (@available(iOS 13.0, *)) {
-        if (!activeScene) {
-            CV3LogToFile(@"[NotificationSplit][SafeTest] 未找到前台 UIWindowScene");
-            return;
-        }
-        window = [[CV3NotificationTestWindow alloc] initWithWindowScene:activeScene];
-    } else {
-        window = [[CV3NotificationTestWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    }
-    window.frame = window.screen.bounds;
-    window.backgroundColor = UIColor.clearColor;
-    window.windowLevel = CV3Style.maxBound;
-
-    UIViewController *rootController = [[UIViewController alloc] init];
-    rootController.view.backgroundColor = UIColor.clearColor;
-    window.rootViewController = rootController;
-
-    CGFloat width = MIN(CGRectGetWidth(window.bounds) - 24.0, 430.0);
-    CGFloat topInset = activeScene ? activeScene.windows.firstObject.safeAreaInsets.top : 20.0;
-    UIControl *banner = [[UIControl alloc] initWithFrame:CGRectMake((CGRectGetWidth(window.bounds) - width) / 2.0,
-                                                                   MAX(topInset + 6.0, 12.0),
-                                                                   width,
-                                                                   88.0)];
-    banner.layer.cornerRadius = 18.0;
-    if (@available(iOS 13.0, *)) banner.layer.cornerCurve = kCACornerCurveContinuous;
-    banner.layer.masksToBounds = YES;
-    [banner addTarget:self action:@selector(openTestNotification) forControlEvents:UIControlEventTouchUpInside];
-
-    UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:
-                                [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
-    blur.frame = banner.bounds;
-    blur.userInteractionEnabled = NO;
-    blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [banner addSubview:blur];
-
-    UIImageView *iconView = [[UIImageView alloc] initWithFrame:CGRectMake(14.0, 18.0, 52.0, 52.0)];
-    iconView.image = [UIImage _applicationIconImageForBundleIdentifier:bundleID format:2 scale:[UIScreen mainScreen].scale];
-    iconView.layer.cornerRadius = 11.0;
-    iconView.layer.masksToBounds = YES;
-    [banner addSubview:iconView];
-
-    id proxy = CV3InvokeObject1(CV3ClassNamed(@"LSApplicationProxy"),
-                                @selector(applicationProxyForIdentifier:), bundleID);
-    NSString *appName = CV3InvokeObject(proxy, @selector(localizedName));
-    if (appName.length == 0) appName = bundleID;
-
-    UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(78.0, 15.0, width - 94.0, 25.0)];
-    titleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
-    titleLabel.textColor = UIColor.labelColor;
-    titleLabel.text = appName;
-    [banner addSubview:titleLabel];
-
-    UILabel *messageLabel = [[UILabel alloc] initWithFrame:CGRectMake(78.0, 39.0, width - 94.0, 36.0)];
-    messageLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightRegular];
-    messageLabel.textColor = UIColor.secondaryLabelColor;
-    messageLabel.numberOfLines = 2;
-    messageLabel.text = @"ChevronV3 测试通知：点击后应直接开启分屏窗口";
-    [banner addSubview:messageLabel];
-
-    banner.alpha = 0.0;
-    banner.transform = CGAffineTransformMakeTranslation(0, -24.0);
-    [rootController.view addSubview:banner];
-    window.interactiveView = banner;
-    self.window = window;
-    self.banner = banner;
-    window.hidden = NO;
-
-    [UIView animateWithDuration:0.28 delay:0.0 usingSpringWithDamping:0.82 initialSpringVelocity:0.2 options:0 animations:^{
-        banner.alpha = 1.0;
-        banner.transform = CGAffineTransformIdentity;
-    } completion:nil];
-    [self performSelector:@selector(dismissBanner) withObject:nil afterDelay:8.0];
-    CV3LogToFile(@"[NotificationSplit][SafeTest] 已显示安全测试通知: %@", bundleID);
-}
-
-@end
 
 static void CV3HandleSimulatedNotificationRequest(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -4555,11 +4259,9 @@ static void CV3ApplySceneRotationContextToProject(CV3SceneRotationContext contex
 %end
 
 @interface SBWorkspaceTransitionRequest : NSObject
-@property (nonatomic, copy) NSSet *entities;
 @end
 
 @interface SBMainWorkspaceTransitionRequest : SBWorkspaceTransitionRequest
-@property (nonatomic, copy) NSSet *deactivatedEntities;
 @property (nonatomic, assign) NSInteger source;
 - (BOOL)isAppearingBackgrounded;
 - (BOOL)isAppearingInBackground;

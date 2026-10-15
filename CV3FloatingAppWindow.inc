@@ -100,7 +100,6 @@ static const NSInteger kCV3ExposeColumnCount = 2;
 static const CGFloat kCV3ExposeOuterPadding = 20.0;
 static const CGFloat kCV3ExposeInterItemSpacing = 14.0;
 static const CGFloat kCV3ExposeMaxCellWidthRatio = 0.40;
-static const CGFloat kCV3ExposeMaxCellHeightRatio = 0.42;
 static const CGFloat kCV3ExposeCardCornerRadius = 22.0;
 static const CGFloat kCV3ExposeCardShadowOpacity = 0.22;
 static const CGFloat kCV3ExposeCardShadowRadius = 20.0;
@@ -1433,9 +1432,6 @@ void CV3ToggleExposeMode(void) {
             for (NSInteger i=0; i<(NSInteger)activeWindows.count; i++) {
                 CV3FloatingAppWindow *win = activeWindows[i];
                 
-                // 折叠浮窗的控制菜单（如果有展开的话）
-                [win dismissMultitaskingMenu];
-                
                 win.preExposeFrame = win.frame;
                 win.preExposeTransform = win.transform;
                 win.alpha = 0.22;
@@ -2097,10 +2093,6 @@ void CV3ToggleExposeMode(void) {
         } completion:nil];
     }
     [self recordOrientationTrace:@"applySceneRotationContext.end" force:YES];
-}
-
-- (void)applyTrustedOrientationNow {
-    [self applyInterfaceOrientation:CV3TrustedInterfaceOrientation(self.windowScene) force:NO];
 }
 
 - (CGRect)restorableFrameForOrientation:(UIInterfaceOrientation)orientation preferredCenter:(CGPoint)preferredCenter {
@@ -3033,68 +3025,6 @@ static NSString *CV3OrientationResolverTrace(id settings) {
     }
 }
 
-- (void)menuBtnTouchDown:(UIButton *)sender {
-    [UIView animateWithDuration:CV3Style.durationShort delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
-        sender.transform = CGAffineTransformMakeScale(CV3Style.menuBtnScale, CV3Style.menuBtnScale);
-        sender.alpha = 0.85;
-        
-        UIView *hoverBg = [sender viewWithTag:990];
-        if (hoverBg) {
-            hoverBg.alpha = 1.0;
-            
-            CAGradientLayer *specular = nil;
-            if (hoverBg.layer.sublayers) {
-                for (CALayer *sub in hoverBg.layer.sublayers) {
-                    if ([[sub valueForKey:@"name"] isEqualToString:@"specular"]) {
-                        specular = (CAGradientLayer *)sub;
-                        break;
-                    }
-                }
-            }
-            if (specular) {
-                [specular removeAnimationForKey:@"flow"];
-                
-                CABasicAnimation *startAnim = [CABasicAnimation animationWithKeyPath:@"startPoint"];
-                startAnim.fromValue = [NSValue valueWithCGPoint:CGPointMake(-0.5, -0.5)];
-                startAnim.toValue = [NSValue valueWithCGPoint:CGPointMake(1.0, 1.0)];
-                
-                CABasicAnimation *endAnim = [CABasicAnimation animationWithKeyPath:@"endPoint"];
-                endAnim.fromValue = [NSValue valueWithCGPoint:CGPointMake(0.0, 0.0)];
-                endAnim.toValue = [NSValue valueWithCGPoint:CGPointMake(1.5, 1.5)];
-                
-                CAAnimationGroup *group = [CAAnimationGroup animation];
-                group.animations = @[startAnim, endAnim];
-                group.duration = CV3Style.menuAnimDuration;
-                group.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-                group.fillMode = kCAFillModeForwards;
-                group.removedOnCompletion = NO;
-                [specular addAnimation:group forKey:@"flow"];
-            }
-        }
-    } completion:nil];
-}
-
-- (void)menuBtnTouchUp:(UIButton *)sender {
-    [UIView animateWithDuration:CV3Style.durationMedium delay:0 usingSpringWithDamping:CV3Style.springDamping initialSpringVelocity:CV3Style.springVelocity options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
-        sender.transform = CGAffineTransformIdentity;
-        sender.alpha = 1.0;
-        
-        UIView *hoverBg = [sender viewWithTag:990];
-        if (hoverBg) {
-            hoverBg.alpha = 0.0;
-            
-            if (hoverBg.layer.sublayers) {
-                for (CALayer *sub in hoverBg.layer.sublayers) {
-                    if ([[sub valueForKey:@"name"] isEqualToString:@"specular"]) {
-                        [sub removeAnimationForKey:@"flow"];
-                        break;
-                    }
-                }
-            }
-        }
-    } completion:nil];
-}
-
 - (void)createFloatingHomeBarIfNeeded {
     if (self.homeBarView) return;
 
@@ -3959,282 +3889,6 @@ static NSString *CV3OrientationResolverTrace(id settings) {
             CV3EndFullscreenLaunchBypass(bundleID);
         });
     });
-}
-
-- (UIButton *)multitaskingMenuButtonWithTitle:(NSString *)title symbol:(NSString *)symbol action:(SEL)action {
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-    button.tintColor = [UIColor labelColor];
-    button.titleLabel.font = [UIFont systemFontOfSize:CV3Style.multitaskingMenuFontSize weight:UIFontWeightSemibold];
-    button.titleLabel.numberOfLines = 1;
-    button.backgroundColor = [UIColor clearColor];
-    button.layer.cornerRadius = 10.0;
-    
-    // 增加精致的半透明圆角选项背景层（Hover/Touch 高亮跟随）
-    UIView *hoverBg = [[UIView alloc] initWithFrame:CGRectZero];
-    hoverBg.tag = 990;
-    hoverBg.backgroundColor = [[UIColor labelColor] colorWithAlphaComponent:0.07];
-    hoverBg.layer.cornerRadius = 8.0;
-    if (@available(iOS 13.0, *)) {
-        hoverBg.layer.cornerCurve = kCACornerCurveContinuous;
-    }
-    hoverBg.userInteractionEnabled = NO;
-    hoverBg.alpha = 0.0;
-    [button addSubview:hoverBg];
-    
-    // 增加金属反射流光层 (Metallic Specular Flow)
-    CAGradientLayer *specular = [CAGradientLayer layer];
-    [specular setValue:@"specular" forKey:@"name"];
-    specular.colors = @[(id)[UIColor clearColor].CGColor,
-                        (id)[[UIColor whiteColor] colorWithAlphaComponent:CV3Style.menuSpecularAlpha].CGColor,
-                        (id)[UIColor clearColor].CGColor];
-    specular.startPoint = CGPointMake(-0.5, -0.5);
-    specular.endPoint = CGPointMake(0.0, 0.0);
-    specular.locations = @[@0.0, @0.5, @1.0];
-    [hoverBg.layer addSublayer:specular];
-    
-    if (@available(iOS 13.0, *)) {
-        // 使用配置好的 icon 尺寸，防止大尺寸 SF Symbol 挤占或遮挡文字
-        UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:CV3Style.multitaskingMenuIconSize weight:UIImageSymbolWeightMedium scale:UIImageSymbolScaleSmall];
-        UIImage *image = [UIImage systemImageNamed:symbol withConfiguration:config];
-        [button setImage:image forState:UIControlStateNormal];
-    }
-    [button setTitle:[NSString stringWithFormat:@" %@", title] forState:UIControlStateNormal];
-    [button setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
-    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
-    
-    // 连接触控物理收缩反馈
-    [button addTarget:self action:@selector(menuBtnTouchDown:) forControlEvents:UIControlEventTouchDown | UIControlEventTouchDragEnter];
-    [button addTarget:self action:@selector(menuBtnTouchUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel | UIControlEventTouchDragExit];
-    
-    return button;
-}
-
-- (void)toggleMultitaskingMenu {
-    CV3LogToFile(@"[MultitaskingMenu] toggleMultitaskingMenu entered. menuView = %@, hidden = %d", self.multitaskingMenuView, self.multitaskingMenuView ? self.multitaskingMenuView.hidden : -1);
-    if (self.multitaskingMenuView && !self.multitaskingMenuView.hidden) {
-        CV3LogToFile(@"[MultitaskingMenu] menuView already visible, dismissing");
-        [self dismissMultitaskingMenu];
-        return;
-    }
-
-    if (!self.multitaskingMenuView) {
-        CV3LogToFile(@"[MultitaskingMenu] Creating multitaskingMenuView...");
-        UIBlurEffect *effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial];
-        self.multitaskingMenuView = [[UIVisualEffectView alloc] initWithEffect:effect];
-        self.multitaskingMenuView.clipsToBounds = YES;
-        self.multitaskingMenuView.layer.cornerRadius = 16.0;
-        if (@available(iOS 13.0, *)) {
-            self.multitaskingMenuView.layer.cornerCurve = kCACornerCurveContinuous;
-        }
-        self.multitaskingMenuView.layer.shadowColor = [UIColor blackColor].CGColor;
-        self.multitaskingMenuView.layer.shadowOffset = CGSizeMake(0, 8);
-        self.multitaskingMenuView.layer.shadowOpacity = 0.18;
-        self.multitaskingMenuView.layer.shadowRadius = 18.0;
-
-        // 冰川蓝注入层 (Ice Tint) 增强毛玻璃通透感与极致美学
-        UIView *tintView = [[UIView alloc] initWithFrame:self.multitaskingMenuView.bounds];
-        tintView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        tintView.backgroundColor = [UIColor colorWithRed:CV3Style.menuTintR green:CV3Style.menuTintG blue:CV3Style.menuTintB alpha:CV3Style.menuTintA];
-        tintView.userInteractionEnabled = NO;
-        [self.multitaskingMenuView.contentView addSubview:tintView];
-
-        // 多任务菜单三棱镜色散层 (Prism Dispersion for Menu)
-        CALayer *menuCyan = [CALayer layer];
-        [menuCyan setValue:@"menuCyan" forKey:@"name"];
-        menuCyan.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.12].CGColor;
-        menuCyan.borderWidth = 0.3;
-        menuCyan.cornerRadius = 16.0;
-        if (@available(iOS 13.0, *)) {
-            menuCyan.cornerCurve = kCACornerCurveContinuous;
-        }
-        [self.multitaskingMenuView.layer addSublayer:menuCyan];
-        
-        CALayer *menuMagenta = [CALayer layer];
-        [menuMagenta setValue:@"menuMagenta" forKey:@"name"];
-        menuMagenta.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:0.12].CGColor;
-        menuMagenta.borderWidth = 0.3;
-        menuMagenta.cornerRadius = 16.0;
-        if (@available(iOS 13.0, *)) {
-            menuMagenta.cornerCurve = kCACornerCurveContinuous;
-        }
-        [self.multitaskingMenuView.layer addSublayer:menuMagenta];
-
-        UIButton *fullscreen = [self multitaskingMenuButtonWithTitle:@"全屏" symbol:@"rectangle.fill" action:@selector(handleFullscreenMenuAction:)];
-        UIButton *expose = [self multitaskingMenuButtonWithTitle:@"所有浮窗" symbol:@"square.grid.2x2" action:@selector(handleExposeMenuAction:)];
-        UIButton *copy = [self multitaskingMenuButtonWithTitle:@"复制" symbol:@"doc.on.doc" action:@selector(handleCopyHostedContentAction:)];
-        UIButton *close = [self multitaskingMenuButtonWithTitle:@"关闭" symbol:@"xmark" action:@selector(handleCloseMenuAction:)];
-        fullscreen.tag = 101;
-        expose.tag = 102;
-        copy.tag = 103;
-        close.tag = 104;
-        [self.multitaskingMenuView.contentView addSubview:fullscreen];
-        [self.multitaskingMenuView.contentView addSubview:expose];
-        [self.multitaskingMenuView.contentView addSubview:copy];
-        [self.multitaskingMenuView.contentView addSubview:close];
-        [self.rootTransformContainer addSubview:self.multitaskingMenuView];
-    }
-
-    CGFloat logicalW = self.rootTransformContainer.bounds.size.width;
-    CGFloat menuW = MIN(320.0, MAX(280.0, logicalW - 24.0));
-    CGFloat menuH = 54.0;
-    self.multitaskingMenuView.frame = CGRectMake((logicalW - menuW) / 2.0, 24.0, menuW, menuH);
-    CV3LogToFile(@"[MultitaskingMenu] menuView frame = %@", NSStringFromCGRect(self.multitaskingMenuView.frame));
-    
-    // 动态调整多任务菜单的色散边缘图层
-    CGRect menuBounds = self.multitaskingMenuView.bounds;
-    if (self.multitaskingMenuView.layer.sublayers) {
-        for (CALayer *sub in self.multitaskingMenuView.layer.sublayers) {
-            if ([[sub valueForKey:@"name"] isEqualToString:@"menuCyan"]) {
-                sub.frame = CGRectInset(menuBounds, -0.3, -0.3);
-            } else if ([[sub valueForKey:@"name"] isEqualToString:@"menuMagenta"]) {
-                sub.frame = CGRectInset(menuBounds, 0.3, 0.3);
-            }
-        }
-    }
-    
-    CGFloat itemW = menuW / 4.0;
-    for (UIButton *button in self.multitaskingMenuView.contentView.subviews) {
-        if (![button isKindOfClass:[UIButton class]]) continue;
-        NSInteger idx = button.tag - 101;
-        button.frame = CGRectMake(itemW * idx, 0, itemW, menuH);
-        
-        UIView *hoverBg = [button viewWithTag:990];
-        if (hoverBg) {
-            hoverBg.frame = CGRectInset(button.bounds, 4, 4); // 四周内缩，呈现精致悬浮边框
-            
-            // 同步调整金属反射流光层的尺寸
-            if (hoverBg.layer.sublayers) {
-                for (CALayer *sub in hoverBg.layer.sublayers) {
-                    if ([[sub valueForKey:@"name"] isEqualToString:@"specular"]) {
-                        sub.frame = hoverBg.bounds;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    // 级联水滴滑入动效从窗口顶部中心展开。
-    CGPoint startCenter = CGPointMake(CGRectGetMidX(self.rootTransformContainer.bounds), 24.0);
-    CGPoint targetCenter = CGPointMake(logicalW / 2.0, 24.0 + menuH / 2.0);
-    
-    self.multitaskingMenuView.center = startCenter;
-    self.multitaskingMenuView.transform = CGAffineTransformMakeScale(CV3Style.menuStartScale, CV3Style.menuStartScale);
-    self.multitaskingMenuView.alpha = 0.0;
-    self.multitaskingMenuView.hidden = NO;
-    [self.rootTransformContainer bringSubviewToFront:self.multitaskingMenuView];
-    
-    // 水滴抛物线飞行动画 (Parabolic Flight trajectory)
-    CGMutablePathRef curvedPath = CGPathCreateMutable();
-    CGPathMoveToPoint(curvedPath, NULL, startCenter.x, startCenter.y);
-    CGFloat cx = startCenter.x + (targetCenter.x - startCenter.x) * 0.4;
-    CGFloat cy = startCenter.y + CV3Style.menuParabolicOffset;
-    CGPathAddQuadCurveToPoint(curvedPath, NULL, cx, cy, targetCenter.x, targetCenter.y);
-    
-    CAKeyframeAnimation *pathAnimation = [CAKeyframeAnimation animationWithKeyPath:@"position"];
-    pathAnimation.duration = CV3Style.menuAnimDuration;
-    pathAnimation.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-    pathAnimation.path = curvedPath;
-    CGPathRelease(curvedPath);
-    
-    [self.multitaskingMenuView.layer addAnimation:pathAnimation forKey:@"position"];
-    
-    CV3LogToFile(@"[MultitaskingMenu] Performing cascade spring animation...");
-    [UIView animateWithDuration:CV3Style.menuAnimDuration
-                          delay:0
-         usingSpringWithDamping:CV3Style.menuAnimDamping
-          initialSpringVelocity:0.2
-                        options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionAllowUserInteraction
-                     animations:^{
-        self.multitaskingMenuView.center = targetCenter;
-        self.multitaskingMenuView.transform = CGAffineTransformIdentity;
-        self.multitaskingMenuView.alpha = 1.0;
-    } completion:nil];
-}
-
-- (void)dismissMultitaskingMenu {
-    CV3LogToFile(@"[MultitaskingMenu] dismissMultitaskingMenu called.");
-    if (!self.multitaskingMenuView || self.multitaskingMenuView.hidden) return;
-    
-    CGPoint startCenter = CGPointMake(CGRectGetMidX(self.rootTransformContainer.bounds), 24.0);
-    CGPoint currentCenter = self.multitaskingMenuView.center;
-    
-    // 原路收缩，吸回绿色的多任务按钮中
-    CGMutablePathRef curvedPath = CGPathCreateMutable();
-    CGPathMoveToPoint(curvedPath, NULL, currentCenter.x, currentCenter.y);
-    CGFloat cx = startCenter.x + (currentCenter.x - startCenter.x) * 0.4;
-    CGFloat cy = currentCenter.y + CV3Style.menuParabolicOffset;
-    CGPathAddQuadCurveToPoint(curvedPath, NULL, cx, cy, startCenter.x, startCenter.y);
-    
-    CAKeyframeAnimation *pathAnimation = [CAKeyframeAnimation animationWithKeyPath:@"position"];
-    pathAnimation.duration = CV3Style.durationMedium;
-    pathAnimation.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-    pathAnimation.path = curvedPath;
-    CGPathRelease(curvedPath);
-    
-    [self.multitaskingMenuView.layer addAnimation:pathAnimation forKey:@"position"];
-    
-    [UIView animateWithDuration:CV3Style.durationMedium
-                          delay:0
-                        options:UIViewAnimationOptionCurveEaseIn | UIViewAnimationOptionAllowUserInteraction
-                     animations:^{
-        self.multitaskingMenuView.alpha = 0;
-        self.multitaskingMenuView.center = startCenter;
-        self.multitaskingMenuView.transform = CGAffineTransformMakeScale(CV3Style.menuStartScale, CV3Style.menuStartScale);
-    } completion:^(BOOL finished) {
-        self.multitaskingMenuView.hidden = YES;
-        self.multitaskingMenuView.transform = CGAffineTransformIdentity;
-        CV3LogToFile(@"[MultitaskingMenu] dismiss completed.");
-    }];
-}
-
-- (void)handleFullscreenMenuAction:(id)sender {
-    [self dismissMultitaskingMenu];
-    CV3ExitExposeModeIfNeeded(nil, NO);
-    CV3LogToFile(@"[FullscreenLaunch] phase=trigger source=multitaskingMenu bundle=%@", self.bundleID);
-    [self activateHostedAppFullscreenAndClose];
-}
-
-- (void)handleCloseMenuAction:(id)sender {
-    [self dismissMultitaskingMenu];
-    CV3ExitExposeModeIfNeeded(self, NO);
-    [self closeWindow];
-}
-
-- (void)handleCopyHostedContentAction:(id)sender {
-    [self dismissMultitaskingMenu];
-    if (self.isClosing || !self.hostView) return;
-
-    UIImage *image = nil;
-    @autoreleasepool {
-        CGSize size = self.hostView.bounds.size;
-        if (size.width > 1.0 && size.height > 1.0) {
-            UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
-            format.scale = [UIScreen mainScreen].scale;
-            UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:size format:format];
-            image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
-                if (![self.hostView drawViewHierarchyInRect:self.hostView.bounds afterScreenUpdates:NO]) {
-                    [self.hostView.layer renderInContext:context.CGContext];
-                }
-            }];
-        }
-    }
-
-    if (!image) {
-        CV3LogToFile(@"[Clipboard] 无法生成托管内容快照: %@", self.bundleID);
-        return;
-    }
-
-    UIPasteboard *pasteboard = [UIPasteboard generalPasteboard];
-    pasteboard.items = @[@{
-        @"public.png": UIImagePNGRepresentation(image)
-    }];
-    CV3LogToFile(@"[Clipboard] 已复制分屏画面 %@ size=%@", self.bundleID, NSStringFromCGSize(image.size));
-}
-
-- (void)handleExposeMenuAction:(id)sender {
-    [self dismissMultitaskingMenu];
-    CV3ToggleExposeMode();
 }
 
 static NSString *CV3DirectionTraceTransform3D(CATransform3D t) {
@@ -5652,7 +5306,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 }
 
 - (void)handleHideAction {
-    [self dismissMultitaskingMenu];
     CV3ExitExposeModeIfNeeded(self, NO);
 
     CGRect screen = CV3DisplayBoundsForWindow(self);
@@ -5721,7 +5374,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         self.resizeHandle.alpha = 0.0;
         self.homeBarView.alpha = 0.0;
         [self normalizeStashedGrabberLayout];
-        CV3UpdateFloatingBackdrop(self.windowScene);
         for (CV3FloatingAppWindow *win in [floatingWindows copy]) {
             if ([win isKindOfClass:[CV3FloatingAppWindow class]] && win.isStashed) [win updateGrabberStack];
         }
@@ -5762,7 +5414,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
         self.appContentWrapper.alpha = 0.0;
         [self.hostView removeFromSuperview];
         [self normalizeStashedGrabberLayout];
-        CV3UpdateFloatingBackdrop(self.windowScene);
         for (CV3FloatingAppWindow *win in [floatingWindows copy]) {
             if ([win isKindOfClass:[CV3FloatingAppWindow class]] && win.isStashed) [win updateGrabberStack];
         }
@@ -5951,17 +5602,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
             [self updateFloatingHomeBarAppearance];
         });
     });
-}
-- (UIImage *)sparkImageWithColor:(UIColor *)color {
-    CGFloat size = 20.0;
-    UIGraphicsBeginImageContextWithOptions(CGSizeMake(size, size), NO, 0);
-    CGContextRef context = UIGraphicsGetCurrentContext();
-    CGContextAddEllipseInRect(context, CGRectMake(0, 0, size, size));
-    [color setFill];
-    CGContextFillPath(context);
-    UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
-    return image;
 }
 
 - (void)applyCurrentTransformWithScale:(CGFloat)scale {
@@ -6463,10 +6103,8 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     CGRect screen = CV3DisplayBoundsForWindow(self);
     
     if (gesture.state == UIGestureRecognizerStateBegan) {
-        CV3LogToFile(@"[MoveGesture] handleMoveLongPress state began. Dismissing multitaskingMenu");
         self.isMovingWindow = YES;
         self.moveSceneSyncSuppressedUntil = DBL_MAX;
-        [self dismissMultitaskingMenu];
         CV3ExitExposeModeIfNeeded(self, YES);
         if (!self.isStashed) {
             self.stashGrabber.alpha = 0;
@@ -6673,7 +6311,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
 }
 
 - (void)restoreFromStash {
-    [self dismissMultitaskingMenu];
     CV3ExitExposeModeIfNeeded(self, YES);
     // 恢复为普通 App 之上的浮窗层级，保留系统通知栏/控制中心在上方
     self.windowLevel = CV3Style.floatingApp; 
@@ -6760,7 +6397,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
             self.homeBarView.alpha = 1.0;
             [self syncWindowShadowForCurrentState];
             [self animateFocusShadow:self.isFocused];
-            CV3UpdateFloatingBackdrop(self.windowScene);
             for (CV3FloatingAppWindow *win in floatingWindows) {
                 if (win.isStashed) [win updateGrabberStack];
             }
@@ -6827,7 +6463,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
             self.homeBarView.alpha = 1.0;
             [self syncWindowShadowForCurrentState];
             [self animateFocusShadow:self.isFocused];
-            CV3UpdateFloatingBackdrop(self.windowScene);
             // 通知其他窗口更新堆叠状态
             for (CV3FloatingAppWindow *win in floatingWindows) {
                 if (win.isStashed) [win updateGrabberStack];
@@ -7083,269 +6718,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     return NO;
 }
 
-- (void)handleResizePan:(UIPanGestureRecognizer *)gesture {
-    if (gesture.state == UIGestureRecognizerStateBegan) {
-        [self dismissMultitaskingMenu];
-        CV3ExitExposeModeIfNeeded(self, YES);
-        self.isFullscreenMode = NO;
-        self.isCompactMode = NO;
-        self.initialResizeFrame = self.frame;
-        [gesture setTranslation:CGPointZero inView:nil];
-
-        CGRect displayBounds = [self orientedDisplayBoundsForCurrentOrientation];
-        CGFloat displayShortSide = MIN(displayBounds.size.width, displayBounds.size.height);
-        CGFloat displayLongSide = MAX(displayBounds.size.width, displayBounds.size.height);
-        CGFloat resizeAspect = displayLongSide / MAX(displayShortSide, 1.0);
-        CGFloat minLogicalWidth = 1.0;
-        CGFloat maxLogicalWidth = 1.0;
-        [self resizeLimitsForAspect:resizeAspect minWidth:&minLogicalWidth maxWidth:&maxLogicalWidth];
-        CV3LogToFile(@"[ResizeLimits] phase=corner.begin bundle=%@ sceneBounds=%@ orientedBounds=%@ initialFrame=%@ orientation=%ld initialLogical=%.3f minLogical=%.3f maxLogical=%.3f",
-                     self.bundleID ?: @"<nil>", NSStringFromCGRect(self.windowScene.coordinateSpace.bounds),
-                     NSStringFromCGRect(displayBounds), NSStringFromCGRect(self.initialResizeFrame),
-                     (long)self.targetOrientation,
-                     MIN(self.initialResizeFrame.size.width, self.initialResizeFrame.size.height),
-                     minLogicalWidth, maxLogicalWidth);
-
-        self.isLiveResizing = YES;
-        CALayer *shadowLayer = [self visualShadowLayer];
-        shadowLayer.shadowPath = nil;
-        shadowLayer.shouldRasterize = YES;
-        shadowLayer.rasterizationScale = [UIScreen mainScreen].scale;
-        [self startLiquidMotion];
-        [UIView animateWithDuration:0.2 animations:^{
-            shadowLayer.shadowOpacity = CV3Style.shadowOpacityUnfocused * 0.5;
-            self.glassBackdrop.effect = nil;
-            self.glassBackdrop.backgroundColor = [UIColor clearColor];
-        }];
-
-        if (self.hostView) {
-            self.liveResizeSnapshotView = [self.hostView snapshotViewAfterScreenUpdates:NO];
-            if (self.liveResizeSnapshotView) {
-                self.liveResizeSnapshotView.frame = self.hostContainerProxy.bounds;
-                self.liveResizeSnapshotView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-                [self.hostContainerProxy addSubview:self.liveResizeSnapshotView];
-                self.hostView.alpha = 0;
-            }
-        }
-
-        if (self.targetScene) {
-            @try {
-                FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
-                if ([settings respondsToSelector:@selector(setInLiveResize:)]) {
-                    [(UIMutableApplicationSceneSettings *)settings setInLiveResize:YES];
-                    [self.targetScene updateSettings:settings withTransitionContext:nil];
-                }
-            } @catch (NSException *e) {
-                CV3LogToFile(@"[Critical] Failed to set live resize state: %@", e);
-            }
-        }
-
-    }
-    
-    CGPoint translation = [gesture translationInView:nil];
-    
-    if (gesture.state == UIGestureRecognizerStateChanged) {
-        CGRect screenBounds = [self orientedDisplayBoundsForCurrentOrientation];
-        CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
-        CGFloat longSide = MAX(screenBounds.size.width, screenBounds.size.height);
-        CGFloat aspect = longSide / MAX(shortSide, 1.0);
-        
-        CGFloat minAllowedWidth = 1.0;
-        CGFloat maxAllowedWidth = 1.0;
-        [self resizeLimitsForAspect:aspect minWidth:&minAllowedWidth maxWidth:&maxAllowedWidth];
-        
-        CGPoint initialCenter = CGPointMake(CGRectGetMidX(self.initialResizeFrame), CGRectGetMidY(self.initialResizeFrame));
-        CGPoint initialHandlePos = CGPointMake(CGRectGetMaxX(self.initialResizeFrame), CGRectGetMaxY(self.initialResizeFrame));
-        CGPoint currentHandlePos = CGPointMake(initialHandlePos.x + translation.x, initialHandlePos.y + translation.y);
-        
-        CGFloat initialDist = sqrt(pow(initialHandlePos.x - initialCenter.x, 2) + pow(initialHandlePos.y - initialCenter.y, 2));
-        CGFloat currentDist = sqrt(pow(currentHandlePos.x - initialCenter.x, 2) + pow(currentHandlePos.y - initialCenter.y, 2));
-        
-        CGFloat rawScaleFactor = initialDist > 0 ? (currentDist / initialDist) : 1.0;
-        CGFloat scaleFactor = 1.0 + (rawScaleFactor - 1.0) * 1.25; 
-        
-        CGFloat initialLogicalWidth = MIN(self.initialResizeFrame.size.width, self.initialResizeFrame.size.height);
-        CGFloat targetWidth = initialLogicalWidth * scaleFactor;
-        
-        // Use copy to avoid mutation during enumeration
-        NSArray *windowsSnapshot = [floatingWindows copy];
-        for (CV3FloatingAppWindow *other in windowsSnapshot) {
-            if (other == self || other.isStashed || ![other isKindOfClass:[CV3FloatingAppWindow class]]) continue;
-            
-            CGFloat distance = sqrt(pow(self.center.x - other.center.x, 2) + pow(self.center.y - other.center.y, 2));
-            CGFloat minGap = (self.bounds.size.width + other.bounds.size.width) / 2.0 + 20.0;
-            
-            if (distance < minGap) {
-                targetWidth *= (0.8 + 0.2 * (distance / minGap));
-            }
-        }
-
-        CGFloat finalWidth = targetWidth;
-        if (targetWidth < minAllowedWidth) {
-            finalWidth = minAllowedWidth - (minAllowedWidth - targetWidth) * 0.3;
-        } else if (targetWidth > maxAllowedWidth) {
-            finalWidth = maxAllowedWidth + (targetWidth - maxAllowedWidth) * 0.3;
-        }
-        
-        CGSize physicalSize = [self physicalFloatingSizeForLogicalWidth:finalWidth
-                                                           displayBounds:screenBounds
-                                                            orientation:[self effectiveResizeOrientation]];
-        CGRect newFrame = [self constrainedFloatingFrameForSize:physicalSize preferredCenter:initialCenter];
-        
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        
-        self.bounds = CGRectMake(0, 0, newFrame.size.width, newFrame.size.height);
-        self.center = CGPointMake(CGRectGetMidX(newFrame), CGRectGetMidY(newFrame));
-        [CATransaction commit];
-        
-        // 拖动期间：仅同步 Plist 数据，节流静默 Darwin 广播通知
-        [self syncWindowBoundsToClientAndNotify:NO];
-    }
-    
-    if (gesture.state == UIGestureRecognizerStateEnded || 
-        gesture.state == UIGestureRecognizerStateCancelled || 
-        gesture.state == UIGestureRecognizerStateFailed) {
-        
-        [self stopLiquidMotion];
-        
-        [self visualShadowLayer].shouldRasterize = NO;
-        
-        if (gesture.state != UIGestureRecognizerStateEnded) {
-            self.isLiveResizing = NO;
-            CGFloat minEdge = MIN(self.bounds.size.width, self.bounds.size.height);
-            CGFloat finalRadius = MAX(CV3Style.adaptiveCornerRadiusMin, MIN(CV3Style.adaptiveCornerRadiusMax, minEdge * CV3Style.adaptiveCornerRadiusRatio));
-            [self visualShadowLayer].shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:finalRadius].CGPath;
-            [self animateFocusShadow:self.isFocused];
-            
-            [UIView animateWithDuration:0.4 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
-                self.glassBackdrop.effect = nil;
-                self.glassBackdrop.backgroundColor = [UIColor clearColor];
-            } completion:nil];
-        }
-        
-        CGRect screenBounds = [self orientedDisplayBoundsForCurrentOrientation];
-        CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
-        CGFloat longSide = MAX(screenBounds.size.width, screenBounds.size.height);
-        CGFloat aspect = longSide / MAX(shortSide, 1.0);
-        CGPoint initialCenter = CGPointMake(CGRectGetMidX(self.frame), CGRectGetMidY(self.frame));
-
-        UIEdgeInsets safeArea = [self currentSafeAreaInsets];
-
-        // --- [Geek Advice] Asynchronous Frame Pipelining ---
-        // Step 1: Immediately update scene settings to final frame and release live resize lock
-        if (self.targetScene) {
-            @try {
-                FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
-                if ([settings respondsToSelector:@selector(setInLiveResize:)]) {
-                    [(UIMutableApplicationSceneSettings *)settings setInLiveResize:NO];
-                    [self.targetScene updateSettings:settings withTransitionContext:nil];
-                }
-                
-                // Force an immediate layout update for the new size
-                [self setNeedsLayout];
-                [self layoutIfNeeded]; 
-                
-                CV3LogToFile(@"[Pipelining] 已提交最终场景布局请求: %@", self.bundleID);
-            } @catch (NSException *e) {}
-        }
-
-        // Cleanup visuals with staged fade
-        UIView *snapshot = self.liveResizeSnapshotView;
-        self.liveResizeSnapshotView = nil; // Clear state immediately to allow layoutSubviews to update the final scene frame
-
-        // Step 2: Delay the transition slightly to give the remote process time to render its first frame at the new size
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [UIView animateWithDuration:0.4 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
-                self.hostView.alpha = 1.0;
-                if (snapshot) snapshot.alpha = 0;
-            } completion:^(BOOL finished) {
-                [snapshot removeFromSuperview];
-            }];
-        });
-
-        // Snapping and constraints for Ended state
-        if (gesture.state == UIGestureRecognizerStateEnded) {
-            CGFloat finalWidth = MIN(self.bounds.size.width, self.bounds.size.height);
-            
-            // 惯性滑行动量优化
-            CGPoint gestureVel = [gesture velocityInView:nil];
-            CGFloat speed = sqrt(gestureVel.x * gestureVel.x + gestureVel.y * gestureVel.y);
-            CGFloat widthMomentum = 0;
-            if (speed > 300.0) {
-                // 计算对角线上的滑动速度分量
-                CGFloat diagVelocity = (gestureVel.x + gestureVel.y) / sqrt(2.0);
-                // 3000px/s 的速度映射为 45pt 的尺寸滑行动量
-                widthMomentum = diagVelocity * 0.015;
-            }
-            finalWidth += widthMomentum;
-
-            // 限制惯性后的宽度范围，避免拉伸越界
-            CGFloat minAllowedWidth = 1.0;
-            CGFloat maxAllowedWidth = 1.0;
-            [self resizeLimitsForAspect:aspect minWidth:&minAllowedWidth maxWidth:&maxAllowedWidth];
-            if (finalWidth < minAllowedWidth) finalWidth = minAllowedWidth;
-            if (finalWidth > maxAllowedWidth) finalWidth = maxAllowedWidth;
-
-            CGFloat previousLogicalWidth = finalWidth;
-            
-            // Island Snapping
-            CGRect snapFrame = self.frame;
-            CGFloat snapThreshold = 25.0;
-            if (fabs(snapFrame.origin.y - safeArea.top) < snapThreshold) {
-                snapFrame.origin.y = safeArea.top;
-            }
-
-            // Ratio Snapping
-            CGFloat currentRatio = finalWidth / shortSide;
-            if (fabs(currentRatio - 0.5) < 0.03) finalWidth = shortSide * 0.5;
-            else if (fabs(currentRatio - 0.75) < 0.03) finalWidth = shortSide * 0.75;
-            finalWidth = MAX(minAllowedWidth, MIN(maxAllowedWidth, finalWidth));
-            CGSize finalSize = [self physicalFloatingSizeForLogicalWidth:finalWidth
-                                                            displayBounds:screenBounds
-                                                             orientation:[self effectiveResizeOrientation]];
-            snapFrame.size = finalSize;
-            
-            // Re-center if ratio snapped
-            if (fabs(finalWidth - previousLogicalWidth) > 0.1) {
-                snapFrame.origin.x = initialCenter.x - finalSize.width / 2.0;
-                snapFrame.origin.y = initialCenter.y - finalSize.height / 2.0;
-            }
-            snapFrame = [self constrainedFloatingFrameForSize:finalSize
-                                              preferredCenter:CGPointMake(CGRectGetMidX(snapFrame), CGRectGetMidY(snapFrame))];
-
-            CV3LogToFile(@"[ResizeLimits] phase=corner.end bundle=%@ orientedBounds=%@ safeArea=%@ orientation=%ld requestedLogical=%.3f minLogical=%.3f maxLogical=%.3f finalSize=%@ finalFrame=%@",
-                         self.bundleID ?: @"<nil>", NSStringFromCGRect(screenBounds),
-                         NSStringFromUIEdgeInsets(safeArea), (long)self.targetOrientation,
-                         finalWidth, minAllowedWidth, maxAllowedWidth,
-                         NSStringFromCGSize(finalSize), NSStringFromCGRect(snapFrame));
-
-            // Final bounce animation with dynamic spring velocity matching gesture release speed
-            CGFloat springVelocity = MIN(4.0, MAX(0.5, speed / 800.0));
-            [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.75 initialSpringVelocity:springVelocity options:0 animations:^{
-                self.bounds = CGRectMake(0, 0, snapFrame.size.width, snapFrame.size.height);
-                self.center = CGPointMake(CGRectGetMidX(snapFrame), CGRectGetMidY(snapFrame));
-            } completion:^(BOOL finished) {
-                self.isLiveResizing = NO;
-                CGFloat minEdge = MIN(self.bounds.size.width, self.bounds.size.height);
-                CGFloat finalRadius = MAX(CV3Style.adaptiveCornerRadiusMin, MIN(CV3Style.adaptiveCornerRadiusMax, minEdge * CV3Style.adaptiveCornerRadiusRatio));
-                [self visualShadowLayer].shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:finalRadius].CGPath;
-                
-                [UIView animateWithDuration:0.4 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
-                    self.glassBackdrop.effect = nil;
-                    self.glassBackdrop.backgroundColor = [UIColor clearColor];
-                } completion:nil];
-
-                // 动画静止后，发出一次最终的 Darwin 通知，通知客户端刷新其 UI
-                [self syncWindowBoundsToClientAndNotify:YES];
-                CV3SaveWindowLayout(self);
-            }];
-            
-            [self animateFocusShadow:self.isFocused];
-        }
-    }
-}
-
 - (void)handleTransitionGhosting {
     if (self.isClosing || !self.hostView) return;
     
@@ -7462,7 +6834,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
     }
 
     CV3CascadeUpdateSovereigntyAssertions(); // 级联刷新剩下的窗口前台优先级断言
-    CV3UpdateFloatingBackdrop(nil);
     
     [self releaseSharedGeometryIfNeeded:@"closeWindow"];
 }
