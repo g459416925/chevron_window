@@ -3,6 +3,10 @@
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 #import <notify.h>
+#import <dlfcn.h>
+#if __has_feature(ptrauth_calls)
+#import <ptrauth.h>
+#endif
 #import "CV3PrivateAPI.h"
 #import "CV3CoreSupport.h"
 #import "CV3CameraSupport.h"
@@ -44,8 +48,7 @@
 - (id)iconManager;
 - (id)model;
 - (id)iconViewForIcon:(id)arg1 location:(id)arg2;
-- (void)presentSpotlightAnimated:(BOOL)animated completion:(id)completion;
-- (void)presentSpotlightAnimated:(BOOL)animated;
+- (void)dismissSearchView;
 @end
 
 @interface SBIcon : NSObject
@@ -422,6 +425,13 @@ static const NSTimeInterval kCV3PanelPresentDuration = 0.62;
 static const NSTimeInterval kCV3PanelDismissDuration = 0.32;
 static const CGFloat kCV3PanelTriggerDistance = 45.0;
 
+// BounceIt 风格果冻弹跳（对齐设备上的 com.xu.bounceit16 v1.0.2 观感）。
+// BounceIt 侧参数: zeta = 42/(2*sqrt(1666*2.5)) ≈ 0.33 → 过冲 ~34%、弹 ~2 下、收敛 ~0.48s。
+// UIView 的 usingSpringWithDamping / UISpringTimingParameters.dampingRatio 与 zeta 同义。
+// 这里取 0.38：面板/窗口是大面积 UI，同档观感下比系统小控件略收一点，收敛更快。
+// 调法：想更弹 → 调小（0.33 = BounceIt 原档）；想更稳 → 调大（0.45）。
+static const CGFloat kCV3BounceDamping = 0.38;
+
 #pragma mark - Custom Cell
 typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
     CV3AppPanelProtectionStateNone = 0,
@@ -722,12 +732,58 @@ static void CV3LogHomeBarVisibility(NSString *format, ...);
 static void CV3LogWindowOrientation(NSString *format, ...);
 static void CV3WriteFocusedDiagnostic(NSString *message);
 static BOOL CV3HasVisibleHostedWindow(void);
+static void CV3DumpKeyboardForensics(NSString *reason);
+
+static void CV3AppendKeyboardLayerTree(CALayer *layer,
+                                       NSUInteger depth,
+                                       NSMutableArray<NSString *> *lines) {
+    if (!layer || depth > 8 || lines.count >= 96) return;
+    BOOL markedKeyboard = [layer respondsToSelector:@selector(isKeyboardLayer)] &&
+                          ((BOOL (*)(id, SEL))objc_msgSend)(layer, @selector(isKeyboardLayer));
+    CATransform3D transform = layer.transform;
+    CATransform3D subT = layer.sublayerTransform;
+    [lines addObject:[NSString stringWithFormat:@"%*s%@ keyboard=%d frame=%@ bounds=%@ position=%@ anchor=%@ transform=[%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g] subT=[%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g] hidden=%d opacity=%.2f children=%lu",
+                      (int)(depth * 2), "",
+                      NSStringFromClass(layer.class),
+                      markedKeyboard,
+                      NSStringFromCGRect(layer.frame),
+                      NSStringFromCGRect(layer.bounds),
+                      NSStringFromCGPoint(layer.position),
+                      NSStringFromCGPoint(layer.anchorPoint),
+                      transform.m11, transform.m12, transform.m13, transform.m14,
+                      transform.m21, transform.m22, transform.m23, transform.m24,
+                      transform.m31, transform.m32, transform.m33, transform.m34,
+                      transform.m41, transform.m42, transform.m43, transform.m44,
+                      subT.m11, subT.m12, subT.m13, subT.m14,
+                      subT.m21, subT.m22, subT.m23, subT.m24,
+                      subT.m31, subT.m32, subT.m33, subT.m34,
+                      subT.m41, subT.m42, subT.m43, subT.m44,
+                      layer.hidden, layer.opacity,
+                      (unsigned long)layer.sublayers.count]];
+    for (CALayer *child in layer.sublayers) {
+        CV3AppendKeyboardLayerTree(child, depth + 1, lines);
+    }
+}
+
+static void CV3AppendKeyboardViewTree(UIView *view,
+                                      NSUInteger depth,
+                                      NSMutableArray<NSString *> *lines) {
+    if (!view || depth > 10 || lines.count >= 128) return;
+    [lines addObject:[NSString stringWithFormat:@"%*s%@:%p frame=%@ bounds=%@ center=%@ transform=%@ hidden=%d alpha=%.2f layer=%@",
+                     (int)(depth * 2), "", NSStringFromClass(view.class), view,
+                     NSStringFromCGRect(view.frame), NSStringFromCGRect(view.bounds),
+                     NSStringFromCGPoint(view.center), NSStringFromCGAffineTransform(view.transform),
+                     view.hidden, view.alpha, NSStringFromClass(view.layer.class)]];
+    for (UIView *child in view.subviews) {
+        CV3AppendKeyboardViewTree(child, depth + 1, lines);
+    }
+}
 
 static BOOL CV3AppendDiagnosticDataDirectly(NSData *data, NSString *label) {
     NSArray<NSString *> *paths = @[
-        @"/rootfs/var/mobile/Library/Logs/ChevronV3_Logs.txt",
         @"/var/mobile/Library/Logs/ChevronV3_Logs.txt",
         @"/private/var/mobile/Library/Logs/ChevronV3_Logs.txt",
+        @"/var/mobile/Documents/ChevronV3_Logs.txt",
     ];
     NSMutableArray<NSString *> *failures = [NSMutableArray array];
 
@@ -971,9 +1027,21 @@ static void CV3WriteFocusedDiagnostic(NSString *message) {
         [message hasPrefix:@"[SplitTrace] [SplitPreviewTrace]"] ||
         [message hasPrefix:@"[SplitTrace] [StashIconTrace]"] ||
         [message hasPrefix:@"[SplitTrace] [BreathingTrace]"] ||
+        [message hasPrefix:@"[SplitTrace] [PanelScrollTrace]"] ||
+        [message hasPrefix:@"[SplitTrace] [EdgeSystemEnvironment]"] ||
+        [message hasPrefix:@"[SplitTrace] [EdgeGestureEnvironment]"] ||
+        [message hasPrefix:@"[SplitTrace] [HomeSearch]"] ||
+        [message hasPrefix:@"[HomeSearch]"] ||
+        [message hasPrefix:@"[SplitTrace] [LaunchChain]"] ||
+        [message hasPrefix:@"[SplitTrace] [LauncherTouch]"] ||
+        [message hasPrefix:@"[SplitTrace] [Launcher]"] ||
+        [message hasPrefix:@"[LauncherTouch]"] ||
+        [message hasPrefix:@"[Launcher]"] ||
         [message hasPrefix:@"[SplitTrace] [RotationCentre]"] ||
         [message hasPrefix:@"[SplitTrace] [ViewportFit]"] ||
         [message hasPrefix:@"[SplitTrace] [SnapshotOrient]"] ||
+        [message hasPrefix:@"[SplitTrace] [Warning][KeyboardDebug]"] ||
+        [message hasPrefix:@"[Warning][KeyboardDebug]"] ||
         ([message hasPrefix:@"[SplitTrace] [Strict]"] &&
          ([message containsString:@"phase=orientation.shellSurfaceSync.begin"] ||
           [message containsString:@"phase=orientation.shellSurfaceSync.completed"] ||
@@ -996,7 +1064,8 @@ static void CV3WriteFocusedDiagnostic(NSString *message) {
         ([message hasPrefix:@"[SplitTrace] [SurfaceOrientationAudit]"] &&
          [message containsString:@"event=change"]);
     if (!relevant) return;
-    if (message.length > 2048) message = [message substringToIndex:2048];
+    NSUInteger messageLimit = [message containsString:@"[KeyboardDebug]"] ? 8192 : 2048;
+    if (message.length > messageLimit) message = [message substringToIndex:messageLimit];
 
     // This diagnostic build writes synchronously. The previous asynchronous
     // NSFileHandle path silently dropped records during SpringBoard startup.
@@ -2475,23 +2544,29 @@ static BOOL CV3InterceptHostedIconObject(id icon, NSString *source) {
     return CV3FocusHostedFloatingWindowForBundleID(CV3BundleIdentifierFromIconObject(icon), source);
 }
 
+// 启动链探针（2026-10-12）：许总要求"从面板打开 app 严格复刻主屏打开的原生弹跳"，
+// 需要在真机上观测"主屏点击图标"的完整调用链，找出可复现的触发点。
+// 每个候选入口按帧逐条落盘（[SplitTrace] [LaunchChain] 已入白名单），
+// 单帧超长由日志层截断保护。纯观测，不改变转发行为。
+static void CV3LogLaunchChain(NSString *method, id iconOrView) {
+    NSString *bundleID = CV3BundleIdentifierFromIconObject(CV3IconFromIconViewObject(iconOrView) ?: iconOrView);
+    NSArray<NSString *> *stack = [NSThread callStackSymbols];
+    NSInteger limit = MIN((NSInteger)stack.count, 26);
+    for (NSInteger i = 0; i < limit; i++) {
+        CV3LogToFile(@"[LaunchChain] method=%@ bundle=%@ frame#%ld %@",
+                     method, bundleID ?: @"?", (long)i, stack[(NSUInteger)i]);
+    }
+}
+
 %hook SBIcon
-- (void)launchFromLocation:(NSInteger)location context:(id)context {
+// iconprobe 实证（iOS 16.5.1）：location 实际是对象（typeEncoding v@:@@），
+// 原 NSInteger 声明仅碰巧可转发；这里修正为 id。单参 launchFromLocation: 与
+// -launch 在运行时不存在（曾为死 hook），已移除。
+- (void)launchFromLocation:(id)location context:(id)context {
     if (CV3InterceptHostedIconObject(self, @"SBIcon.launchFromLocation:context:")) return;
+    CV3LogLaunchChain(@"SBIcon.launchFromLocation:context:", self);
     CV3BeginWorkspaceTransitionProtection(@"IconLaunchBegan");
     %orig(location, context);
-}
-
-- (void)launchFromLocation:(NSInteger)location {
-    if (CV3InterceptHostedIconObject(self, @"SBIcon.launchFromLocation:")) return;
-    CV3BeginWorkspaceTransitionProtection(@"IconLaunchBegan");
-    %orig(location);
-}
-
-- (void)launch {
-    if (CV3InterceptHostedIconObject(self, @"SBIcon.launch")) return;
-    CV3BeginWorkspaceTransitionProtection(@"IconLaunchBegan");
-    %orig;
 }
 %end
 
@@ -2576,7 +2651,7 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 
 @property (nonatomic, strong) NSTimer *heartbeatTimer;
 @property (nonatomic, strong) NSTimer *panelStateRefreshTimer;
-@property (nonatomic, assign) BOOL isKeyboardVisible; 
+@property (nonatomic, assign) BOOL isKeyboardVisible;
 @property (nonatomic, assign) BOOL observersRegistered;
 @property (nonatomic, assign) BOOL hasBeenMoved;
 @property (nonatomic, strong) UIView *resizingHandle;
@@ -2609,6 +2684,10 @@ static void CV3EndWorkspaceTransitionProtection(NSString *reason) {
 @property (nonatomic, assign) NSInteger interactionCount;
 
 
+@property (nonatomic, assign) NSUInteger launchRequestGeneration;
+@property (nonatomic, copy) NSString *panelPresentationSourceBundleID;
+
+
 // 拖拽分屏支持
 @property (nonatomic, strong) UIImageView *draggedIconView;
 @property (nonatomic, strong) CV3AppInfo *draggedAppInfo;
@@ -2638,6 +2717,7 @@ static CV3Window *sharedWindow = nil;
 static BOOL CV3PanelWakeGestureActive = NO;
 static __weak UIViewController *CV3HomeScreenSpotlightController = nil;
 static BOOL CV3SystemHomeSearchTriggered = NO;
+static BOOL CV3HomeSearchDidAppear = NO;
 static BOOL CV3HomeSearchDismissalInFlight = NO;
 // The launcher edge gesture and Home Screen's pull-down Spotlight gesture
 // compete for the same touch sequence.  This flag is raised as soon as the
@@ -2645,6 +2725,11 @@ static BOOL CV3HomeSearchDismissalInFlight = NO;
 static BOOL CV3HomeScreenPullDownSuppressed = NO;
 static dispatch_block_t CV3PendingPanelPresentation = nil;
 static NSUInteger CV3PanelPresentationGeneration = 0;
+// Spotlight lifecycle forensics: how long a queued panel waited before it was
+// released, and how long the dismissSearchView request took to actually remove
+// Spotlight (a request that predates the observation by minutes is a bug lead).
+static CFTimeInterval CV3PendingPanelQueuedAt = 0;
+static CFTimeInterval CV3SearchDismissRequestedAt = 0;
 
 static void CV3SetHomeScreenPullDownSuppressed(BOOL suppressed) {
     if (![NSThread isMainThread]) {
@@ -2655,21 +2740,10 @@ static void CV3SetHomeScreenPullDownSuppressed(BOOL suppressed) {
     }
 
     CV3HomeScreenPullDownSuppressed = suppressed;
-    if (!suppressed) return;
-
-    // If Spotlight already started in the same touch sequence, remove its
-    // visible controller immediately.  The presentation hooks below prevent
-    // it from being presented again while the panel owns the interaction.
-    UIViewController *spotlightController = CV3HomeScreenSpotlightController;
-    @try {
-        if (spotlightController.view.window && !spotlightController.view.hidden) {
-            spotlightController.view.hidden = YES;
-            spotlightController.view.userInteractionEnabled = NO;
-            [spotlightController dismissViewControllerAnimated:NO completion:nil];
-        }
-    } @catch (NSException *e) {
-        CV3LogToFile(@"[Gesture] 屏蔽主屏下拉手势时回收 Spotlight 异常: %@", e);
-    }
+    CV3LogToFile(@"[HomeSearch] phase=suppression.changed suppressed=%d controller=%@ visible=%d",
+                 suppressed,
+                 CV3HomeScreenSpotlightController,
+                 CV3HomeScreenSpotlightController.view.window != nil);
 }
 
 static BOOL CV3LauncherOwnsHomeSearchTransition(void) {
@@ -2691,6 +2765,9 @@ static void CV3PresentPendingPanelAfterHomeRestored(void) {
     CV3PendingPanelPresentation = nil;
     CV3SystemHomeSearchTriggered = NO;
     CV3HomeSearchDismissalInFlight = NO;
+    NSTimeInterval queuedFor = CV3PendingPanelQueuedAt > 0 ? CACurrentMediaTime() - CV3PendingPanelQueuedAt : -1;
+    CV3PendingPanelQueuedAt = 0;
+    CV3LogToFile(@"[HomeSearch] phase=dismiss.completion presentation=%d queuedFor=%.3f", presentation != nil, queuedFor);
     if (presentation) presentation();
 }
 
@@ -2703,48 +2780,24 @@ static void CV3ReturnHomeThenPresentPendingPanel(void) {
     }
     if (!CV3PendingPanelPresentation || CV3HomeSearchDismissalInFlight) return;
 
+    // dismissSearchView does not cancel Spotlight while its presentation is
+    // still between viewWillAppear: and viewDidAppear:. Wait for the native
+    // lifecycle boundary instead of marking a dismissal as in-flight before
+    // SpringBoard can actually execute it.
+    if (!CV3HomeScreenSpotlightController || !CV3HomeSearchDidAppear) {
+        CV3LogToFile(@"[HomeSearch] phase=dismiss.awaitingAppearance controller=%@ appeared=%d",
+                     CV3HomeScreenSpotlightController,
+                     CV3HomeSearchDidAppear);
+        return;
+    }
+
     CV3HomeSearchDismissalInFlight = YES;
-    dispatch_block_t completion = ^{
-        CV3PresentPendingPanelAfterHomeRestored();
-    };
-
-    id iconController = [CV3ClassNamed(@"SBIconController") sharedInstance];
-    BOOL requestedDismissal = NO;
-
-    @try {
-        SEL selector = NSSelectorFromString(@"dismissSpotlightAnimated:completion:");
-        if ([iconController respondsToSelector:selector]) {
-            ((void (*)(id, SEL, BOOL, id))objc_msgSend)(iconController, selector, NO, completion);
-            requestedDismissal = YES;
-        } else {
-            selector = NSSelectorFromString(@"dismissSpotlightAnimated:");
-            if ([iconController respondsToSelector:selector]) {
-                ((void (*)(id, SEL, BOOL))objc_msgSend)(iconController, selector, NO);
-                requestedDismissal = YES;
-            } else {
-                selector = NSSelectorFromString(@"dismissSpotlight");
-                if ([iconController respondsToSelector:selector]) {
-                    ((void (*)(id, SEL))objc_msgSend)(iconController, selector);
-                    requestedDismissal = YES;
-                }
-            }
-        }
-    } @catch (NSException *e) {
-        requestedDismissal = NO;
-    }
-
-    UIViewController *spotlightController = CV3HomeScreenSpotlightController;
-    if (!requestedDismissal && spotlightController.presentingViewController) {
-        [spotlightController dismissViewControllerAnimated:NO completion:completion];
-        requestedDismissal = YES;
-    }
-
-    // Older SpringBoard variants expose no dismissal completion. Give their
-    // non-animated transition one run-loop window before presenting our panel.
-    if (!requestedDismissal || ![iconController respondsToSelector:NSSelectorFromString(@"dismissSpotlightAnimated:completion:")]) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), completion);
-    }
+    CV3SearchDismissRequestedAt = CACurrentMediaTime();
+    CV3LogToFile(@"[HomeSearch] phase=dismiss.request controller=%@ visible=%d",
+                 CV3HomeScreenSpotlightController,
+                 CV3HomeScreenSpotlightController.view.window != nil);
+    SBIconController *iconController = [CV3ClassNamed(@"SBIconController") sharedInstance];
+    [iconController dismissSearchView];
 }
 
 static void CV3QueuePanelPresentationAfterSystemGesture(dispatch_block_t presentation) {
@@ -2759,6 +2812,8 @@ static void CV3QueuePanelPresentationAfterSystemGesture(dispatch_block_t present
     CV3PanelPresentationGeneration += 1;
     NSUInteger generation = CV3PanelPresentationGeneration;
     CV3PendingPanelPresentation = [presentation copy];
+    CV3PendingPanelQueuedAt = CACurrentMediaTime();
+    CV3LogToFile(@"[HomeSearch] phase=pending.queued gen=%lu", (unsigned long)generation);
 
     // Present on the next run-loop turn. A longer delay lets SpringBoard enter
     // the interactive Spotlight transition before our panel becomes visible.
@@ -3132,51 +3187,6 @@ static BOOL CV3IsWallpaperLongPressGesture(UIGestureRecognizer *gesture) {
     %orig(editing, animated);
 }
 
-- (void)presentSpotlightAnimated:(BOOL)animated completion:(id)completion {
-    if (CV3HomeScreenPullDownSuppressed) {
-        // Do not let the Home Screen pull-down transition start while the
-        // launcher edge gesture/panel owns the touch sequence.
-        CV3SystemHomeSearchTriggered = NO;
-        if (completion) {
-            id completionCopy = [completion copy];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                ((void (^)(void))completionCopy)();
-            });
-        }
-        return;
-    }
-
-    if (!CV3LauncherOwnsHomeSearchTransition()) {
-        %orig(animated, completion);
-        return;
-    }
-
-    CV3SystemHomeSearchTriggered = YES;
-    id originalCompletion = [completion copy];
-    dispatch_block_t wrappedCompletion = ^{
-        if (originalCompletion) ((void (^)(void))originalCompletion)();
-        CV3ReturnHomeThenPresentPendingPanel();
-    };
-    %orig(animated, wrappedCompletion);
-}
-
-- (void)presentSpotlightAnimated:(BOOL)animated {
-    if (CV3HomeScreenPullDownSuppressed) {
-        CV3SystemHomeSearchTriggered = NO;
-        return;
-    }
-
-    if (!CV3LauncherOwnsHomeSearchTransition()) {
-        %orig(animated);
-        return;
-    }
-
-    CV3SystemHomeSearchTriggered = YES;
-    dispatch_block_t wrappedCompletion = ^{
-        CV3ReturnHomeThenPresentPendingPanel();
-    };
-    [self presentSpotlightAnimated:animated completion:wrappedCompletion];
-}
 %end
 
 %hook SBHFolderController
@@ -3380,28 +3390,21 @@ static BOOL CV3IsWallpaperLongPressGesture(UIGestureRecognizer *gesture) {
 %hook SBHomeScreenSpotlightViewController
 - (void)viewWillAppear:(BOOL)animated {
     CV3HomeScreenSpotlightController = self;
-    if (CV3HomeScreenPullDownSuppressed) {
-        self.view.hidden = YES;
-        self.view.userInteractionEnabled = NO;
-        return;
-    }
-    self.view.hidden = NO;
-    self.view.userInteractionEnabled = YES;
+    CV3HomeSearchDidAppear = NO;
     if (CV3LauncherOwnsHomeSearchTransition()) {
         CV3SystemHomeSearchTriggered = YES;
     }
+    CV3LogToFile(@"[HomeSearch] phase=viewWillAppear launcherOwns=%d suppressed=%d",
+                 CV3LauncherOwnsHomeSearchTransition(), CV3HomeScreenPullDownSuppressed);
     %orig(animated);
 }
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig(animated);
     CV3HomeScreenSpotlightController = self;
-    if (CV3HomeScreenPullDownSuppressed) {
-        self.view.hidden = YES;
-        self.view.userInteractionEnabled = NO;
-        [self dismissViewControllerAnimated:NO completion:nil];
-        return;
-    }
+    CV3HomeSearchDidAppear = YES;
+    CV3LogToFile(@"[HomeSearch] phase=viewDidAppear launcherOwns=%d suppressed=%d",
+                 CV3LauncherOwnsHomeSearchTransition(), CV3HomeScreenPullDownSuppressed);
     if (CV3LauncherOwnsHomeSearchTransition()) {
         CV3SystemHomeSearchTriggered = YES;
         CV3ReturnHomeThenPresentPendingPanel();
@@ -3410,14 +3413,15 @@ static BOOL CV3IsWallpaperLongPressGesture(UIGestureRecognizer *gesture) {
 
 - (void)viewDidDisappear:(BOOL)animated {
     %orig(animated);
-    if (!CV3HomeScreenPullDownSuppressed) {
-        self.view.hidden = NO;
-        self.view.userInteractionEnabled = YES;
-    }
+    CV3HomeSearchDidAppear = NO;
+    NSTimeInterval sinceDismissRequest = CV3SearchDismissRequestedAt > 0 ? CACurrentMediaTime() - CV3SearchDismissRequestedAt : -1;
+    CV3SearchDismissRequestedAt = 0;
+    CV3LogToFile(@"[HomeSearch] phase=viewDidDisappear pending=%d suppressed=%d sinceDismissRequest=%.3f",
+                 CV3PendingPanelPresentation != nil, CV3HomeScreenPullDownSuppressed, sinceDismissRequest);
     if (CV3HomeScreenSpotlightController == self) {
         CV3HomeScreenSpotlightController = nil;
     }
-    if (CV3PendingPanelPresentation) {
+    if (CV3PendingPanelPresentation && CV3HomeSearchDismissalInFlight) {
         CV3PresentPendingPanelAfterHomeRestored();
     }
 }
@@ -4080,15 +4084,8 @@ static void CV3HandleSimulatedNotificationRequest(void) {
             CV3LogToFile(@"[NotificationSplit][NativeTest] 收到原生通知请求: %@", bundleID);
             id bulletin = CV3CreateNativeTestBulletin(bundleID);
             if (!bulletin || !CV3PublishBulletinThroughNotificationSource(bulletin)) {
-                // Keep the preferences test usable even when NotificationCenter has
-                // not materialized a native source yet.  This is a bundle-agnostic
-                // diagnostic entry point and exercises the exact same hosted window
-                // path used by the launcher panel.
-                BOOL opened = CV3OpenBundleInFloatingWindow(bundleID,
-                                                             @"PreferencesDiagnosticFallback");
-                CV3LogToFile(@"[Warning][NotificationSplit][NativeTest] 原生通知源不可用，直接托管 %@ success=%d",
-                             bundleID,
-                             opened);
+                CV3LogToFile(@"[Error][NotificationSplit][NativeTest] 原生通知发布失败 bundle=%@ bulletin=%@",
+                             bundleID, bulletin);
             }
         } @catch (NSException *exception) {
             CV3LogToFile(@"[NotificationSplit][NativeTest] 处理测试通知异常: %@", exception);
@@ -5048,19 +5045,36 @@ static BOOL CV3FocusHostedLaunchTargetFromObject(id request, NSString *source) {
     %orig(gesture);
 }
 
-- (void)launchIcon:(id)icon fromLocation:(id)location {
-    if (CV3InterceptHostedIconObject(icon, @"SBIconController.launchIcon:fromLocation:")) return;
-    %orig(icon, location);
+// iconprobe 实证（iOS 16.5.1）：launchIcon:/launchIcon:fromLocation:/_launchIcon:fromLocation:
+// 在运行时均不存在（曾为死 hook，从未生效），已移除。点击图标的真实内部入口是
+// _launchFromIconView:withActions:（iconView 携带动画源）。在此拦截 hosted 图标：
+// 对分屏中的 app 转为聚焦浮窗（与 SBIconView 触摸层拦截同源互补），
+// 普通图标放行并进入与 SBIcon 启动一致的工作区过渡保护。
+- (void)_launchFromIconView:(id)iconView withActions:(id)actions {
+    if (CV3InterceptHostedIconObject(CV3IconFromIconViewObject(iconView),
+                                    @"SBIconController._launchFromIconView")) return;
+    CV3LogLaunchChain(@"SBIconController._launchFromIconView:withActions:", iconView);
+    CV3BeginWorkspaceTransitionProtection(@"IconLaunchBegan");
+    %orig(iconView, actions);
 }
 
-- (void)_launchIcon:(id)icon fromLocation:(id)location {
-    if (CV3InterceptHostedIconObject(icon, @"SBIconController._launchIcon:fromLocation:")) return;
-    %orig(icon, location);
+// 启动链探针：SBHIconManager delegate 启动回调（观测主屏点击的真实入口）。
+- (void)iconManager:(id)manager launchIcon:(id)icon location:(id)location animated:(BOOL)animated completionHandler:(id)handler {
+    CV3LogLaunchChain(@"SBIconController.iconManager:launchIcon:location:animated:completionHandler:", icon);
+    %orig;
 }
 
-- (void)launchIcon:(id)icon {
-    if (CV3InterceptHostedIconObject(icon, @"SBIconController.launchIcon:")) return;
-    %orig(icon);
+- (void)iconManager:(id)manager launchIconForIconView:(id)iconView withActions:(id)actions {
+    CV3LogLaunchChain(@"SBIconController.iconManager:launchIconForIconView:withActions:", iconView);
+    NSString *actionsDesc = actions ? [actions description] : @"-";
+    if (actionsDesc.length > 700) actionsDesc = [actionsDesc substringToIndex:700];
+    CV3LogToFile(@"[LaunchChain] params manager=%@ viewClass=%@ actions=%@ actionsClass=%@ desc=%@",
+                 manager ? NSStringFromClass([manager class]) : @"nil",
+                 iconView ? NSStringFromClass([iconView class]) : @"nil",
+                 actions ? @"non-nil" : @"nil",
+                 actions ? NSStringFromClass([actions class]) : @"-",
+                 actionsDesc);
+    %orig;
 }
 %end
 
@@ -5201,6 +5215,383 @@ static CV3PassthroughWindow *cv3_keyboardWindow = nil;
 static __weak CV3FloatingAppWindow *cv3_keyboardOwnerWindow = nil;
 static NSHashTable<UIView *> *cv3_keyboardHostedViews = nil;
 
+static BOOL CV3FloatingWindowRequiresLandscapeKeyboard(CV3FloatingAppWindow *window) {
+    if (![window isKindOfClass:[CV3FloatingAppWindow class]] ||
+        window.isClosing || window.isStashed || window.hidden) return NO;
+    return UIInterfaceOrientationIsLandscape(window.hostedContentOrientation) &&
+           UIInterfaceOrientationIsPortrait(window.windowScene.interfaceOrientation);
+}
+
+static BOOL CV3LandscapeHostedKeyboardRequired(void) {
+    for (CV3FloatingAppWindow *window in [floatingWindows copy] ?: @[]) {
+        if (CV3FloatingWindowRequiresLandscapeKeyboard(window)) return YES;
+    }
+    return NO;
+}
+
+static void CV3ApplyLandscapeKeyboardPresentation(UIWindow *keyboardWindow) {
+    if (!keyboardWindow) return;
+    BOOL shouldRotate = CV3LandscapeHostedKeyboardRequired();
+    UIView *presentationView = nil;
+    for (UIView *view in keyboardWindow.subviews) {
+        if ([NSStringFromClass(view.class) isEqualToString:@"_UIScenePresentationView"]) {
+            presentationView = view;
+            break;
+        }
+    }
+    if (!presentationView) {
+        // 诊断：presentation view 未命中时不再静默（限流 2s）。
+        // 实测层级为 SBFTouchPassThroughView -> _UIScenePresentationView，
+        // 一层遍历会错过真正的承载视图。
+        static CFTimeInterval lastKeyboardMissLogTime = 0;
+        CFTimeInterval now = CACurrentMediaTime();
+        if (now - lastKeyboardMissLogTime >= 2.0) {
+            lastKeyboardMissLogTime = now;
+            NSMutableArray<NSString *> *classes = [NSMutableArray array];
+            for (UIView *view in keyboardWindow.subviews) {
+                [classes addObject:NSStringFromClass(view.class)];
+            }
+            CV3LogToFile(@"[Warning][KeyboardDebug] medusaPresentationView.missed subviews=[%@] shouldRotate=%d windowBounds=%@ windowHidden=%d sceneOrientation=%ld",
+                         [classes componentsJoinedByString:@","], shouldRotate,
+                         NSStringFromCGRect(keyboardWindow.bounds), keyboardWindow.hidden,
+                         (long)keyboardWindow.windowScene.interfaceOrientation);
+        }
+        return;
+    }
+    CGAffineTransform before = presentationView.transform;
+    CGAffineTransform expected = shouldRotate ? CGAffineTransformMakeRotation((CGFloat)M_PI_2)
+                                               : CGAffineTransformIdentity;
+    BOOL differs = fabs(before.a - expected.a) > 0.001 || fabs(before.b - expected.b) > 0.001 ||
+        fabs(before.c - expected.c) > 0.001 || fabs(before.d - expected.d) > 0.001;
+    if (!differs) {
+        // 诊断：命中但无需修改时也留痕（限流 2s），用于区分"未找到"与"已一致"。
+        static CFTimeInterval lastKeyboardMatchLogTime = 0;
+        CFTimeInterval now = CACurrentMediaTime();
+        if (now - lastKeyboardMatchLogTime >= 2.0) {
+            lastKeyboardMatchLogTime = now;
+            CV3LogToFile(@"[Warning][KeyboardDebug] medusaPresentationView.match shouldRotate=%d transform=%@ windowBounds=%@ windowHidden=%d sceneOrientation=%ld",
+                         shouldRotate, NSStringFromCGAffineTransform(before),
+                         NSStringFromCGRect(keyboardWindow.bounds), keyboardWindow.hidden,
+                         (long)keyboardWindow.windowScene.interfaceOrientation);
+        }
+        return;
+    }
+    presentationView.transform = expected;
+    if (shouldRotate) {
+        presentationView.center = CGPointMake(CGRectGetMidX(keyboardWindow.bounds), CGRectGetMidY(keyboardWindow.bounds));
+    } else {
+        presentationView.frame = keyboardWindow.bounds;
+    }
+    CV3LogToFile(@"[KeyboardDebug] medusaPresentationViewTransform applied=%d before=%@ after=%@ viewBounds=%@ viewFrame=%@ windowBounds=%@ sceneOrientation=%ld",
+                 shouldRotate, NSStringFromCGAffineTransform(before),
+                 NSStringFromCGAffineTransform(presentationView.transform),
+                 NSStringFromCGRect(presentationView.bounds), NSStringFromCGRect(presentationView.frame),
+                 NSStringFromCGRect(keyboardWindow.bounds), (long)keyboardWindow.windowScene.interfaceOrientation);
+}
+
+#pragma mark - 键盘现场取证（诊断专用，零行为改动）
+
+static BOOL CV3KbSentinelExists(NSString *name) {
+    NSArray<NSString *> *paths = @[
+        [@"/rootfs/var/mobile/Library/Logs/" stringByAppendingString:name],
+        [@"/var/mobile/Library/Logs/" stringByAppendingString:name],
+        [@"/private/var/mobile/Library/Logs/" stringByAppendingString:name],
+    ];
+    NSFileManager *manager = [NSFileManager defaultManager];
+    for (NSString *path in paths) {
+        if ([manager fileExistsAtPath:path]) return YES;
+    }
+    return NO;
+}
+
+static BOOL CV3KbRotateFixEnabled(void) {
+    static BOOL enabled = NO;
+    static CFTimeInterval lastCheck = 0.0;
+    CFTimeInterval now = CACurrentMediaTime();
+    if (lastCheck != 0.0 && now - lastCheck < 2.0) return enabled;
+    lastCheck = now;
+    enabled = CV3KbSentinelExists(@"ChevronV3_KbRotateFix.enabled");
+    return enabled;
+}
+
+static BOOL CV3TransformContainsRotation(CATransform3D transform) {
+    return fabs(transform.m12) > 0.05 || fabs(transform.m21) > 0.05;
+}
+
+static NSString *CV3TransformShortDescription(CATransform3D transform) {
+    return [NSString stringWithFormat:@"[%g,%g,%g,%g|%g,%g,%g,%g]",
+            transform.m11, transform.m12, transform.m21, transform.m22,
+            transform.m41, transform.m42, transform.m43, transform.m44];
+}
+
+static void CV3ScanRotationSuspects(CALayer *layer, NSUInteger depth,
+                                    NSMutableArray<NSString *> *lines,
+                                    NSUInteger *fixedCount, BOOL applyFix) {
+    if (!layer || depth > 14 || lines.count >= 48) return;
+    CATransform3D transform = layer.transform;
+    CATransform3D subT = layer.sublayerTransform;
+    CATransform3D presT = CATransform3DIdentity;
+    CATransform3D presST = CATransform3DIdentity;
+    CALayer *presentation = layer.presentationLayer;
+    if (presentation) {
+        presT = presentation.transform;
+        presST = presentation.sublayerTransform;
+    }
+    BOOL rotated = CV3TransformContainsRotation(transform) || CV3TransformContainsRotation(subT) ||
+                   CV3TransformContainsRotation(presT) || CV3TransformContainsRotation(presST);
+    if (rotated) {
+        [lines addObject:[NSString stringWithFormat:@"d=%lu %@ t=%@ st=%@ presT=%@ presST=%@ pos=%@ f=%@",
+                          (unsigned long)depth, NSStringFromClass(layer.class),
+                          CV3TransformShortDescription(transform), CV3TransformShortDescription(subT),
+                          CV3TransformShortDescription(presT), CV3TransformShortDescription(presST),
+                          NSStringFromCGPoint(layer.position), NSStringFromCGRect(layer.frame)]];
+        if (applyFix && (CV3TransformContainsRotation(transform) || CV3TransformContainsRotation(subT))) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            if (CV3TransformContainsRotation(transform)) layer.transform = CATransform3DIdentity;
+            if (CV3TransformContainsRotation(subT)) layer.sublayerTransform = CATransform3DIdentity;
+            [CATransaction commit];
+            *fixedCount = *fixedCount + 1;
+        }
+    }
+    for (CALayer *child in layer.sublayers ?: @[]) {
+        CV3ScanRotationSuspects(child, depth + 1, lines, fixedCount, applyFix);
+    }
+}
+
+static UIView *CV3FindDescendantViewNamed(UIView *root, NSString *className, NSUInteger depth) {
+    if (!root || depth > 14) return nil;
+    if ([NSStringFromClass(root.class) isEqualToString:className]) return root;
+    for (UIView *child in root.subviews ?: @[]) {
+        UIView *found = CV3FindDescendantViewNamed(child, className, depth + 1);
+        if (found) return found;
+    }
+    return nil;
+}
+
+// v160/v161 键盘旋转补偿实验（哨兵 ChevronV3_KbRotateFix.enabled 控制）：
+// 实测键盘宿主视图（_UIKeyboardLayerHostView）及其全子树在本地无任何旋转分量
+// （model/presentation 的 transform 与 sublayerTransform 均为 identity），
+// 但屏幕上的键盘内容呈顺时针 90° 姿态 —— 旋转发生在远程内容/合成配置里。
+//
+// v160 首测（只施加 R(-90°)）结果：方向变化但内容被转出可视区（frame={(-251,251),{932,430}}）。
+// v165：历史目标中心 {527,167} 只适用于当时的一组窗口几何。在 926x428
+// 横屏宿主中，它会产生 frame.origin.x=64 的可见空白。补偿中心必须来自当前
+// 父容器 bounds；同时保存 UIKit 原始几何，以便退出补偿时精确恢复。
+static char kCV3KbFixOriginalTransformKey;
+static char kCV3KbFixOriginalCenterKey;
+
+static void CV3ApplyKeyboardRotationCompensation(UIView *keyboardHostView, BOOL enable) {
+    if (!keyboardHostView) return;
+    CGAffineTransform current = keyboardHostView.transform;
+    CGAffineTransform compensation = CGAffineTransformMakeRotation((CGFloat)(-M_PI_2));
+    BOOL alreadyCompensated =
+        fabs(current.a - compensation.a) < 0.001 && fabs(current.b - compensation.b) < 0.001 &&
+        fabs(current.c - compensation.c) < 0.001 && fabs(current.d - compensation.d) < 0.001;
+    UIView *parentView = keyboardHostView.superview;
+    CGRect parentBounds = parentView ? parentView.bounds : CGRectZero;
+    CGPoint targetCenter = (!CGRectIsEmpty(parentBounds) && !CGRectIsNull(parentBounds))
+        ? CGPointMake(CGRectGetMidX(parentBounds), CGRectGetMidY(parentBounds))
+        : keyboardHostView.center;
+    BOOL alreadyPlaced = alreadyCompensated &&
+        fabs(keyboardHostView.center.x - targetCenter.x) < 0.5 &&
+        fabs(keyboardHostView.center.y - targetCenter.y) < 0.5;
+    if (enable) {
+        if (alreadyPlaced) return;
+        CGAffineTransform beforeTransform = current;
+        CGPoint beforeCenter = keyboardHostView.center;
+        if (!objc_getAssociatedObject(keyboardHostView, &kCV3KbFixOriginalTransformKey)) {
+            objc_setAssociatedObject(keyboardHostView,
+                                     &kCV3KbFixOriginalTransformKey,
+                                     [NSValue valueWithCGAffineTransform:beforeTransform],
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(keyboardHostView,
+                                     &kCV3KbFixOriginalCenterKey,
+                                     [NSValue valueWithCGPoint:beforeCenter],
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        keyboardHostView.transform = compensation;
+        keyboardHostView.center = targetCenter;
+        [CATransaction commit];
+        CV3LogToFile(@"[Warning][KeyboardDebug] kbRotateFix.applied beforeT=%@ afterT=%@ beforeCenter=%@ afterCenter=%@ parentBounds=%@ bounds=%@ frame=%@ superview=%@",
+                     NSStringFromCGAffineTransform(beforeTransform), NSStringFromCGAffineTransform(keyboardHostView.transform),
+                     NSStringFromCGPoint(beforeCenter), NSStringFromCGPoint(keyboardHostView.center),
+                     NSStringFromCGRect(parentBounds),
+                     NSStringFromCGRect(keyboardHostView.bounds), NSStringFromCGRect(keyboardHostView.frame),
+                     NSStringFromClass(keyboardHostView.superview.class));
+    } else {
+        NSValue *savedTransformValue = objc_getAssociatedObject(keyboardHostView, &kCV3KbFixOriginalTransformKey);
+        NSValue *savedCenterValue = objc_getAssociatedObject(keyboardHostView, &kCV3KbFixOriginalCenterKey);
+        if (!savedTransformValue || !savedCenterValue) return;
+        CGAffineTransform originalTransform = savedTransformValue.CGAffineTransformValue;
+        CGPoint originalCenter = savedCenterValue.CGPointValue;
+        CGPoint beforeCenter = keyboardHostView.center;
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        keyboardHostView.transform = originalTransform;
+        keyboardHostView.center = originalCenter;
+        [CATransaction commit];
+        objc_setAssociatedObject(keyboardHostView, &kCV3KbFixOriginalTransformKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        objc_setAssociatedObject(keyboardHostView, &kCV3KbFixOriginalCenterKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        CV3LogToFile(@"[Warning][KeyboardDebug] kbRotateFix.restored beforeT=%@ beforeCenter=%@ afterT=%@ afterCenter=%@",
+                     NSStringFromCGAffineTransform(current), NSStringFromCGPoint(beforeCenter),
+                     NSStringFromCGAffineTransform(originalTransform), NSStringFromCGPoint(originalCenter));
+    }
+}
+
+static NSString *CV3KeyboardForensicsWindowLine(UIWindow *window) {
+    UIWindowScene *scene = window.windowScene;
+    NSString *sceneRole = scene ? (scene.session.role ?: @"nil") : @"scene=nil";
+    return [NSString stringWithFormat:@"%@:%p sceneRole=%@ sceneOrient=%ld sceneBounds=%@ frame=%@ bounds=%@ transform=%@ hidden=%d alpha=%.2f level=%.1f root=%@",
+            NSStringFromClass(window.class), window, sceneRole,
+            (long)(scene ? scene.interfaceOrientation : 0),
+            scene ? NSStringFromCGRect(scene.coordinateSpace.bounds) : @"nil",
+            NSStringFromCGRect(window.frame), NSStringFromCGRect(window.bounds),
+            NSStringFromCGAffineTransform(window.transform),
+            window.hidden, window.alpha, window.windowLevel,
+            window.rootViewController ? NSStringFromClass(window.rootViewController.class) : @"nil"];
+}
+
+static void CV3DumpKeyboardForensics(NSString *reason) {
+    @try {
+        @autoreleasepool {
+            // 1) 场景清单（含键盘专属场景）
+            NSMutableArray<NSString *> *sceneLines = [NSMutableArray array];
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes ?: [NSSet set]) {
+                if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+                UIWindowScene *windowScene = (UIWindowScene *)scene;
+                NSString *keyWindowClass = @"nil";
+                if (@available(iOS 15.0, *)) {
+                    if (windowScene.keyWindow) keyWindowClass = NSStringFromClass(windowScene.keyWindow.class);
+                }
+                [sceneLines addObject:[NSString stringWithFormat:@"role=%@ state=%ld orient=%ld bounds=%@ key=%@",
+                    windowScene.session.role ?: @"nil",
+                    (long)windowScene.activationState,
+                    (long)windowScene.interfaceOrientation,
+                    NSStringFromCGRect(windowScene.coordinateSpace.bounds),
+                    keyWindowClass]];
+            }
+            CV3LogToFile(@"[Warning][KeyboardDebug] forensics.reason=%@ scenes=%lu [%@]",
+                         reason, (unsigned long)sceneLines.count, [sceneLines componentsJoinedByString:@" | "]);
+
+            // 2) 全窗口清单（application windows + 所有场景 windows 兜底）
+            NSMutableOrderedSet<UIWindow *> *allWindows = [NSMutableOrderedSet orderedSet];
+            for (UIWindow *window in [UIApplication sharedApplication].windows ?: @[]) {
+                [allWindows addObject:window];
+            }
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes ?: [NSSet set]) {
+                if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+                UIWindowScene *windowScene = (UIWindowScene *)scene;
+                if ([windowScene respondsToSelector:@selector(windows)]) {
+                    for (UIWindow *window in windowScene.windows ?: @[]) {
+                        [allWindows addObject:window];
+                    }
+                }
+            }
+            NSMutableArray<NSString *> *windowLines = [NSMutableArray array];
+            NSMutableArray<UIWindow *> *keyboardWindows = [NSMutableArray array];
+            for (UIWindow *window in allWindows) {
+                [windowLines addObject:CV3KeyboardForensicsWindowLine(window)];
+                NSString *className = NSStringFromClass(window.class);
+                NSString *role = window.windowScene.session.role ?: @"";
+                BOOL keyboardNamed = [className localizedCaseInsensitiveContainsString:@"keyboard"] ||
+                    [className localizedCaseInsensitiveContainsString:@"TextEffects"] ||
+                    [role localizedCaseInsensitiveContainsString:@"keyboard"];
+                if (keyboardNamed) {
+                    [keyboardWindows addObject:window];
+                }
+            }
+            CV3LogToFile(@"[Warning][KeyboardDebug] forensics.windows count=%lu [%@]",
+                         (unsigned long)allWindows.count, [windowLines componentsJoinedByString:@" | "]);
+
+            // 2b) 键盘类窗口深度视图/图层树（键盘渲染载体的直接证据）
+            for (UIWindow *window in keyboardWindows) {
+                NSMutableArray<NSString *> *viewTree = [NSMutableArray array];
+                NSMutableArray<NSString *> *layerTree = [NSMutableArray array];
+                CV3AppendKeyboardViewTree(window.rootViewController.view ?: window, 0, viewTree);
+                CV3AppendKeyboardLayerTree(window.layer, 0, layerTree);
+                CV3LogToFile(@"[Warning][KeyboardDebug] forensics.kbWindow %@:%p views=[%@]",
+                             NSStringFromClass(window.class), window,
+                             [viewTree componentsJoinedByString:@" | "]);
+                CV3LogToFile(@"[Warning][KeyboardDebug] forensics.kbWindow %@:%p layers=[%@]",
+                             NSStringFromClass(window.class), window,
+                             [layerTree componentsJoinedByString:@" | "]);
+            }
+
+            // 3) 浮窗宿主容器（键盘层若寄宿在此，transform 即旋转证据）
+            for (CV3FloatingAppWindow *win in [floatingWindows copy] ?: @[]) {
+                if (![win isKindOfClass:[CV3FloatingAppWindow class]] || win.isClosing) continue;
+                NSMutableArray<NSString *> *viewTree = [NSMutableArray array];
+                NSMutableArray<NSString *> *layerTree = [NSMutableArray array];
+                if (win.hostView) {
+                    CV3AppendKeyboardViewTree(win.hostView, 0, viewTree);
+                    CV3AppendKeyboardLayerTree(win.hostView.layer, 0, layerTree);
+                }
+                CV3LogToFile(@"[Warning][KeyboardDebug] forensics.hosted bundle=%@ stashed=%d hidden=%d root=%@ proxy=%@ hostView=%@ hostedViews=[%@]",
+                             win.bundleID, win.isStashed, win.hidden,
+                             NSStringFromCGAffineTransform(win.rootTransformContainer.transform),
+                             NSStringFromCGAffineTransform(win.hostContainerProxy.transform),
+                             win.hostView,
+                             [viewTree componentsJoinedByString:@" | "]);
+                CV3LogToFile(@"[Warning][KeyboardDebug] forensics.hostedLayers bundle=%@ [%@]",
+                             win.bundleID, [layerTree componentsJoinedByString:@" | "]);
+                CV3LogToFile(@"[Warning][KeyboardDebug] forensics.hostedScene bundle=%@ %@",
+                             win.bundleID, CV3SceneLayerManagerAudit(win.targetScene));
+
+                // 3b) 键盘宿主视图专项：_UIKeyboardLayerHostView 位于容器第二层
+                //（_UITouchPassthroughView 之下），承载层即 _UIDirectionalRotationLayer。
+                UIView *kbHostView = win.hostView
+                    ? CV3FindDescendantViewNamed(win.hostView, @"_UIKeyboardLayerHostView", 0)
+                    : nil;
+                if (kbHostView) {
+                    CALayer *kbLayer = kbHostView.layer;
+                    CALayer *kbPresentation = kbLayer.presentationLayer;
+                    NSMutableArray<NSString *> *kvPairs = [NSMutableArray array];
+                    for (NSString *key in @[@"_direction", @"direction", @"rotation", @"_rotation", @"angle", @"_angle",
+                                            @"interfaceOrientation", @"_interfaceOrientation", @"orientation", @"_orientation",
+                                            @"contentOrientation", @"_contentOrientation", @"deviceOrientation", @"_deviceOrientation"]) {
+                        if ([kbLayer respondsToSelector:NSSelectorFromString(key)]) {
+                            id value = nil;
+                            @try { value = [kbLayer valueForKey:key]; } @catch (__unused NSException *exception) {}
+                            if (value) [kvPairs addObject:[NSString stringWithFormat:@"%@=%@", key, value]];
+                        }
+                    }
+                    CV3LogToFile(@"[Warning][KeyboardDebug] forensics.kbHostView bundle=%@ view=%@ frame=%@ center=%@ transform=%@ layer=%@ layerT=%@ layerST=%@ presT=%@ presST=%@ presFrame=%@ kv={%@}",
+                                 win.bundleID, kbHostView,
+                                 NSStringFromCGRect(kbHostView.frame), NSStringFromCGPoint(kbHostView.center),
+                                 NSStringFromCGAffineTransform(kbHostView.transform),
+                                 kbLayer,
+                                 CV3TransformShortDescription(kbLayer.transform),
+                                 CV3TransformShortDescription(kbLayer.sublayerTransform),
+                                 kbPresentation ? CV3TransformShortDescription(kbPresentation.transform) : @"nil",
+                                 kbPresentation ? CV3TransformShortDescription(kbPresentation.sublayerTransform) : @"nil",
+                                 kbPresentation ? NSStringFromCGRect(kbPresentation.frame) : @"nil",
+                                 [kvPairs componentsJoinedByString:@";"]);
+
+                    NSMutableArray<NSString *> *suspects = [NSMutableArray array];
+                    NSUInteger fixedCount = 0;
+                    CV3ScanRotationSuspects(kbLayer, 0, suspects, &fixedCount, NO);
+                    CV3LogToFile(@"[Warning][KeyboardDebug] forensics.rotationSuspects bundle=%@ applyFix=0 fixed=0 suspects=[%@]",
+                                 win.bundleID,
+                                 suspects.count ? [suspects componentsJoinedByString:@" | "] : @"<none>");
+
+                }
+            }
+
+            // 4) CV3 键盘判定值
+            CV3LogToFile(@"[Warning][KeyboardDebug] forensics.flags shouldRotate=%d cv3KeyboardWindow=%@ owner=%@ hostedCount=%lu",
+                         CV3LandscapeHostedKeyboardRequired(),
+                         cv3_keyboardWindow ? NSStringFromClass(cv3_keyboardWindow.class) : @"nil",
+                         cv3_keyboardOwnerWindow ? cv3_keyboardOwnerWindow.bundleID : @"nil",
+                         (unsigned long)cv3_keyboardHostedViews.count);
+        }
+    } @catch (NSException *exception) {
+        CV3LogToFile(@"[Warning][KeyboardDebug] forensics.exception %@ reason=%@", exception, reason);
+    }
+}
+
 static CV3FloatingAppWindow *CV3FloatingWindowOwningHostContainer(UIView *container) {
     if (!container || !floatingWindows) return nil;
     for (CV3FloatingAppWindow *window in [floatingWindows copy]) {
@@ -5208,6 +5599,35 @@ static CV3FloatingAppWindow *CV3FloatingWindowOwningHostContainer(UIView *contai
         if (window.hostView == container) return window;
     }
     return nil;
+}
+
+static CV3FloatingAppWindow *CV3FloatingWindowOwningDescendantView(UIView *view) {
+    for (UIView *ancestor = view; ancestor; ancestor = ancestor.superview) {
+        CV3FloatingAppWindow *owner = CV3FloatingWindowOwningHostContainer(ancestor);
+        if (owner) return owner;
+    }
+    return nil;
+}
+
+static BOOL CV3ApplyHostedKeyboardRotationCompensation(UIView *keyboardHostView,
+                                                         NSString *phase) {
+    if (!keyboardHostView || !CV3KbRotateFixEnabled()) return NO;
+    CV3FloatingAppWindow *owner = CV3FloatingWindowOwningDescendantView(keyboardHostView);
+    BOOL shouldApply = owner && CV3FloatingWindowRequiresLandscapeKeyboard(owner);
+    CV3LogToFile(@"[Warning][KeyboardDebug] kbRotateFix.hostLayout phase=%@ owner=%@ shouldApply=%d window=%@ superview=%@ bounds=%@",
+                 phase ?: @"unknown",
+                 owner.bundleID ?: @"nil",
+                 shouldApply,
+                 NSStringFromClass(keyboardHostView.window.class),
+                 NSStringFromClass(keyboardHostView.superview.class),
+                 NSStringFromCGRect(keyboardHostView.bounds));
+    if (!owner) return NO;
+    // The same keyboard Host survives a landscape -> portrait transition.
+    // A false decision must therefore restore the geometry saved by the true
+    // decision; returning here leaves the -90 degree transform attached and
+    // moves the portrait keyboard outside its 428x926 parent.
+    CV3ApplyKeyboardRotationCompensation(keyboardHostView, shouldApply);
+    return shouldApply;
 }
 
 static void CV3ReleaseKeyboardHostingForWindow(CV3FloatingAppWindow *window) {
@@ -5248,26 +5668,6 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
             sharedWindow.windowScene.activationState == UISceneActivationStateForegroundActive) {
             return sharedWindow.windowScene;
         }
-
-        UIWindowScene *fallbackScene = nil;
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-
-            UIWindowScene *windowScene = (UIWindowScene *)scene;
-            NSString *role = windowScene.session.role;
-            if ([role isEqualToString:@"SBWindowSceneSessionRoleSystemAperture"] ||
-                [role isEqualToString:@"SBWindowSceneSessionRoleSystemApertureCurtain"] ||
-                [role isEqualToString:@"UISceneSessionRolePlaceholder"] ||
-                [[role lowercaseString] containsString:@"siri"]) {
-                continue;
-            }
-
-            if (!fallbackScene) fallbackScene = windowScene;
-            if (windowScene.activationState == UISceneActivationStateForegroundActive) {
-                return windowScene;
-            }
-        }
-        return fallbackScene;
     }
     return nil;
 }
@@ -5285,6 +5685,86 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
 
     CV3FloatingAppWindow *ownerWindow = CV3FloatingWindowOwningHostContainer(self);
     if (!ownerWindow) return;
+
+    NSMutableArray<NSString *> *hostSubviewDiagnostics = [NSMutableArray array];
+    for (UIView *hostSubview in self.subviews) {
+        [hostSubviewDiagnostics addObject:[NSString stringWithFormat:@"%@ frame=%@ bounds=%@ center=%@ transform=%@ hidden=%d alpha=%.2f layers=%lu",
+                                          NSStringFromClass(hostSubview.class),
+                                          NSStringFromCGRect(hostSubview.frame),
+                                          NSStringFromCGRect(hostSubview.bounds),
+                                          NSStringFromCGPoint(hostSubview.center),
+                                          NSStringFromCGAffineTransform(hostSubview.transform),
+                                          hostSubview.hidden,
+                                          hostSubview.alpha,
+                                          (unsigned long)hostSubview.layer.sublayers.count]];
+    }
+    NSMutableArray<NSString *> *hostLayerDiagnostics = [NSMutableArray array];
+    CV3AppendKeyboardLayerTree(self.layer, 0, hostLayerDiagnostics);
+    for (CALayer *hostLayer in self.layer.sublayers) {
+        BOOL markedKeyboard = [hostLayer respondsToSelector:@selector(isKeyboardLayer)] &&
+                              ((BOOL (*)(id, SEL))objc_msgSend)(hostLayer, @selector(isKeyboardLayer));
+        NSString *layerClass = NSStringFromClass(hostLayer.class);
+        if (markedKeyboard || [layerClass localizedCaseInsensitiveContainsString:@"keyboard"]) {
+            [hostLayerDiagnostics addObject:[NSString stringWithFormat:@"%@ keyboard=%d frame=%@ bounds=%@ position=%@ transform=%@ hidden=%d opacity=%.2f",
+                                             layerClass,
+                                             markedKeyboard,
+                                             NSStringFromCGRect(hostLayer.frame),
+                                             NSStringFromCGRect(hostLayer.bounds),
+                                             NSStringFromCGPoint(hostLayer.position),
+                                             [NSString stringWithFormat:@"[%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g]",
+                                              hostLayer.transform.m11, hostLayer.transform.m12,
+                                              hostLayer.transform.m13, hostLayer.transform.m14,
+                                              hostLayer.transform.m21, hostLayer.transform.m22,
+                                              hostLayer.transform.m23, hostLayer.transform.m24,
+                                              hostLayer.transform.m31, hostLayer.transform.m32,
+                                              hostLayer.transform.m33, hostLayer.transform.m34,
+                                              hostLayer.transform.m41, hostLayer.transform.m42,
+                                              hostLayer.transform.m43, hostLayer.transform.m44],
+                                             hostLayer.hidden,
+                                             hostLayer.opacity]];
+        }
+    }
+    CV3LogToFile(@"[Warning][KeyboardDebug] hostLayout host=%@ bounds=%@ frame=%@ center=%@ transform=%@ subviews=[%@] keyboardLayers=[%@]",
+                 NSStringFromClass(self.class),
+                 NSStringFromCGRect(self.bounds),
+                 NSStringFromCGRect(self.frame),
+                 NSStringFromCGPoint(self.center),
+                 NSStringFromCGAffineTransform(self.transform),
+                 [hostSubviewDiagnostics componentsJoinedByString:@" | "],
+                 [hostLayerDiagnostics componentsJoinedByString:@" | "]);
+    NSMutableArray<NSString *> *keyboardWindowDiagnostics = [NSMutableArray array];
+    for (UIWindow *window in [UIApplication sharedApplication].windows ?: @[]) {
+        NSString *className = NSStringFromClass(window.class);
+        NSString *description = [window description] ?: @"";
+        BOOL keyboardNamed = [className localizedCaseInsensitiveContainsString:@"keyboard"] ||
+            [description localizedCaseInsensitiveContainsString:@"keyboard"] ||
+            [window.accessibilityIdentifier localizedCaseInsensitiveContainsString:@"keyboard"];
+        if (!keyboardNamed && window != cv3_keyboardWindow) continue;
+        UIWindowScene *scene = window.windowScene;
+        NSMutableArray<NSString *> *windowViewTree = [NSMutableArray array];
+        NSMutableArray<NSString *> *windowLayerTree = [NSMutableArray array];
+        CV3AppendKeyboardViewTree(window.rootViewController.view ?: window, 0, windowViewTree);
+        CV3AppendKeyboardLayerTree(window.layer, 0, windowLayerTree);
+        [keyboardWindowDiagnostics addObject:[NSString stringWithFormat:
+            @"window=%@:%p scene=%@ sceneOrientation=%ld coordinateBounds=%@ bounds=%@ frame=%@ transform=%@ hidden=%d alpha=%.2f level=%.1f root=%@ views=[%@] layers=[%@]",
+            className, window, scene, (long)scene.interfaceOrientation,
+            NSStringFromCGRect(scene.coordinateSpace.bounds), NSStringFromCGRect(window.bounds),
+            NSStringFromCGRect(window.frame), NSStringFromCGAffineTransform(window.transform),
+            window.hidden, window.alpha, window.windowLevel,
+            window.rootViewController ? NSStringFromClass(window.rootViewController.class) : @"nil",
+            [windowViewTree componentsJoinedByString:@" | "],
+            [windowLayerTree componentsJoinedByString:@" | "]]];
+    }
+    if (keyboardWindowDiagnostics.count > 0) {
+        for (UIWindow *window in [UIApplication sharedApplication].windows ?: @[]) {
+            if ([NSStringFromClass(window.class) isEqualToString:@"SBMedusaHostedKeyboardWindow"]) {
+                CV3ApplyLandscapeKeyboardPresentation(window);
+            }
+        }
+        CV3LogToFile(@"[Warning][KeyboardDebug] keyboardWindows %@",
+                     [keyboardWindowDiagnostics componentsJoinedByString:@" | "]);
+    }
+    [ownerWindow synchronizeHostedContextLayerGeometry];
 
     for (UIView *subview in self.subviews) {
         Class keyboardHostClass = NSClassFromString(@"_UIKeyboardLayerHostView");
@@ -5363,7 +5843,17 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
             if (CGRectIsEmpty(hostBounds)) {
                 hostBounds = [UIScreen mainScreen].bounds;
             }
-            cv3_keyboardWindow.frame = hostBounds;
+            // The keyboard window must share the outer floating window's
+            // physical rect. Keeping it at full-scene size makes UIKit apply
+            // full-screen safe-area insets, which leaves the fixed left and
+            // bottom gaps visible in the split input region.
+            CGRect splitWindowFrame = [ownerWindow convertRect:ownerWindow.bounds toView:nil];
+            if (!CGRectIsNull(splitWindowFrame) && !CGRectIsEmpty(splitWindowFrame)) {
+                cv3_keyboardWindow.frame = splitWindowFrame;
+                hostBounds = cv3_keyboardWindow.bounds;
+            } else {
+                cv3_keyboardWindow.frame = hostBounds;
+            }
 
             UIInterfaceOrientation orientation = CV3TrustedInterfaceOrientation(keyboardScene);
             BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
@@ -5371,6 +5861,14 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
             CGRect preservedBounds = subview.bounds;
             CGPoint preservedCenter = subview.center;
             UIView *previousSuperview = subview.superview;
+            CGRect keyboardHostBounds = self.bounds;
+            // Capture the actual split input rect before removing the host from
+            // the scene container. After reparenting, the old center is no
+            // longer meaningful in keyboard-window coordinates and causes the
+            // left/bottom inset visible in split-screen.
+            CGRect splitInputRectInKeyboardWindow = cv3_keyboardWindow.bounds;
+            BOOL hostAxesDiffer = (keyboardHostBounds.size.width > keyboardHostBounds.size.height) !=
+                                  (hostBounds.size.width > hostBounds.size.height);
             CV3LogToFile(@"[Warning][KeyboardDebug] keyboardLayer found class=%@ hostScene=%@ orientation=%ld isLandscape=%d hostBounds=%@ oldSuperview=%@ oldTransform=%@ oldBounds=%@ oldCenter=%@ window=%@",
                          NSStringFromClass([subview class]),
                          keyboardScene,
@@ -5383,7 +5881,35 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
                          NSStringFromCGPoint(preservedCenter),
                          cv3_keyboardWindow);
 
-            if (!isLandscape && CGAffineTransformIsIdentity(preservedTransform)) {
+            if (hostAxesDiffer) {
+                // UIKit creates the keyboard in the scene's display axis, while a
+                // hosted split window can use the opposite axis. Leaving the
+                // original bounds in place produces the visible inset/crop seen
+                // in split-screen: the keyboard background follows the split
+                // window, but the key grid keeps its full-screen geometry. The
+                // host container is the geometry authority here, so fit the
+                // keyboard layer to that exact input region. Keep an existing
+                // UIKit rotation, if any; only the axis-aligned case needs an
+                // identity transform.
+                if (CGAffineTransformIsIdentity(preservedTransform) &&
+                    !CGRectIsNull(splitInputRectInKeyboardWindow) &&
+                    !CGRectIsEmpty(splitInputRectInKeyboardWindow)) {
+                    preservedBounds = CGRectMake(0, 0,
+                                                 CGRectGetWidth(splitInputRectInKeyboardWindow),
+                                                 CGRectGetHeight(splitInputRectInKeyboardWindow));
+                    preservedCenter = CGPointMake(CGRectGetMidX(splitInputRectInKeyboardWindow),
+                                                  CGRectGetMidY(splitInputRectInKeyboardWindow));
+                }
+                CV3LogToFile(@"[Warning][KeyboardDebug] keyboardLayer axis-fit.applied class=%@ hostBounds=%@ ownerBounds=%@ splitInputRect=%@ keyboardWindowBounds=%@ oldBounds=%@ oldCenter=%@ transform=%@",
+                             NSStringFromClass([subview class]),
+                             NSStringFromCGRect(keyboardHostBounds),
+                             NSStringFromCGRect(ownerWindow.bounds),
+                             NSStringFromCGRect(splitInputRectInKeyboardWindow),
+                             NSStringFromCGRect(hostBounds),
+                             NSStringFromCGRect(preservedBounds),
+                             NSStringFromCGPoint(preservedCenter),
+                             NSStringFromCGAffineTransform(preservedTransform));
+            } else if (!isLandscape && CGAffineTransformIsIdentity(preservedTransform)) {
                 preservedBounds = CGRectMake(0, 0, hostBounds.size.width, hostBounds.size.height);
                 preservedCenter = CGPointMake(hostBounds.size.width / 2.0, hostBounds.size.height / 2.0);
             } else if (previousSuperview && previousSuperview != cv3_keyboardWindow) {
@@ -5433,6 +5959,30 @@ static UIWindowScene *CV3KeyboardHostScene(void) {
     }
     %orig(hidden);
 }
+%end
+
+%hook SBMedusaHostedKeyboardWindow
+- (void)layoutSubviews {
+    %orig;
+    CV3ApplyLandscapeKeyboardPresentation((UIWindow *)self);
+}
+%end
+
+// UIKit 在 didMoveToSuperview 之后才为该 Host 写入最终 428x926 几何，并会把
+// 过早写入的 transform 重置为 identity。必须在 Host 自身完成原生布局后同步
+// 施加补偿；此时祖先链、非零 bounds 与真实承载对象三者同时成立。
+// 此路径不能依赖 cv3_keyboardOwnerWindow/cv3_keyboardWindow：原生 hosted
+// keyboard 可以直接留在浮窗 hostView 中，使这两个 reparent 状态始终为 nil。
+%hook _UIKeyboardLayerHostView
+
+- (void)layoutSubviews {
+    %orig;
+    if (!CV3KbRotateFixEnabled()) return;
+    UIView *keyboardHost = (UIView *)self;
+    if (CGRectIsEmpty(keyboardHost.bounds) || CGRectIsNull(keyboardHost.bounds)) return;
+    CV3ApplyHostedKeyboardRotationCompensation(keyboardHost, @"layoutSubviews.afterOrig");
+}
+
 %end
 
 %hook SBApplication

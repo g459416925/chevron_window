@@ -489,50 +489,271 @@ static BOOL CV3WorkspaceHasActiveBundleID(NSString *bundleID) {
     return NO;
 }
 
-static void CV3OpenApplicationFast(NSString *bundleID, NSString *reason) {
+static BOOL CV3BounceItCarrierIsReadyComparedToSnapshot(UIView *view,
+                                                         NSValue *identity,
+                                                         NSDictionary<NSValue *, NSString *> *prelaunchSnapshot,
+                                                         BOOL *hostContextChanged) {
+    if (!prelaunchSnapshot) return YES;
+    NSString *previousContextID = prelaunchSnapshot[identity];
+    if (!previousContextID) return YES; // A genuinely new carrier object.
+
+    NSString *currentContextID = CV3HostedLayerContextID(view.layer) ?: @"";
+    BOOL changed = currentContextID.length > 0 &&
+                   ![currentContextID isEqualToString:previousContextID];
+    if (changed && hostContextChanged) *hostContextChanged = YES;
+    return changed;
+}
+
+static UIView *CV3BounceItAppTransitionViewComparedToSnapshot(
+    NSDictionary<NSValue *, NSString *> *prelaunchSnapshot,
+    NSMutableDictionary<NSValue *, NSString *> *observedSnapshot,
+    BOOL *hostContextChanged) {
+    UIView *bestView = nil;
+    BOOL bestHostContextChanged = NO;
+    NSInteger bestScore = NSIntegerMin;
+    CGRect screenBounds = UIScreen.mainScreen.bounds;
+    CGFloat screenArea = MAX(1.0, CGRectGetWidth(screenBounds) * CGRectGetHeight(screenBounds));
+
+    for (UIWindow *window in UIApplication.sharedApplication.windows) {
+        if (!window || window == sharedWindow || [window isKindOfClass:[CV3Window class]] ||
+            window.hidden || window.alpha <= 0.01) {
+            continue;
+        }
+
+        NSMutableArray<UIView *> *pending = [NSMutableArray arrayWithObject:window];
+        while (pending.count > 0) {
+            UIView *view = pending.lastObject;
+            [pending removeLastObject];
+            if (!view || view.hidden || view.alpha <= 0.01) continue;
+
+            NSString *className = NSStringFromClass(view.class);
+            NSInteger score = NSIntegerMin;
+            if ([className containsString:@"AppContainer"]) {
+                score = 5000;
+            } else if ([className containsString:@"ApplicationScene"] ||
+                       [className containsString:@"DeviceApplicationScene"]) {
+                score = 4500;
+            } else if ([className containsString:@"SceneLayout"]) {
+                score = 4000;
+            } else if ([className containsString:@"SceneHost"] ||
+                       [className containsString:@"LayerHostContainer"]) {
+                score = 3500;
+            }
+
+            if (score != NSIntegerMin) {
+                CGRect frameInScreen = [view convertRect:view.bounds toView:nil];
+                CGFloat area = MAX(0.0, CGRectGetWidth(frameInScreen)) *
+                               MAX(0.0, CGRectGetHeight(frameInScreen));
+                CGFloat coverage = MIN(1.0, area / screenArea);
+                if (coverage >= 0.72 && CGRectIntersectsRect(frameInScreen, screenBounds)) {
+                    NSValue *identity = [NSValue valueWithPointer:(void *)view];
+                    NSString *contextID = CV3HostedLayerContextID(view.layer) ?: @"";
+                    if (observedSnapshot) observedSnapshot[identity] = contextID;
+                    score += (NSInteger)lrint(coverage * 1000.0);
+                    // Prefer the deepest concrete app container over a broad parent.
+                    score += MIN((NSInteger)view.superview.subviews.count, 20);
+                    BOOL candidateContextChanged = NO;
+                    BOOL ready = CV3BounceItCarrierIsReadyComparedToSnapshot(
+                        view, identity, prelaunchSnapshot, &candidateContextChanged);
+                    if (ready && score > bestScore) {
+                        bestScore = score;
+                        bestView = view;
+                        bestHostContextChanged = candidateContextChanged;
+                    }
+                }
+            }
+
+            [pending addObjectsFromArray:view.subviews];
+        }
+
+    }
+
+    if (bestView && hostContextChanged) *hostContextChanged = bestHostContextChanged;
+    return bestView;
+}
+
+// Capture every full-screen SpringBoard app-scene carrier before launch. App-to-app
+// transitions either mount a new carrier or reuse one with a new CALayerHost context.
+// Snapshot both identities so the bridge cannot animate the outgoing app.
+static NSDictionary<NSValue *, NSString *> *CV3BounceItAppTransitionSnapshot(void) {
+    NSMutableDictionary<NSValue *, NSString *> *snapshot = [NSMutableDictionary dictionary];
+    CV3BounceItAppTransitionViewComparedToSnapshot(nil, snapshot, nil);
+    return [NSDictionary dictionaryWithDictionary:snapshot];
+}
+
+static BOOL CV3BounceItAnimationParameters(CGFloat *mass,
+                                            CGFloat *stiffness,
+                                            CGFloat *damping,
+                                            NSString **ownerPath) {
+    Class settingsClass = CV3ClassNamed(@"SBFAnimationSettings");
+    SEL dampingSelector = NSSelectorFromString(@"damping");
+    Method dampingMethod = settingsClass ? class_getInstanceMethod(settingsClass, dampingSelector) : NULL;
+    if (!dampingMethod) return NO;
+
+    IMP rawImplementation = method_getImplementation(dampingMethod);
+    void *implementation = (void *)rawImplementation;
+#if __has_feature(ptrauth_calls)
+    implementation = ptrauth_strip(implementation, ptrauth_key_function_pointer);
+#endif
+    Dl_info info = {0};
+    if (!dladdr(implementation, &info) || !info.dli_fname) return NO;
+
+    NSString *imagePath = [NSString stringWithUTF8String:info.dli_fname] ?: @"";
+    if (ownerPath) *ownerPath = imagePath;
+    if ([imagePath rangeOfString:@"BounceIt16" options:NSCaseInsensitiveSearch].location == NSNotFound) {
+        return NO;
+    }
+
+    id settings = [settingsClass alloc];
+    SEL massSelector = NSSelectorFromString(@"mass");
+    SEL stiffnessSelector = NSSelectorFromString(@"stiffness");
+    if (![settings respondsToSelector:massSelector] ||
+        ![settings respondsToSelector:stiffnessSelector] ||
+        ![settings respondsToSelector:dampingSelector]) {
+        return NO;
+    }
+
+    double resolvedMass = ((double (*)(id, SEL))objc_msgSend)(settings, massSelector);
+    double resolvedStiffness = ((double (*)(id, SEL))objc_msgSend)(settings, stiffnessSelector);
+    double resolvedDamping = ((double (*)(id, SEL))objc_msgSend)(settings, dampingSelector);
+    if (!isfinite(resolvedMass) || !isfinite(resolvedStiffness) || !isfinite(resolvedDamping) ||
+        resolvedMass <= 0.0 || resolvedStiffness <= 0.0 || resolvedDamping < 0.0) {
+        return NO;
+    }
+
+    if (mass) *mass = (CGFloat)resolvedMass;
+    if (stiffness) *stiffness = (CGFloat)resolvedStiffness;
+    if (damping) *damping = (CGFloat)resolvedDamping;
+    return YES;
+}
+
+static NSUInteger CV3BounceItLaunchGeneration = 0;
+
+static void CV3ApplyBounceItAppLaunchWhenReady(NSString *bundleID,
+                                                NSString *sourceBundleID,
+                                                NSUInteger generation,
+                                                NSInteger attemptsRemaining,
+                                                NSDictionary<NSValue *, NSString *> *prelaunchSnapshot) {
+    if (generation != CV3BounceItLaunchGeneration || bundleID.length == 0) return;
+
+    // CV3CurrentWorkspaceBundleID/activeDisplayItem are observably nil while the
+    // launcher UIWindow is active, so workspace foreground state cannot gate this
+    // bridge. Readiness is either a newly mounted carrier or a new CALayerHost
+    // context inside a reused carrier (Apple News follows the latter path).
+    BOOL hostContextChanged = NO;
+    UIView *targetView = CV3BounceItAppTransitionViewComparedToSnapshot(
+        prelaunchSnapshot, nil, &hostContextChanged);
+
+    if (!targetView) {
+        if (attemptsRemaining <= 0) {
+            CV3LogToFile(@"[Launcher] phase=bounceitBridge bundle=%@ source=%@ applied=0 error=appSceneNotReady baselineCount=%lu",
+                         bundleID, sourceBundleID ?: @"nil",
+                         (unsigned long)prelaunchSnapshot.count);
+            return;
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.025 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            CV3ApplyBounceItAppLaunchWhenReady(bundleID, sourceBundleID,
+                                                generation, attemptsRemaining - 1,
+                                                prelaunchSnapshot);
+        });
+        return;
+    }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (generation != CV3BounceItLaunchGeneration) return;
+
+        CGFloat mass = 0.0;
+        CGFloat stiffness = 0.0;
+        CGFloat damping = 0.0;
+        NSString *ownerPath = nil;
+        if (!CV3BounceItAnimationParameters(&mass, &stiffness, &damping, &ownerPath)) {
+            CV3LogToFile(@"[Launcher] phase=bounceitBridge bundle=%@ source=%@ applied=0 error=pluginHookUnavailable owner=%@",
+                         bundleID, sourceBundleID ?: @"nil", ownerPath ?: @"nil");
+            return;
+        }
+
+        CASpringAnimation *bounce = [CASpringAnimation animationWithKeyPath:@"transform.scale"];
+        bounce.mass = mass;
+        bounce.stiffness = stiffness;
+        bounce.damping = damping;
+        bounce.initialVelocity = 0.0;
+        // BounceIt supplies the spring physics, while the bridge must supply a
+        // meaningful launch displacement. 0.92 only moves eight percent, making
+        // the plugin's under-damped rebound nearly invisible on a full-screen app.
+        // 0.82 preserves BounceIt's live mass/stiffness/damping while giving that
+        // rebound enough travel to read like the native icon-launch animation.
+        static const CGFloat kCV3BounceItLaunchFromScale = 0.82;
+        bounce.fromValue = @(kCV3BounceItLaunchFromScale);
+        bounce.toValue = @1.0;
+        bounce.duration = bounce.settlingDuration;
+        bounce.removedOnCompletion = YES;
+        [targetView.layer addAnimation:bounce forKey:@"com.xu.chevronv3.bounceit-app-launch"];
+
+        CGFloat dampingRatio = damping / (2.0 * sqrt(MAX(0.001, stiffness * mass)));
+        NSInteger readyDelayMs = MAX(0, 80 - attemptsRemaining) * 25;
+        CV3LogToFile(@"[Launcher] phase=bounceitBridge bundle=%@ source=%@ applied=1 sceneReady=1 reusedCarrier=%d hostContextChanged=%d readyDelayMs=%ld baselineCount=%lu view=%@ frame=%@ owner=%@ fromScale=%.2f mass=%.2f stiffness=%.1f damping=%.1f dampingRatio=%.3f duration=%.3f",
+                     bundleID, sourceBundleID ?: @"nil", hostContextChanged,
+                     hostContextChanged, (long)readyDelayMs,
+                     (unsigned long)prelaunchSnapshot.count, NSStringFromClass(targetView.class),
+                     NSStringFromCGRect([targetView convertRect:targetView.bounds toView:nil]),
+                     ownerPath.lastPathComponent ?: ownerPath,
+                     kCV3BounceItLaunchFromScale, mass, stiffness, damping,
+                     dampingRatio, bounce.duration);
+    });
+}
+
+// 主面板统一启动入口：始终在 SpringBoard 主线程发起同一种系统启动事务。
+// Home→App 会原生消费 BounceIt Hook 的 SBFAnimationSettings；App→App 不会，
+// 因此后一种路径在目标 Scene 提交后显式读取 BounceIt 的实时参数并补到 App 容器。
+// 不回主屏、不复刻图标、不走 LSApplicationWorkspace，也不使用硬编码插件参数。
+static void CV3LaunchApplicationThroughSpringBoard(NSString *bundleID, NSString *reason) {
     if (bundleID.length == 0) return;
 
-    CV3ExitExposeModeIfNeeded(nil, NO);
-    
-    NSString *currentActive = CV3CurrentWorkspaceBundleID();
-    CV3LogToFile(@"[Launcher] Fast open 准备启动: %@, 当前前台App: %@, reason: %@", bundleID, currentActive, reason ?: @"Unknown");
-
-    // 建议 2：使用高优先级全局队列异步启动，防止主线程 UI 渲染被阻塞以实现秒级跳转
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+    void (^launchBlock)(void) = ^{
         @try {
-            id workspace = [CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace];
-            BOOL opened = NO;
-            if (workspace) {
-                if ([workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
-                    opened = ((BOOL (*)(id, SEL, id))objc_msgSend)(workspace, @selector(openApplicationWithBundleID:), bundleID);
-                    CV3LogToFile(@"[Launcher] Fast open 调用结果: target=%@, 成功=%d, 前台App=%@", bundleID, opened, CV3CurrentWorkspaceBundleID());
-                } else {
-                    CV3LogToFile(@"[Launcher] Fast open 错误: LSApplicationWorkspace 不响应 openApplicationWithBundleID:");
-                }
-            } else {
-                CV3LogToFile(@"[Launcher] Fast open 错误: LSApplicationWorkspace 为 nil");
+            id springBoard = [UIApplication sharedApplication];
+            SEL launchSelector = @selector(launchApplicationWithIdentifier:suspended:);
+            if (![springBoard respondsToSelector:launchSelector]) {
+                CV3LogToFile(@"[Launcher] phase=bounceitSystemLaunch bundle=%@ reason=%@ invoked=0 error=selectorUnavailable",
+                             bundleID, reason ?: @"Unknown");
+                return;
             }
 
-            if (!opened) {
-                // 降级使用 SpringBoard 进程内直接启动机制，必须在主线程执行
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    @try {
-                        id sb = [UIApplication sharedApplication];
-                        if ([sb respondsToSelector:@selector(launchApplicationWithIdentifier:suspended:)]) {
-                            CV3LogToFile(@"[Launcher] 尝试 SpringBoard 级联降级启动: %@", bundleID);
-                            ((void (*)(id, SEL, id, BOOL))objc_msgSend)(sb, @selector(launchApplicationWithIdentifier:suspended:), bundleID, NO);
-                        } else {
-                            CV3LogToFile(@"[Launcher] SpringBoard 不支持 launchApplicationWithIdentifier:suspended:");
-                        }
-                    } @catch (NSException *ex) {
-                        CV3LogToFile(@"[Launcher] SpringBoard 级联降级异常: %@", ex);
-                    }
-                });
-            }
-        } @catch (NSException *e) {
-            CV3LogToFile(@"[Launcher] Fast open 异常 %@: %@", bundleID, e);
+            NSString *sourceBundleID = CV3CurrentWorkspaceBundleID();
+            BOOL appToApp = sourceBundleID.length > 0 &&
+                            ![sourceBundleID isEqualToString:bundleID] &&
+                            ![sourceBundleID isEqualToString:@"com.apple.springboard"];
+            NSUInteger bounceGeneration = ++CV3BounceItLaunchGeneration;
+            NSDictionary<NSValue *, NSString *> *prelaunchSnapshot = CV3BounceItAppTransitionSnapshot();
+            CV3LogToFile(@"[Launcher] phase=bounceitSystemLaunch bundle=%@ source=%@ reason=%@ willInvoke=1 appToApp=%d mainThread=%d",
+                         bundleID, sourceBundleID ?: @"nil", reason ?: @"Unknown",
+                         appToApp, NSThread.isMainThread);
+
+            ((void (*)(id, SEL, id, BOOL))objc_msgSend)(springBoard,
+                                                        launchSelector,
+                                                        bundleID,
+                                                        NO);
+            CV3LogToFile(@"[Launcher] phase=bounceitSystemLaunch bundle=%@ reason=%@ invoked=1 mainThread=%d",
+                         bundleID, reason ?: @"Unknown", [NSThread isMainThread]);
+
+            // Poll only after the launch transaction begins. A new carrier identity
+            // or a changed CALayerHost context is the readiness gate; workspace bundle
+            // APIs are nil while our panel owns the key window.
+            CV3ApplyBounceItAppLaunchWhenReady(bundleID, sourceBundleID,
+                                                bounceGeneration, 80,
+                                                prelaunchSnapshot);
+        } @catch (NSException *exception) {
+            CV3LogToFile(@"[Launcher] phase=bounceitSystemLaunch bundle=%@ reason=%@ invoked=0 exception=%@",
+                         bundleID, reason ?: @"Unknown", exception);
         }
-    });
+    };
+
+    if ([NSThread isMainThread]) {
+        launchBlock();
+    } else {
+        dispatch_async(dispatch_get_main_queue(), launchBlock);
+    }
 }
 
 static CV3FloatingAppWindow *CV3FloatingWindowForBundleID(NSString *bundleID) {
@@ -702,39 +923,6 @@ static void CV3RemoveViewAnimationsRecursively(UIView *view) {
     }
 }
 
-static void CV3CancelHomeScreenPanRecognizersInView(UIView *view, UIGestureRecognizer *ownedGesture) {
-    if (!view) return;
-
-    for (UIGestureRecognizer *recognizer in view.gestureRecognizers) {
-        if (recognizer == ownedGesture || !recognizer.enabled ||
-            ![recognizer isKindOfClass:[UIPanGestureRecognizer class]]) {
-            continue;
-        }
-
-        // Toggling enabled cancels this touch sequence without disabling the
-        // Home Screen gesture for the user's next interaction.
-        recognizer.enabled = NO;
-        recognizer.enabled = YES;
-    }
-
-    NSString *className = NSStringFromClass([view class]);
-    if ([className containsString:@"IconView"]) return;
-    for (UIView *subview in view.subviews) {
-        CV3CancelHomeScreenPanRecognizersInView(subview, ownedGesture);
-    }
-}
-
-static void CV3CancelCompetingHomeScreenPans(UIGestureRecognizer *ownedGesture) {
-    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
-            NSString *windowClass = NSStringFromClass([window class]);
-            if (![windowClass containsString:@"HomeScreenWindow"]) continue;
-            CV3CancelHomeScreenPanRecognizersInView(window, ownedGesture);
-        }
-    }
-}
-
 static void CV3FinalizePanelHiddenState(CV3Window *launcherWindow) {
     if (!launcherWindow) return;
     if (![NSThread isMainThread]) {
@@ -796,6 +984,45 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     launcherWindow.isAnimating = NO;
     CV3FinalizePanelHiddenState(launcherWindow);
     [launcherWindow.searchField resignFirstResponder];
+}
+
+static void CV3LogPanelCollectionState(CV3Window *window, NSString *phase) {
+    if (!window || !window.collectionView) return;
+
+    UICollectionView *collectionView = window.collectionView;
+    UIEdgeInsets inset;
+    if (@available(iOS 11.0, *)) {
+        inset = collectionView.adjustedContentInset;
+    } else {
+        inset = collectionView.contentInset;
+    }
+
+    NSArray<NSIndexPath *> *visible = [collectionView.indexPathsForVisibleItems
+        sortedArrayUsingSelector:@selector(compare:)];
+    NSIndexPath *first = visible.firstObject;
+    NSIndexPath *last = visible.lastObject;
+    UIPanGestureRecognizer *pan = collectionView.panGestureRecognizer;
+    CGPoint translation = [pan translationInView:collectionView];
+    CGPoint velocity = [pan velocityInView:collectionView];
+
+    CV3LogToFile(@"[PanelScrollTrace] phase=%@ offset=%@ contentSize=%@ bounds=%@ frame=%@ inset=%@ "
+                 "state={tracking=%d dragging=%d decelerating=%d pan=%ld enabled=%d} "
+                 "gesture={translation=%@ velocity=%@} data={apps=%lu filtered=%lu category=%@ visible=%lu first=%@ last=%@} "
+                 "panel={showing=%d animating=%d hidden=%d alpha=%.3f}",
+                 phase ?: @"unknown",
+                 NSStringFromCGPoint(collectionView.contentOffset),
+                 NSStringFromCGSize(collectionView.contentSize),
+                 NSStringFromCGRect(collectionView.bounds),
+                 NSStringFromCGRect(collectionView.frame),
+                 NSStringFromUIEdgeInsets(inset),
+                 collectionView.tracking, collectionView.dragging, collectionView.decelerating,
+                 (long)pan.state, collectionView.scrollEnabled,
+                 NSStringFromCGPoint(translation), NSStringFromCGPoint(velocity),
+                 (unsigned long)window.apps.count, (unsigned long)window.filteredApps.count,
+                 window.selectedCategory ?: @"nil", (unsigned long)visible.count,
+                 first ?: @"nil", last ?: @"nil",
+                 window.isPanelShowing, window.isAnimating,
+                 window.panelContainer.hidden, window.panelContainer.alpha);
 }
 
 @implementation CV3Window
@@ -881,7 +1108,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     if (self.launchDebounce) return;
     CV3ExitExposeModeIfNeeded(nil, NO);
     self.launchDebounce = YES;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         self.launchDebounce = NO;
     });
 
@@ -902,9 +1129,22 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     });
 
     NSString *launchBundleID = [bid copy];
+
+    // 启动代际：面板收起完成后，仅允许最新一次点击发起启动事务。
+    self.launchRequestGeneration++;
+    NSUInteger requestGeneration = self.launchRequestGeneration;
+
+    // 面板完全收起后，只发起一次 SpringBoard 系统启动事务。无论面板来自主屏还是
+    // 其他 App，路径都相同；BounceIt 会在系统动画设置层统一接管弹跳参数。
+    __weak typeof(self) weakSelf = self;
     self.panelDismissCompletion = ^{
-        CV3OpenApplicationFast(launchBundleID,
-                               [NSString stringWithFormat:@"LauncherOpen:%@", launchBundleID]);
+        CV3Window *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        if (requestGeneration != strongSelf.launchRequestGeneration) return;
+
+        CV3LaunchApplicationThroughSpringBoard(
+            launchBundleID,
+            [NSString stringWithFormat:@"LauncherPanel:%@", launchBundleID]);
     };
     [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
 }
@@ -923,6 +1163,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
 
 - (void)filterApps {
     self.interactionCount++;
+    CV3LogPanelCollectionState(self, @"filter.before");
     
     NSString *text = [self.searchField.text lowercaseString];
     
@@ -983,6 +1224,10 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     } else {
         [self.collectionView reloadData];
     }
+    CV3LogPanelCollectionState(self, isUserScrolling ? @"filter.afterReload.preserved" : @"filter.afterReload.unpreserved");
+    dispatch_async(dispatch_get_main_queue(), ^{
+        CV3LogPanelCollectionState(self, @"filter.nextRunLoop");
+    });
 
     // 列表刷新后只保留轻量入场动画，避免旧的磁吸/波纹 transform 干扰图标漂浮。
     NSInteger filterGeneration = self.interactionCount;
@@ -1118,7 +1363,10 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     [cv deselectItemAtIndexPath:indexPath animated:NO];
 
     if (indexPath.item < self.filteredApps.count) {
-        [self launchApp:self.filteredApps[indexPath.item]];
+        CV3AppInfo *info = self.filteredApps[indexPath.item];
+        CV3LogToFile(@"[LauncherTouch] phase=collectionSelection bundle=%@ index=%ld",
+                     info.bundleId ?: @"nil", (long)indexPath.item);
+        [self launchApp:info];
     }
 }
 
@@ -1152,10 +1400,22 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         return YES;
     }
 
-    // 如果是绑定在 UIWindow 上的全屏 tap 收起手势，且触点在面板物理边界内，不拦截，让子视图（如 CollectionView Cell）正常接收触控
+    // UIWindow 上的全屏 tap 只负责面板外部收起。面板正在做弹簧变换时，
+    // locationInView: 可能落在模型层 bounds 之外；以 UIKit 已经解析出的真实命中
+    // view 祖先链为权威，避免把 App Cell 的单击误判为背景点击并穿透到底层。
     if (gestureRecognizer.view == self) {
+        UIView *touchedView = touch.view;
+        if (touchedView == self.panelContainer ||
+            [touchedView isDescendantOfView:self.panelContainer]) {
+            CV3LogToFile(@"[LauncherTouch] phase=dimming.reject reason=panelDescendant hit=%@",
+                         NSStringFromClass(touchedView.class));
+            return NO;
+        }
+
         CGPoint location = [touch locationInView:self.panelContainer];
         if (CGRectContainsPoint(self.panelContainer.bounds, location)) {
+            CV3LogToFile(@"[LauncherTouch] phase=dimming.reject reason=panelBounds hit=%@ point=%@",
+                         NSStringFromClass(touchedView.class), NSStringFromCGPoint(location));
             return NO;
         }
     }
@@ -1267,10 +1527,6 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
         // application is already landscape, rejecting a valid right-edge pan.
         CGPoint location = [gesture locationInView:self];
         UIEdgeInsets safeArea = self.safeAreaInsets;
-        // 如果系统返回的 safeArea 全是 0，提供硬编码的兜底防线
-        if (safeArea.top == 0 && safeArea.bottom == 0) {
-            safeArea = UIEdgeInsetsMake(47, 0, 34, 0); // iPhone 14 Pro Max 典型值兜底
-        }
 
         CGSize screenSize = self.bounds.size;
         
@@ -1565,6 +1821,7 @@ static void CV3HidePanelImmediately(CV3Window *launcherWindow) {
     pinLongPress.allowableMovement = kCV3AppDragLongPressAllowableMovement;
     pinLongPress.delegate = self;
     [self.collectionView addGestureRecognizer:pinLongPress];
+
 }
 
 
@@ -2106,7 +2363,24 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
 }
 
 - (void)handleDimmingTap:(UITapGestureRecognizer *)tap {
+    // Defensive second gate for recognizers admitted while the panel was moving.
+    CGPoint point = [tap locationInView:self];
+    CGPoint pointInPanel = [self convertPoint:point toView:self.panelContainer];
+    CALayer *presentation = self.panelContainer.layer.presentationLayer;
+    BOOL insideModel = CGRectContainsPoint(self.panelContainer.bounds, pointInPanel);
+    BOOL insidePresentation = presentation && CGRectContainsPoint(presentation.frame, point);
+    if (insideModel || insidePresentation) {
+        CV3LogToFile(@"[LauncherTouch] phase=dimming.ignore point=%@ insideModel=%d insidePresentation=%d",
+                     NSStringFromCGPoint(point), insideModel, insidePresentation);
+        return;
+    }
     CV3ExitExposeModeIfNeeded(nil, NO);
+    // Forensics: observed 7/7 dismissals carried point={0,0} — a location a
+    // real finger tap never produces. Record the fingerprint so a ghost tap
+    // (no touches / degenerate location) can be told apart from a real one.
+    BOOL degenerate = CGPointEqualToPoint(point, CGPointZero);
+    CV3LogToFile(@"[LauncherTouch] phase=dimming.dismiss point=%@ degenerate=%d touches=%lu state=%ld",
+                 NSStringFromCGPoint(point), degenerate, (unsigned long)tap.numberOfTouches, (long)tap.state);
     [self animateSpotlight:NO fromPoint:self.panelContainer.center velocity:0.0];
 }
 
@@ -2662,7 +2936,6 @@ static NSInteger CV3GetTimePriorityForCategory(NSString *cat) {
         CV3SetHomeScreenPullDownSuppressed(YES);
         CV3PanelWakeGestureActive = YES;
         CV3SystemHomeSearchTriggered = NO;
-        CV3CancelCompetingHomeScreenPans(gesture);
         // 1. 手势预警效果 (Trigger Preview Flare)
         [CATransaction begin];
         [CATransaction setAnimationDuration:0.2];
@@ -2862,10 +3135,38 @@ static inline CGFloat CV3AppleRubberband(CGFloat x, CGFloat dimension) {
 }
 
 - (void)animateSpotlight:(BOOL)visible fromPoint:(CGPoint)point velocity:(CGFloat)velocity {
+    NSString *dismissSourceBundleID = visible ? nil :
+        [self.panelPresentationSourceBundleID copy] ?: [CV3CurrentWorkspaceBundleID() copy];
+    if (!visible) {
+        NSArray<NSString *> *stack = [NSThread callStackSymbols];
+        NSInteger stackLimit = MIN((NSInteger)stack.count, 10);
+        CV3LogToFile(@"[LauncherTouch] phase=panelDismiss.begin source=%@ point=%@ completionPending=%d",
+                     dismissSourceBundleID ?: @"nil", NSStringFromCGPoint(point),
+                     self.panelDismissCompletion != nil);
+        for (NSInteger i = 0; i < stackLimit; i++) {
+            CV3LogToFile(@"[LauncherTouch] phase=panelDismiss.stack frame#%ld %@",
+                         (long)i, stack[(NSUInteger)i]);
+        }
+    }
     // Apple Design Rule 3: 绝对中断性支持 — 移除硬卡顿阻断，支持动效中途反向实时接管
     self.isPanelShowing = visible;
     self.isAnimating = YES;
     if (visible) {
+        CV3LogPanelCollectionState(self, @"panelShow.entry");
+
+        // A newly presented panel must start a fresh scroll-touch sequence.
+        // The collection is hidden between presentations, so no legitimate
+        // drag can span this boundary. Resetting the recognizer also repairs
+        // stale tracking left by older builds that consumed touch-ended events.
+        UIPanGestureRecognizer *collectionPan = self.collectionView.panGestureRecognizer;
+        if (self.collectionView.tracking || self.collectionView.dragging ||
+            self.collectionView.decelerating ||
+            collectionPan.state != UIGestureRecognizerStatePossible) {
+            collectionPan.enabled = NO;
+            collectionPan.enabled = YES;
+            CV3LogPanelCollectionState(self, @"panelShow.afterPanReset");
+        }
+        self.panelPresentationSourceBundleID = [CV3CurrentWorkspaceBundleID() copy];
         CV3SetHomeScreenPullDownSuppressed(YES);
         CV3ExitExposeModeIfNeeded(nil, NO);
         UIViewPropertyAnimator *visibilityAnimator = self.panelVisibilityAnimator;
@@ -2932,6 +3233,7 @@ static inline CGFloat CV3AppleRubberband(CGFloat x, CGFloat dimension) {
         self.contrastBackdrop.frame = self.appPanel.bounds;
         [self refreshGlassAccentSurfaces];
         [self.collectionView.collectionViewLayout invalidateLayout];
+        CV3LogPanelCollectionState(self, @"panelShow.afterGeometry");
 
         // 阴影硬件加速与大阴影配置
         self.panelContainer.layer.shadowColor = [UIColor blackColor].CGColor;
@@ -2953,7 +3255,9 @@ static inline CGFloat CV3AppleRubberband(CGFloat x, CGFloat dimension) {
         
         // Apple Design Rule 5 & 6: 速度手接 handoff 与 Spring 速度换算
         CGFloat springVelocity = MIN(3.2, MAX(1.10, fabs(velocity) / 1200.0));
-        CGFloat springDamping = 0.82;
+        // BounceIt 风格果冻弹跳：面板从 (0.56, 0.76) 的拉伸初态弹回时带过冲，
+        // 原 0.82 接近临界阻尼、看不到回弹，故切到 kCV3BounceDamping。
+        CGFloat springDamping = kCV3BounceDamping;
         
         CGAffineTransform sourceTransform = CGAffineTransformTranslate(initialRotation, offsetX, offsetY);
         self.panelPresentationStartTransform = CGAffineTransformScale(sourceTransform, initialScaleX, initialScaleY);
@@ -3034,25 +3338,57 @@ static inline CGFloat CV3AppleRubberband(CGFloat x, CGFloat dimension) {
             dismissCenter.y += (dy / distance) * 10.0;
         }
 
-        UICubicTimingParameters *timing = [[UICubicTimingParameters alloc]
-            initWithControlPoint1:CGPointMake(0.20, 0.0)
-            controlPoint2:CGPointMake(0.0, 1.0)];
+        // 收起动画 = 快通道（透明度）+ 弹簧通道（几何）：
+        // - 透明度类属性（遮罩 / 面板 alpha / 大面积阴影 / 光束）用 0.20s ease-out
+        //   先行归零。大阴影与遮罩若跟着弹簧缓收，尾段会拖出肉眼可见的"拖尾阴影"
+        //   与滞后感（2026-10-12 复测反馈："面板收起有拖尾阴影，看起来滞后"）。
+        // - 几何（center / transform）保留 kCV3BounceDamping 弹簧的轻弹收尾。
+        // reduceMotion 无障碍路径保持原 cubic 全属性动画，不引入回弹。
         NSTimeInterval duration = reduceMotion ? 0.18 : kCV3PanelDismissDuration;
-        UIViewPropertyAnimator *animator = [[UIViewPropertyAnimator alloc]
-            initWithDuration:duration
-            timingParameters:timing];
+        UIViewPropertyAnimator *animator;
+        if (reduceMotion) {
+            UICubicTimingParameters *timing = [[UICubicTimingParameters alloc]
+                initWithControlPoint1:CGPointMake(0.20, 0.0)
+                controlPoint2:CGPointMake(0.0, 1.0)];
+            animator = [[UIViewPropertyAnimator alloc]
+                initWithDuration:duration
+                timingParameters:timing];
+        } else {
+            [UIView animateWithDuration:0.20
+                                  delay:0
+                                options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState
+                             animations:^{
+                self.backgroundColor = [UIColor clearColor];
+                self.panelContainer.alpha = 0.0;
+                self.panelContainer.layer.shadowOpacity = 0.0;
+                self.bezierContainer.alpha = 0.0;
+                self.bezierLayer.opacity = 0.0;
+            } completion:nil];
+            UISpringTimingParameters *timing = [[UISpringTimingParameters alloc]
+                initWithDampingRatio:kCV3BounceDamping];
+            animator = [[UIViewPropertyAnimator alloc]
+                initWithDuration:duration
+                timingParameters:timing];
+        }
         self.panelContainer.userInteractionEnabled = NO;
         self.panelVisibilityAnimator = animator;
 
-        [animator addAnimations:^{
-            self.backgroundColor = [UIColor clearColor];
-            self.panelContainer.center = dismissCenter;
-            self.panelContainer.alpha = 0.0;
-            self.panelContainer.transform = dismissTransform;
-            self.panelContainer.layer.shadowOpacity = 0.0;
-            self.bezierContainer.alpha = 0.0;
-            self.bezierLayer.opacity = 0.0;
-        }];
+        if (reduceMotion) {
+            [animator addAnimations:^{
+                self.backgroundColor = [UIColor clearColor];
+                self.panelContainer.center = dismissCenter;
+                self.panelContainer.alpha = 0.0;
+                self.panelContainer.transform = dismissTransform;
+                self.panelContainer.layer.shadowOpacity = 0.0;
+                self.bezierContainer.alpha = 0.0;
+                self.bezierLayer.opacity = 0.0;
+            }];
+        } else {
+            [animator addAnimations:^{
+                self.panelContainer.center = dismissCenter;
+                self.panelContainer.transform = dismissTransform;
+            }];
+        }
 
         __weak CV3Window *weakSelf = self;
         __weak UIViewPropertyAnimator *weakAnimator = animator;
@@ -3101,14 +3437,38 @@ static inline CGFloat CV3AppleRubberband(CGFloat x, CGFloat dimension) {
 
 
 - (void)scrollViewWillBeginDragging:(UIScrollView *)scrollView {
+    if (scrollView == self.collectionView) {
+        CV3LogPanelCollectionState(self, @"scroll.willBeginDragging");
+    }
     [self.searchField resignFirstResponder];
 }
 
+- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    if (scrollView != self.collectionView) return;
+
+    static CFTimeInterval lastTraceTime = 0.0;
+    static CGPoint lastTraceOffset = {CGFLOAT_MAX, CGFLOAT_MAX};
+    CFTimeInterval now = CACurrentMediaTime();
+    CGPoint offset = scrollView.contentOffset;
+    CGFloat delta = hypot(offset.x - lastTraceOffset.x, offset.y - lastTraceOffset.y);
+    if (delta >= 18.0 || now - lastTraceTime >= 0.06) {
+        lastTraceTime = now;
+        lastTraceOffset = offset;
+        CV3LogPanelCollectionState(self, @"scroll.didScroll");
+    }
+}
+
 - (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView {
+    if (scrollView == self.collectionView) {
+        CV3LogPanelCollectionState(self, @"scroll.didEndDecelerating");
+    }
     // 减速自然归位：保持主线程零干预，使原生 120Hz ProMotion 减速平滑衰减至静止
 }
 
 - (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {
+    if (scrollView == self.collectionView) {
+        CV3LogPanelCollectionState(self, decelerate ? @"scroll.didEndDragging.decelerate" : @"scroll.didEndDragging.stop");
+    }
 }
 
 static NSInteger CV3UnreadCountFromIconObject(id icon) {
@@ -3235,14 +3595,7 @@ static NSDictionary<NSString *, NSNumber *> *CV3SpringBoardIconBadgeSnapshot(voi
         return NO;
     }
 
-    if (launchableBundleIDs.count > 0 && ![launchableBundleIDs containsObject:bundleId]) {
-        return NO;
-    }
-    // Icon model unavailable is rare during early SpringBoard startup. In that
-    // fallback only accept user Apps; once the model is ready its launchable
-    // icon set also admits normal Apple system Apps such as Settings or Safari.
-    if (launchableBundleIDs.count == 0 &&
-        !CV3InvokeBool(appProxy, @selector(isUserApplication), YES)) {
+    if (launchableBundleIDs.count == 0 || ![launchableBundleIDs containsObject:bundleId]) {
         return NO;
     }
 
@@ -3455,11 +3808,13 @@ static NSUInteger CV3IconCacheCost(UIImage *image) {
                     return;
                 }
 
+                CV3LogPanelCollectionState(self, @"loadApps.apply.before");
                 self.apps = [sortedApps mutableCopy];
                 if (needsFullReload) self.needsFullReload = NO;
                 self.recentlyUsedApps = [self.apps subarrayWithRange:NSMakeRange(0, MIN(12, self.apps.count))];
                 [self updateCategoryBar];
                 [self filterApps];
+                CV3LogPanelCollectionState(self, @"loadApps.apply.after");
             });
         }
     });
@@ -3617,6 +3972,19 @@ static NSUInteger CV3IconCacheCost(UIImage *image) {
                  self.windowScene,
                  self.searchField.inputAccessoryView);
 
+    // 键盘现场取证：两拍快照（诊断专用，零行为改动）。
+    // 0.55s 捕捉键盘动画完成态，1.35s 捕捉延迟布局后的最终态。
+    static NSUInteger cv3KeyboardShowForensicsGeneration = 0;
+    NSUInteger showForensicsGeneration = ++cv3KeyboardShowForensicsGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.55 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (showForensicsGeneration != cv3KeyboardShowForensicsGeneration) return;
+        CV3DumpKeyboardForensics(@"willShow+0.55s");
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (showForensicsGeneration != cv3KeyboardShowForensicsGeneration) return;
+        CV3DumpKeyboardForensics(@"willShow+1.35s");
+    });
+
     if (self.isPanelShowing && !self.searchField.isFirstResponder) {
         self.isKeyboardVisible = NO;
         CV3SetKeyboardSuppressedByPanel(YES);
@@ -3693,6 +4061,14 @@ static NSUInteger CV3IconCacheCost(UIImage *image) {
                  NSStringFromCGRect(keyboardFrame),
                  duration,
                  self.searchField.isFirstResponder);
+
+    // 键盘现场取证：收起后一拍快照（与 willShow 对比，确认键盘层退出状态）。
+    static NSUInteger cv3KeyboardHideForensicsGeneration = 0;
+    NSUInteger hideForensicsGeneration = ++cv3KeyboardHideForensicsGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.50 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (hideForensicsGeneration != cv3KeyboardHideForensicsGeneration) return;
+        CV3DumpKeyboardForensics(@"willHide+0.50s");
+    });
     
     [UIView animateWithDuration:duration delay:0 options:options animations:^{
         // 自动回弹至由安全区域决定的目标中心（除非用户手动大幅挪动过）
@@ -3948,6 +4324,17 @@ static NSUInteger CV3IconCacheCost(UIImage *image) {
 - (BOOL)_wantsSceneAssociation { return YES; }
 
 - (UIView *)hitTest:(CGPoint)point withEvent:(id)e {
+    if ([e isKindOfClass:[UIEvent class]] && ((UIEvent *)e).type == UIEventTypeTouches) {
+        for (UITouch *touch in ((UIEvent *)e).allTouches) {
+            UIWindow *sourceWindow = touch.window;
+            if (sourceWindow && sourceWindow != self) {
+                CV3LogToFile(@"[LauncherTouch] phase=hitTest.reject reason=foreignWindow sourceWindow=%@ point=%@",
+                             NSStringFromClass(sourceWindow.class), NSStringFromCGPoint(point));
+                return nil;
+            }
+        }
+    }
+
     if (self.isPanelShowing) {
         // 1. 优先检查搜索框及其容器（最高优先级，防止被拖拽拦截）
         UIView *searchContainer = self.searchField.superview;

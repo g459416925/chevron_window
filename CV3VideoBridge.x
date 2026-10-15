@@ -1095,10 +1095,6 @@ static void CV3InstallHostedAppHooksIfNeeded(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         CV3InstallLifecycleDelegateHooks();
     });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.75 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        CV3InstallLifecycleDelegateHooks();
-    });
 }
 
 %group CV3GlobalIconImageHooks

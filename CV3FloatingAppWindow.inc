@@ -633,8 +633,8 @@ static BOOL CV3BundleDeclaresLandscapeOnly(NSString *bundleID) {
 // When a previously hosted app remains alive after its floating window closes,
 // its client Scene can still be presenting landscape video while SpringBoard is
 // portrait. Recreating the shell from the display orientation would wrap that
-// live landscape canvas in a portrait card. Prefer the client's own settings;
-// the host settings are only a fallback because they may lag the producer.
+// live landscape canvas in a portrait card. Only the client's own settings are
+// authoritative; host settings can lag the producer and must not substitute.
 static UIInterfaceOrientation CV3LiveApplicationOrientationForBundleID(NSString *bundleID) {
     if (bundleID.length == 0) return UIInterfaceOrientationUnknown;
 
@@ -656,12 +656,6 @@ static UIInterfaceOrientation CV3LiveApplicationOrientationForBundleID(NSString 
             return clientOrientation;
         }
 
-        id settings = CV3InvokeObject(scene, @selector(settings));
-        UIInterfaceOrientation settingsOrientation = (UIInterfaceOrientation)CV3InvokeInteger(
-            settings, @selector(interfaceOrientation), UIInterfaceOrientationUnknown);
-        if (CV3IsValidInterfaceOrientation(settingsOrientation)) {
-            return settingsOrientation;
-        }
     } @catch (__unused NSException *exception) {}
 
     return UIInterfaceOrientationUnknown;
@@ -3936,7 +3930,6 @@ static NSString *CV3OrientationResolverTrace(id settings) {
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
         __block BOOL opened = NO;
-        __block BOOL usedFallback = NO;
         @try {
             id workspace = [CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace];
             if (workspace && [workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
@@ -3951,34 +3944,17 @@ static NSString *CV3OrientationResolverTrace(id settings) {
 
         CV3LogToFile(@"[FullscreenLaunch] phase=request.primaryResult bundle=%@ accepted=%d",
                      bundleID, opened);
-        if (!opened) {
-            usedFallback = YES;
-            dispatch_sync(dispatch_get_main_queue(), ^{
-                @try {
-                    UIApplication *application = [UIApplication sharedApplication];
-                    if ([application respondsToSelector:@selector(launchApplicationWithIdentifier:suspended:)]) {
-                        opened = [application launchApplicationWithIdentifier:bundleID suspended:NO];
-                    }
-                } @catch (NSException *e) {
-                    CV3LogToFile(@"[FullscreenLaunch] phase=request.fallbackException bundle=%@ exception=%@",
-                                 bundleID, e);
-                }
-            });
-        }
-
         dispatch_async(dispatch_get_main_queue(), ^{
             if (opened && !self.isClosing) {
-                CV3LogToFile(@"[FullscreenLaunch] phase=request.accepted bundle=%@ fallback=%d",
-                             bundleID, usedFallback);
+                CV3LogToFile(@"[FullscreenLaunch] phase=request.accepted bundle=%@", bundleID);
                 CV3StashPeerWindowsForFullscreen(self);
                 self.preserveSceneForegroundOnClose = YES;
                 [self closeWindow];
-                CV3LogToFile(@"[FullscreenLaunch] phase=teardown.completed bundle=%@ fallback=%d",
-                             bundleID, usedFallback);
+                CV3LogToFile(@"[FullscreenLaunch] phase=teardown.completed bundle=%@", bundleID);
             } else {
                 self.fullscreenLaunchPending = NO;
-                CV3LogToFile(@"[FullscreenLaunch] phase=request.failed bundle=%@ fallback=%d closing=%d",
-                             bundleID, usedFallback, self.isClosing);
+                CV3LogToFile(@"[FullscreenLaunch] phase=request.failed bundle=%@ closing=%d",
+                             bundleID, self.isClosing);
             }
             CV3EndFullscreenLaunchBypass(bundleID);
         });
@@ -4762,6 +4738,28 @@ static void CV3CollectReceptionLayers(CALayer *layer,
             ? CV3InvokeObject(self.hostView, @selector(presentationContext))
             : nil;
         if (existingContext) {
+            NSMutableArray<NSString *> *contextValues = [NSMutableArray array];
+            for (NSString *key in @[@"interfaceOrientation", @"orientation", @"bounds", @"frame",
+                                    @"presentedLayerTypes", @"appearanceStyle", @"clipsToBounds"]) {
+                id value = nil;
+                @try { value = [existingContext valueForKey:key]; } @catch (__unused NSException *exception) {}
+                if (value) [contextValues addObject:[NSString stringWithFormat:@"%@=%@", key, value]];
+            }
+            CV3LogToFile(@"[KeyboardDebug] presentationContext.reused class=%@ ptr=%p values={%@} hostBounds=%@ hostLayer=%@ sceneOrientation=%ld hostedOrientation=%ld",
+                         NSStringFromClass([existingContext class]), existingContext,
+                         [contextValues componentsJoinedByString:@";"],
+                         NSStringFromCGRect(self.hostView.bounds),
+                         NSStringFromCGRect(self.hostView.layer.bounds),
+                         (long)self.windowScene.interfaceOrientation,
+                         (long)self.hostedContentOrientation);
+        } else {
+            CV3LogToFile(@"[KeyboardDebug] presentationContext.missing hostBounds=%@ hostLayer=%@ sceneOrientation=%ld hostedOrientation=%ld",
+                         NSStringFromCGRect(self.hostView.bounds),
+                         NSStringFromCGRect(self.hostView.layer.bounds),
+                         (long)self.windowScene.interfaceOrientation,
+                         (long)self.hostedContentOrientation);
+        }
+        if (existingContext) {
             self.hostView.alpha = 1.0;
             self.hostView.hidden = NO;
             return;
@@ -5223,6 +5221,9 @@ static void CV3CollectReceptionLayers(CALayer *layer,
             [self recordReceptionTrace:@"firstFrame.beforeReveal" force:YES];
             [self recordOrientationTrace:@"firstFrame.beforeReveal" force:YES];
             [UIView performWithoutAnimation:^{
+                // BounceIt 风格入场初态：内容先缩到 88%（此刻容器仍 hidden，
+                // 用户看到的第一帧就是这个缩小态，随后弹性归位）。
+                self.appContentWrapper.transform = CGAffineTransformMakeScale(0.88, 0.88);
                 [CATransaction begin];
                 [CATransaction setDisableActions:YES];
                 [CATransaction setCompletionBlock:^{
@@ -5238,6 +5239,18 @@ static void CV3CollectReceptionLayers(CALayer *layer,
                 [self layoutIfNeeded];
                 [CATransaction commit];
             }];
+            // BounceIt 风格果冻弹跳：窗口以 88% 尺寸“啵”到 100%。
+            // 缩放只作用在 appContentWrapper（设计上专用于统一缩放动画的包装层）：
+            // rootTransformContainer 的旋转、窗口自身 frame 几何都不受影响，
+            // 且该包装层的布局只写 bounds/center，动画期间不会被 frame 写入打断。
+            [UIView animateWithDuration:0.5
+                                  delay:0
+                 usingSpringWithDamping:kCV3BounceDamping
+                  initialSpringVelocity:0.5
+                                options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                             animations:^{
+                self.appContentWrapper.transform = CGAffineTransformIdentity;
+            } completion:nil];
             [self recordOrientationTrace:@"firstFrame.afterRevealRequest" force:YES];
             [self recordColdLaunchMilestone:@"FIRST_FRAME_REVEAL_REQUESTED" details:nil];
         }
@@ -5872,14 +5885,6 @@ static void CV3CollectReceptionLayers(CALayer *layer,
             [self applyInterfaceOrientation:current force:YES];
         });
 
-        // UIKit can publish the physical orientation before the display Scene's
-        // coordinate space settles. Re-evaluate once after that transaction so
-        // hosted content and chrome use the same final axes.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            if (self.isClosing || self.isStashed) return;
-            [self applyInterfaceOrientation:current force:YES];
-        });
     }
 }
 
