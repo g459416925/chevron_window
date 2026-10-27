@@ -1,0 +1,7201 @@
+static void CV3CascadeUpdateSovereigntyAssertions(void) {
+    if (!floatingWindows || floatingWindows.count == 0) return;
+    NSArray *windowsSnapshot = [floatingWindows copy];
+    for (id win in windowsSnapshot) {
+        if ([win isKindOfClass:[CV3FloatingAppWindow class]] && ![win isClosing]) {
+            [win updateSovereigntyAssertion];
+        }
+    }
+}
+
+// A host UIView can survive after FrontBoard drops the Scene's real content
+// layer. Match PullOver-X's stronger readiness check instead of treating any
+// sublayer as proof that the client is still drawable.
+static NSString *CV3DirectionTraceView(UIView *view);
+
+static BOOL CV3SceneHasRenderableMainLayer(FBScene *scene) {
+    if (!scene) return NO;
+
+    id layerManager = nil;
+    @try {
+        if ([scene respondsToSelector:@selector(layerManager)]) {
+            layerManager = ((id (*)(id, SEL))objc_msgSend)(scene, @selector(layerManager));
+        } else {
+            layerManager = [scene valueForKey:@"_layerManager"];
+        }
+    } @catch (__unused NSException *exception) {
+        return NO;
+    }
+    if (!layerManager) return NO;
+
+    id rawLayers = nil;
+    @try {
+        if ([layerManager respondsToSelector:@selector(layers)]) {
+            rawLayers = ((id (*)(id, SEL))objc_msgSend)(layerManager, @selector(layers));
+        }
+    } @catch (__unused NSException *exception) {
+        return NO;
+    }
+
+    NSArray *layers = [rawLayers isKindOfClass:[NSArray class]]
+        ? rawLayers
+        : ([rawLayers respondsToSelector:@selector(array)] ? [rawLayers array] : nil);
+    if (![layers isKindOfClass:[NSArray class]]) return NO;
+
+    for (id layer in layers) {
+        @try {
+            BOOL keyboardLayer = [layer respondsToSelector:@selector(isKeyboardLayer)] &&
+                ((BOOL (*)(id, SEL))objc_msgSend)(layer, @selector(isKeyboardLayer));
+            id externalSceneID = [layer respondsToSelector:@selector(externalSceneID)]
+                ? ((id (*)(id, SEL))objc_msgSend)(layer, @selector(externalSceneID))
+                : nil;
+            if (!keyboardLayer && !externalSceneID) return YES;
+        } @catch (__unused NSException *exception) {}
+    }
+    return NO;
+}
+
+// Return the first live remote CA context carried by a host hierarchy.  The
+// value is intentionally read from the layer tree instead of the presentation
+// context object: the latter can exist before FrontBoard has published a new
+// CALayerHost and was the source of the false-positive readiness in v70.
+static NSString *CV3HostedLayerContextID(CALayer *layer) {
+    if (!layer) return nil;
+    for (NSString *key in @[@"contextId", @"_contextId"]) {
+        @try {
+            id value = [layer valueForKey:key];
+            if ([value respondsToSelector:@selector(unsignedLongLongValue)] &&
+                [value unsignedLongLongValue] != 0) {
+                return [value description];
+            }
+        } @catch (__unused NSException *exception) {}
+    }
+    for (CALayer *child in layer.sublayers) {
+        NSString *value = CV3HostedLayerContextID(child);
+        if (value.length > 0) return value;
+    }
+    return nil;
+}
+
+static void CV3StashPeerWindowsForFullscreen(CV3FloatingAppWindow *activeWindow) {
+    if (!activeWindow || !floatingWindows || floatingWindows.count <= 1) return;
+
+    NSArray *windowsSnapshot = [floatingWindows copy];
+    for (id obj in windowsSnapshot) {
+        if (![obj isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+        CV3FloatingAppWindow *win = (CV3FloatingAppWindow *)obj;
+        if (win == activeWindow || win.isClosing || win.isStashed) continue;
+        [win handleHideAction];
+    }
+
+    [activeWindow promoteFloatingWindowInZOrder];
+    [activeWindow makeKeyAndVisible];
+    activeWindow.windowLevel = CV3Style.floatingApp;
+    [activeWindow setWindowFocused:YES];
+}
+static const CGFloat kCV3RotationCascadeStep = 20.0;
+// 首次揭幕预渲染缓冲（秒）：门控首次放行前让“隐藏窗口里的内容”先渲染一段时间再显示窗口，
+// 覆盖“挂载→跨进程合成”的流水线延迟，消除“先玻璃板、后画面”的两段感（2026-10-16，215）。
+static const NSTimeInterval kCV3InitialRevealBuffer = 0.12;
+static const CGFloat kCV3StashIconSize = 54.0;
+static const CGFloat kCV3StashIconInset = 7.0;
+static const NSInteger kCV3ExposeColumnCount = 2;
+static const CGFloat kCV3ExposeOuterPadding = 20.0;
+static const CGFloat kCV3ExposeInterItemSpacing = 14.0;
+static const CGFloat kCV3ExposeMaxCellWidthRatio = 0.40;
+static const CGFloat kCV3ExposeCardCornerRadius = 22.0;
+static const CGFloat kCV3ExposeCardShadowOpacity = 0.22;
+static const CGFloat kCV3ExposeCardShadowRadius = 20.0;
+static const CGFloat kCV3ExposeCardSelectedScale = 1.03;
+static const NSInteger kCV3ExposeRotationSnapshotTag = 0x43563352;
+static const CGFloat kCV3FloatingDefaultWidthRatio = 0.45;
+
+static CGRect CV3DisplayBoundsForWindow(UIWindow *window) {
+    if (window.windowScene) {
+        CGRect sceneBounds = window.windowScene.coordinateSpace.bounds;
+        if (!CGRectIsEmpty(sceneBounds)) {
+            return sceneBounds;
+        }
+    }
+    if (window.screen) {
+        CGRect screenBounds = window.screen.bounds;
+        if (!CGRectIsEmpty(screenBounds)) {
+            return screenBounds;
+        }
+    }
+    return [UIScreen mainScreen].bounds;
+}
+
+// Rendered rotation of a transform, in radians. The restore snapshot is a render
+// of the window's VISIBLE space, so its true orientation is decided by the
+// transform actually applied to that space — not by the content orientation
+// value. The two only agree while the shell axes stay put.
+static CGFloat CV3RotationAngleOfTransform(CGAffineTransform transform) {
+    return atan2(transform.b, transform.a);
+}
+
+static CGFloat CV3NormalizedAngleDelta(CGFloat delta) {
+    while (delta > M_PI) delta -= (CGFloat)(M_PI * 2.0);
+    while (delta < -M_PI) delta += (CGFloat)(M_PI * 2.0);
+    return delta;
+}
+
+// preStashFrame is the single source of truth for "where the window was before
+// it became an icon". Every write to it therefore decides where the window
+// lands when the icon is tapped again, so each write is traced with its call
+// site. Without this, a restore that drifts can only be guessed at.
+static void CV3TracePreStashFrameWrite(CV3FloatingAppWindow *window,
+                                       NSString *source,
+                                       CGRect before) {
+    if (!window) return;
+    CV3LogToFile(@"[StashFrameTrace] phase=write bundle=%@ source=%@ before=%@ after=%@ delta=%@ stashed=%d windowFrame=%@ displayBounds=%@",
+                 window.bundleID ?: @"nil", source ?: @"nil",
+                 NSStringFromCGRect(before),
+                 NSStringFromCGRect(window.preStashFrame),
+                 NSStringFromCGPoint(CGPointMake(CGRectGetMidX(window.preStashFrame) - CGRectGetMidX(before),
+                                                 CGRectGetMidY(window.preStashFrame) - CGRectGetMidY(before))),
+                 window.isStashed,
+                 NSStringFromCGRect(window.frame),
+                 NSStringFromCGRect(CV3DisplayBoundsForWindow(window)));
+}
+
+// Resolve the minimized icon's final stack slot before the genie animation
+// starts. The old path animated to the window center and only then reflowed the
+// stack, which made the icon visibly jump when another icon occupied that side.
+static CGRect CV3StackedStashFrameForWindow(CV3FloatingAppWindow *window,
+                                            CGRect proposedFrame) {
+    if (!window || !window.isStashed || window.stashedSide == 0) return proposedFrame;
+
+    NSMutableArray<CV3FloatingAppWindow *> *sameSideWindows = [NSMutableArray array];
+    for (id obj in floatingWindows) {
+        if (![obj isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+        CV3FloatingAppWindow *candidate = (CV3FloatingAppWindow *)obj;
+        if (candidate.isStashed && candidate.stashedSide == window.stashedSide) {
+            [sameSideWindows addObject:candidate];
+        }
+    }
+    if (sameSideWindows.count <= 1) return proposedFrame;
+
+    [sameSideWindows sortUsingComparator:^NSComparisonResult(CV3FloatingAppWindow *a,
+                                                               CV3FloatingAppWindow *b) {
+        CGFloat aCenterY = CGRectIsEmpty(a.preStashFrame)
+            ? CGRectGetMidY(a.frame) : CGRectGetMidY(a.preStashFrame);
+        CGFloat bCenterY = CGRectIsEmpty(b.preStashFrame)
+            ? CGRectGetMidY(b.frame) : CGRectGetMidY(b.preStashFrame);
+        if (aCenterY < bCenterY) return NSOrderedAscending;
+        if (aCenterY > bCenterY) return NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+
+    NSInteger stackIndex = [sameSideWindows indexOfObject:window];
+    if (stackIndex == NSNotFound) return proposedFrame;
+
+    CGRect screen = CV3DisplayBoundsForWindow(window);
+    UIEdgeInsets safeArea = [window currentSafeAreaInsets];
+    CGFloat minY = safeArea.top;
+    CGFloat maxY = screen.size.height - safeArea.bottom - kCV3StashIconSize;
+    if (maxY < minY) maxY = minY;
+
+    CGFloat desiredTop = CGFLOAT_MAX;
+    for (CV3FloatingAppWindow *candidate in sameSideWindows) {
+        CGFloat centerY = CGRectIsEmpty(candidate.preStashFrame)
+            ? CGRectGetMidY(candidate.frame) : CGRectGetMidY(candidate.preStashFrame);
+        desiredTop = MIN(desiredTop, centerY - kCV3StashIconSize * 0.5);
+    }
+    if (desiredTop == CGFLOAT_MAX) desiredTop = proposedFrame.origin.y;
+
+    CGFloat availableHeight = MAX(0.0, maxY - minY);
+    CGFloat defaultStackOffset = kCV3StashIconSize + 8.0;
+    CGFloat maxFittingOffset = availableHeight / (CGFloat)(sameSideWindows.count - 1);
+    CGFloat stackOffset = MIN(defaultStackOffset,
+                              MAX(kCV3StashIconSize * 0.72, maxFittingOffset));
+    CGFloat stackHeight = kCV3StashIconSize +
+        stackOffset * MAX(0, (NSInteger)sameSideWindows.count - 1);
+    CGFloat maxTop = screen.size.height - safeArea.bottom - stackHeight;
+    if (maxTop < minY) maxTop = minY;
+    CGFloat anchoredTop = MIN(MAX(desiredTop, minY), maxTop);
+
+    CGRect result = proposedFrame;
+    result.size = CGSizeMake(kCV3StashIconSize, kCV3StashIconSize);
+    result.origin.y = MIN(MAX(anchoredTop + stackIndex * stackOffset, minY), maxY);
+    return result;
+}
+
+// SpringBoard can keep a portrait UIWindowScene coordinate space while the
+// physical display is already landscape. In that state CoreAnimation maps the
+// Scene to the display by swapping its axes. A landscape floating shell must
+// therefore be portrait-shaped in Scene coordinates, then rotate its logical
+// content into that shell exactly once.
+static BOOL CV3SceneAndDisplayAxesDifferForScene(UIWindowScene *scene) {
+    if (!scene || !scene.screen) return NO;
+    CGSize sceneSize = scene.coordinateSpace.bounds.size;
+    CGSize screenSize = scene.screen.bounds.size;
+    if (sceneSize.width <= 0.0 || sceneSize.height <= 0.0 ||
+        screenSize.width <= 0.0 || screenSize.height <= 0.0) return NO;
+    BOOL sceneLandscape = sceneSize.width > sceneSize.height;
+    BOOL screenLandscape = screenSize.width > screenSize.height;
+    return sceneLandscape != screenLandscape;
+}
+
+static BOOL CV3SceneAndDisplayAxesDiffer(UIWindow *window) {
+    return window ? CV3SceneAndDisplayAxesDifferForScene(window.windowScene) : NO;
+}
+
+static BOOL CV3LandscapeGameNeedsSceneCompensation(CV3FloatingAppWindow *window) {
+    return window.prefersLandscapePresentation && window.requiresLandscapeContent &&
+        CV3SceneAndDisplayAxesDiffer(window);
+}
+
+static BOOL CV3HostedLandscapeNeedsSceneCompensation(CV3FloatingAppWindow *window) {
+    return window && window.prefersLandscapePresentation &&
+        UIInterfaceOrientationIsLandscape(window.hostedContentOrientation) &&
+        CV3SceneAndDisplayAxesDiffer(window);
+}
+
+// THE single axis rule for the whole project — window, drop preview, rotation
+// and restore must all ask this one function.
+//
+// UIWindow bounds live in the SpringBoard Scene coordinate space. When the
+// physical display has rotated but that Scene did not (a fullscreen video in a
+// floating window is enough to reach that state), the shell's axes must be
+// inverted for EVERY hosted app: landscape content is TALL in Scene points and
+// only becomes wide after display mapping. Previously each call site re-derived
+// this rule with slightly different conditions, so the answers drifted apart and
+// fixing one path broke another.
+static BOOL CV3ShellLandscapeForContent(BOOL contentIsLandscape,
+                                        BOOL sceneAxesDiffer) {
+    return sceneAxesDiffer ? !contentIsLandscape : contentIsLandscape;
+}
+
+static BOOL CV3ShellShouldBeLandscape(CV3FloatingAppWindow *window,
+                                      UIInterfaceOrientation presentationOrientation) {
+    UIInterfaceOrientation contentOrientation =
+        window && CV3IsValidInterfaceOrientation(window.hostedContentOrientation)
+            ? window.hostedContentOrientation
+            : presentationOrientation;
+    return CV3ShellLandscapeForContent(UIInterfaceOrientationIsLandscape(contentOrientation),
+                                       CV3SceneAndDisplayAxesDiffer(window));
+}
+
+static UIInterfaceOrientation CV3HostedClientOrientation(CV3FloatingAppWindow *window) {
+    if (!window.targetScene) return UIInterfaceOrientationUnknown;
+    id clientSettings = CV3InvokeObject(window.targetScene,
+                                        NSSelectorFromString(@"clientSettings"));
+    return (UIInterfaceOrientation)CV3InvokeInteger(clientSettings,
+                                                     @selector(interfaceOrientation),
+                                                     UIInterfaceOrientationUnknown);
+}
+
+static CGSize CV3SceneSettingsBounds(id settings) {
+    SEL boundsSelector = NSSelectorFromString(@"bounds");
+    if (!settings || ![settings respondsToSelector:boundsSelector]) return CGSizeZero;
+    @try {
+        CGRect bounds = ((CGRect (*)(id, SEL))objc_msgSend)(settings, boundsSelector);
+        return bounds.size;
+    } @catch (__unused NSException *exception) {
+        return CGSizeZero;
+    }
+}
+
+static BOOL CV3SceneSettingsBoundsMatchOrientation(id settings,
+                                                    UIInterfaceOrientation orientation) {
+    if (!CV3IsValidInterfaceOrientation(orientation)) return NO;
+    CGSize bounds = CV3SceneSettingsBounds(settings);
+    if (bounds.width <= 0.0 || bounds.height <= 0.0 ||
+        fabs(bounds.width - bounds.height) <= 0.5) return NO;
+    return (bounds.width > bounds.height) == UIInterfaceOrientationIsLandscape(orientation);
+}
+
+static CGAffineTransform CV3HostedContentRotationInScene(CV3FloatingAppWindow *window) {
+    if (!window.prefersLandscapePresentation ||
+        !UIInterfaceOrientationIsLandscape(window.hostedContentOrientation)) {
+        return CGAffineTransformIdentity;
+    }
+
+    // clientSettings is the producer-side acknowledgement. Once it reaches the
+    // requested orientation, UIKit has already oriented the remote Surface.
+    // Rotating rootTransformContainer as well applies the presentation a second
+    // time and leaves the translated client content in only half of the shell.
+    UIInterfaceOrientation clientOrientation = CV3HostedClientOrientation(window);
+    if (CV3IsValidInterfaceOrientation(clientOrientation)) {
+        if (clientOrientation == window.hostedContentOrientation) {
+            window.clientAcknowledgedOrientation = clientOrientation;
+        } else if (window.clientAcknowledgedOrientation == window.hostedContentOrientation) {
+            UIInterfaceOrientation staleAcknowledgement = window.clientAcknowledgedOrientation;
+            window.clientAcknowledgedOrientation = UIInterfaceOrientationUnknown;
+            CV3LogToFile(@"[OrientationRepair] phase=clientAckInvalidated bundle=%@ liveClient=%ld cachedAck=%ld requested=%ld",
+                         window.bundleID ?: @"nil", (long)clientOrientation,
+                         (long)staleAcknowledgement, (long)window.hostedContentOrientation);
+        }
+    }
+    if (CV3HostedLandscapeNeedsSceneCompensation(window)) {
+        // The producer is already landscape; compensate only the outer Scene's
+        // mapping to the display. This is required for both landscape-only games
+        // and video Apps that enter landscape after their floating window was
+        // created. Derive the sign from UIKit, not device rotation.
+        id<UICoordinateSpace> sceneSpace = window.windowScene.coordinateSpace;
+        id<UICoordinateSpace> displaySpace = window.windowScene.screen.coordinateSpace;
+        CGPoint origin = [sceneSpace convertPoint:CGPointZero fromCoordinateSpace:displaySpace];
+        CGPoint x = [sceneSpace convertPoint:CGPointMake(1, 0) fromCoordinateSpace:displaySpace];
+        CGPoint y = [sceneSpace convertPoint:CGPointMake(0, 1) fromCoordinateSpace:displaySpace];
+        CGFloat xLength = hypot(x.x - origin.x, x.y - origin.y);
+        CGFloat yLength = hypot(y.x - origin.x, y.y - origin.y);
+        if (isfinite(xLength) && isfinite(yLength) && xLength > 0 && yLength > 0) {
+            CGAffineTransform compensation = CGAffineTransformMake(
+                (x.x - origin.x) / xLength, (x.y - origin.y) / xLength,
+                (y.x - origin.x) / yLength, (y.y - origin.y) / yLength, 0, 0);
+            if (fabs(compensation.b) > 0.5 && fabs(compensation.c) > 0.5) {
+                return compensation;
+            }
+        }
+    }
+    if (window.clientAcknowledgedOrientation == window.hostedContentOrientation) {
+        return CGAffineTransformIdentity;
+    }
+
+    // The server frame remains in portrait reference coordinates, but the
+    // effective Scene bounds are orientation-aware. When those bounds already
+    // match the requested hosted axis, the remote surface is already laid out
+    // in landscape and rotating the root again clips it to a square slice.
+    id settings = window.targetScene
+        ? CV3InvokeObject(window.targetScene, @selector(settings))
+        : nil;
+    if (CV3SceneSettingsBoundsMatchOrientation(settings, window.hostedContentOrientation)) {
+        return CGAffineTransformIdentity;
+    }
+
+    UIInterfaceOrientation sceneOrientation = window.windowScene.interfaceOrientation;
+    if (!CV3IsValidInterfaceOrientation(sceneOrientation)) {
+        sceneOrientation = UIInterfaceOrientationPortrait;
+    }
+    if (sceneOrientation == window.hostedContentOrientation) {
+        return CGAffineTransformIdentity;
+    }
+    CGAffineTransform hosted = CV3RotationTransformForInterfaceOrientation(window.hostedContentOrientation);
+    CGAffineTransform scene = CV3RotationTransformForInterfaceOrientation(sceneOrientation);
+    return CGAffineTransformConcat(hosted, CGAffineTransformInvert(scene));
+}
+
+static UIEdgeInsets CV3InitialFloatingSafeAreaInsets(UIWindowScene *scene) {
+    UIWindow *keyWindow = nil;
+    if (@available(iOS 15.0, *)) {
+        keyWindow = scene.keyWindow;
+    }
+    UIEdgeInsets safeArea = keyWindow.safeAreaInsets;
+    if (safeArea.top == 0.0 && safeArea.bottom == 0.0 &&
+        safeArea.left == 0.0 && safeArea.right == 0.0) {
+        safeArea = UIEdgeInsetsMake(47.0, 0.0, 34.0, 0.0);
+    }
+    return safeArea;
+}
+
+static CGRect CV3ClampInitialFloatingFrame(CGRect frame, CGRect bounds, UIEdgeInsets safeArea) {
+    CGFloat breath = CV3Style.safeAreaBreath;
+    CGFloat minX = CGRectGetMinX(bounds) + safeArea.left + breath;
+    CGFloat minY = CGRectGetMinY(bounds) + safeArea.top + breath;
+    CGFloat maxX = CGRectGetMaxX(bounds) - safeArea.right - breath - frame.size.width;
+    CGFloat maxY = CGRectGetMaxY(bounds) - safeArea.bottom - breath - frame.size.height;
+    if (maxX < minX) maxX = minX;
+    if (maxY < minY) maxY = minY;
+    frame.origin.x = MIN(MAX(frame.origin.x, minX), maxX);
+    frame.origin.y = MIN(MAX(frame.origin.y, minY), maxY);
+    return frame;
+}
+
+static NSString *CV3WindowLayoutKey(NSString *bundleID) {
+    if (bundleID.length == 0) return nil;
+    return [NSString stringWithFormat:@"CV3WindowLayout.%@", bundleID];
+}
+
+static NSDictionary *CV3SavedWindowLayout(NSString *bundleID) {
+    NSString *key = CV3WindowLayoutKey(bundleID);
+    if (!key) return nil;
+    NSDictionary *layout = [[[NSUserDefaults alloc] initWithSuiteName:@"com.xu.chevronv3"] dictionaryForKey:key];
+    return [layout isKindOfClass:[NSDictionary class]] ? layout : nil;
+}
+
+static void CV3SaveWindowLayout(CV3FloatingAppWindow *window) {
+    if (!window || window.bundleID.length == 0 || window.isClosing || window.isStashed) return;
+    NSString *key = CV3WindowLayoutKey(window.bundleID);
+    if (!key) return;
+
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.xu.chevronv3"];
+    NSDictionary *layout = @{
+        @"frame": NSStringFromCGRect(window.frame),
+        @"orientation": @(window.targetOrientation),
+        @"updatedAt": @([[NSDate date] timeIntervalSince1970])
+    };
+    [defaults setObject:layout forKey:key];
+    [defaults synchronize];
+    CV3LogToFile(@"[LayoutStore] 保存 %@ frame=%@ orientation=%ld",
+                 window.bundleID, NSStringFromCGRect(window.frame), (long)window.targetOrientation);
+}
+
+#pragma mark - Single geometry authority
+
+// Every path that sizes a floating window — creation, drop preview, rotation,
+// restore — must ask THESE functions. The previous per-path implementations each
+// mixed Scene-space bounds with display-space insets, so a size that was legal
+// in one path became an overflow in another, and fixing one path broke the next.
+
+// Bounds of the coordinate space a UIWindow's frame lives in.
+static CGRect CV3SceneBoundsForScene(UIWindowScene *scene) {
+    if (scene && !CGRectIsEmpty(scene.coordinateSpace.bounds)) {
+        return scene.coordinateSpace.bounds;
+    }
+    if (scene.screen && !CGRectIsEmpty(scene.screen.bounds)) {
+        return scene.screen.bounds;
+    }
+    return [UIScreen mainScreen].bounds;
+}
+
+// The one answer to "how much room is there", expressed in Scene space.
+static CGSize CV3SceneVisibleSizeForScene(UIWindowScene *scene) {
+    CGRect bounds = CV3SceneBoundsForScene(scene);
+    UIEdgeInsets insets = CV3InitialFloatingSafeAreaInsets(scene); // same Scene space
+    CGFloat breath = CV3Style.safeAreaBreath;
+    return CGSizeMake(MAX(1.0, bounds.size.width - insets.left - insets.right - breath * 2.0),
+                      MAX(1.0, bounds.size.height - insets.top - insets.bottom - breath * 2.0));
+}
+
+// The one answer to "how big should this window be", in Scene space.
+//
+// Sources in order: the size the user last dialled in (persisted by
+// CV3SaveWindowLayout), then the caller's default logical size. Short/long edges
+// are re-laid-out for the requested axis, then fitted to the visible area. The
+// fit clamps at 1.0, so a legitimate user size survives untouched and only
+// over-sized values are pulled back.
+static CGSize CV3ResolvedFloatingSizeForBundle(NSString *bundleID,
+                                               BOOL targetLandscape,
+                                               CGSize fallbackLogicalSize,
+                                               CGSize visibleSceneSize) {
+    CGFloat shortEdge = 0.0;
+    CGFloat longEdge = 0.0;
+
+    NSDictionary *savedLayout = CV3SavedWindowLayout(bundleID);
+    NSString *savedFrameString = savedLayout[@"frame"];
+    if ([savedFrameString isKindOfClass:NSString.class]) {
+        CGRect savedFrame = CGRectFromString(savedFrameString);
+        if (!CGRectIsNull(savedFrame) && !CGRectIsEmpty(savedFrame) &&
+            savedFrame.size.width >= 1.0 && savedFrame.size.height >= 1.0) {
+            shortEdge = MIN(savedFrame.size.width, savedFrame.size.height);
+            longEdge = MAX(savedFrame.size.width, savedFrame.size.height);
+        }
+    }
+    if (shortEdge <= 0.0 || longEdge <= 0.0) {
+        shortEdge = MIN(fallbackLogicalSize.width, fallbackLogicalSize.height);
+        longEdge = MAX(fallbackLogicalSize.width, fallbackLogicalSize.height);
+    }
+
+    CGSize size = targetLandscape ? CGSizeMake(longEdge, shortEdge)
+                                  : CGSizeMake(shortEdge, longEdge);
+    CGFloat scale = MIN(1.0, MIN(visibleSceneSize.width / MAX(size.width, 1.0),
+                                 visibleSceneSize.height / MAX(size.height, 1.0)));
+    if (scale < 1.0) {
+        size = CGSizeMake(size.width * scale, size.height * scale);
+    }
+    return size;
+}
+
+static CGRect CV3CanonicalApplicationSceneFrame(id settings) {
+    id displayConfiguration = nil;
+    SEL displaySelector = NSSelectorFromString(@"displayConfiguration");
+    if (settings && [settings respondsToSelector:displaySelector]) {
+        @try {
+            displayConfiguration = ((id (*)(id, SEL))objc_msgSend)(settings, displaySelector);
+        } @catch (NSException *e) {}
+    }
+    if (!displayConfiguration && [[UIScreen mainScreen] respondsToSelector:displaySelector]) {
+        @try {
+            displayConfiguration = ((id (*)(id, SEL))objc_msgSend)([UIScreen mainScreen], displaySelector);
+        } @catch (NSException *e) {}
+    }
+
+    SEL boundsSelector = NSSelectorFromString(@"bounds");
+    if (displayConfiguration && [displayConfiguration respondsToSelector:boundsSelector]) {
+        @try {
+            CGRect bounds = ((CGRect (*)(id, SEL))objc_msgSend)(displayConfiguration, boundsSelector);
+            if (CGRectGetWidth(bounds) > 0.0 && CGRectGetHeight(bounds) > 0.0) {
+                return CGRectMake(0, 0, CGRectGetWidth(bounds), CGRectGetHeight(bounds));
+            }
+        } @catch (NSException *e) {}
+    }
+
+    CGSize screenSize = [UIScreen mainScreen].bounds.size;
+    return CGRectMake(0, 0,
+                      MIN(screenSize.width, screenSize.height),
+                      MAX(screenSize.width, screenSize.height));
+}
+
+static CGSize CV3HostedCanvasSizeForOrientation(UIInterfaceOrientation orientation, id settings) {
+    CGRect canonicalFrame = CV3CanonicalApplicationSceneFrame(settings);
+    CGFloat shortSide = MIN(CGRectGetWidth(canonicalFrame), CGRectGetHeight(canonicalFrame));
+    CGFloat longSide = MAX(CGRectGetWidth(canonicalFrame), CGRectGetHeight(canonicalFrame));
+    if (shortSide <= 0.0 || longSide <= 0.0) {
+        CGSize screenSize = [UIScreen mainScreen].bounds.size;
+        shortSide = MIN(screenSize.width, screenSize.height);
+        longSide = MAX(screenSize.width, screenSize.height);
+    }
+    return UIInterfaceOrientationIsLandscape(orientation)
+        ? CGSizeMake(longSide, shortSide)
+        : CGSizeMake(shortSide, longSide);
+}
+
+static UIInterfaceOrientation CV3HostedPresentationOrientation(CV3FloatingAppWindow *window) {
+    if (!window) return UIInterfaceOrientationUnknown;
+    // The destination is SpringBoard's display scene, not the hosted app.
+    // Use this window's live Scene orientation even when its private session
+    // role is not _UIScreenBasedSceneSession. Falling through the global
+    // trusted-orientation cache can return the hosted app's landscape request
+    // while SpringBoard is still portrait, causing the required cross-axis map
+    // to be restored incorrectly.
+    UIInterfaceOrientation sceneOrientation = window.windowScene.interfaceOrientation;
+    if (CV3IsValidInterfaceOrientation(sceneOrientation)) {
+        return sceneOrientation;
+    }
+    return CV3TrustedInterfaceOrientation(window.windowScene);
+}
+
+// PullOver chooses the initial hosted orientation from the client's declared
+// orientations instead of assuming portrait. This matters before the first
+// Scene transaction, when the device Scene still reports its own orientation.
+static BOOL CV3BundleDeclaresLandscapeOnly(NSString *bundleID) {
+    if (bundleID.length == 0) return NO;
+
+    @try {
+        Class proxyClass = CV3ClassNamed(@"LSApplicationProxy");
+        SEL selector = NSSelectorFromString(@"applicationProxyForIdentifier:");
+        id proxy = proxyClass && [proxyClass respondsToSelector:selector]
+            ? ((id (*)(id, SEL, id))objc_msgSend)(proxyClass, selector, bundleID)
+            : nil;
+        NSURL *bundleURL = proxy && [proxy respondsToSelector:@selector(bundleURL)]
+            ? ((id (*)(id, SEL))objc_msgSend)(proxy, @selector(bundleURL))
+            : nil;
+        NSDictionary *info = bundleURL ? [NSDictionary dictionaryWithContentsOfFile:[[bundleURL path] stringByAppendingPathComponent:@"Info.plist"]] : nil;
+        id runtimeApp = nil;
+        if (!info) {
+            Class appController = CV3ClassNamed(@"SBApplicationController");
+            id app = appController && [appController respondsToSelector:@selector(sharedInstance)]
+                ? ((id (*)(id, SEL))objc_msgSend)(appController, @selector(sharedInstance))
+                : nil;
+            app = app && [app respondsToSelector:@selector(applicationWithBundleIdentifier:)]
+                ? ((id (*)(id, SEL, id))objc_msgSend)(app, @selector(applicationWithBundleIdentifier:), bundleID)
+                : nil;
+            runtimeApp = app;
+            NSURL *fallbackURL = app && [app respondsToSelector:@selector(bundleURL)]
+                ? ((id (*)(id, SEL))objc_msgSend)(app, @selector(bundleURL))
+                : nil;
+            if (fallbackURL) {
+                info = [NSDictionary dictionaryWithContentsOfFile:[[fallbackURL path] stringByAppendingPathComponent:@"Info.plist"]];
+            }
+        }
+        if (!runtimeApp) {
+            Class appController = CV3ClassNamed(@"SBApplicationController");
+            id controller = appController && [appController respondsToSelector:@selector(sharedInstance)]
+                ? ((id (*)(id, SEL))objc_msgSend)(appController, @selector(sharedInstance))
+                : nil;
+            runtimeApp = controller && [controller respondsToSelector:@selector(applicationWithBundleIdentifier:)]
+                ? ((id (*)(id, SEL, id))objc_msgSend)(controller, @selector(applicationWithBundleIdentifier:), bundleID)
+                : nil;
+        }
+        if (runtimeApp) {
+            @try {
+                id maskValue = [runtimeApp valueForKey:@"supportedInterfaceOrientations"];
+                UIInterfaceOrientationMask mask = [maskValue unsignedIntegerValue];
+                BOOL hasLandscape = (mask & UIInterfaceOrientationMaskLandscape) != 0;
+                BOOL hasPortrait = (mask & (UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskPortraitUpsideDown)) != 0;
+                if (hasLandscape && !hasPortrait) return YES;
+            } @catch (__unused NSException *exception) {}
+        }
+        NSString *declaredDefault = [info[@"UIInterfaceOrientation"] isKindOfClass:[NSString class]]
+            ? info[@"UIInterfaceOrientation"]
+            : nil;
+        if (declaredDefault.length && [declaredDefault rangeOfString:@"Landscape" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            return YES;
+        }
+        NSArray *orientations = info[@"UISupportedInterfaceOrientations"];
+        if (![orientations isKindOfClass:[NSArray class]]) {
+            orientations = info[@"UISupportedInterfaceOrientations~ipad"];
+        }
+        if (![orientations isKindOfClass:[NSArray class]] || orientations.count == 0) return NO;
+
+        BOOL hasLandscape = NO;
+        BOOL hasPortrait = NO;
+        for (NSString *value in orientations) {
+            NSString *name = [value isKindOfClass:[NSString class]] ? value : @"";
+            hasLandscape |= [name rangeOfString:@"Landscape" options:NSCaseInsensitiveSearch].location != NSNotFound;
+            hasPortrait |= [name rangeOfString:@"Portrait" options:NSCaseInsensitiveSearch].location != NSNotFound;
+        }
+        return hasLandscape && !hasPortrait;
+    } @catch (__unused NSException *exception) {
+        return NO;
+    }
+}
+
+// When a previously hosted app remains alive after its floating window closes,
+// its client Scene can still be presenting landscape video while SpringBoard is
+// portrait. Recreating the shell from the display orientation would wrap that
+// live landscape canvas in a portrait card. Only the client's own settings are
+// authoritative; host settings can lag the producer and must not substitute.
+static UIInterfaceOrientation CV3LiveApplicationOrientationForBundleID(NSString *bundleID) {
+    if (bundleID.length == 0) return UIInterfaceOrientationUnknown;
+
+    @try {
+        id appController = CV3InvokeObject(CV3ClassNamed(@"SBApplicationController"),
+                                           @selector(sharedInstance));
+        id app = CV3InvokeObject1(appController,
+                                  @selector(applicationWithBundleIdentifier:),
+                                  bundleID);
+        id scene = CV3InvokeObject(app, @selector(mainScene));
+        if (!scene || !CV3InvokeBool(scene, @selector(isValid), YES)) {
+            return UIInterfaceOrientationUnknown;
+        }
+
+        id clientSettings = CV3InvokeObject(scene, NSSelectorFromString(@"clientSettings"));
+        UIInterfaceOrientation clientOrientation = (UIInterfaceOrientation)CV3InvokeInteger(
+            clientSettings, @selector(interfaceOrientation), UIInterfaceOrientationUnknown);
+        if (CV3IsValidInterfaceOrientation(clientOrientation)) {
+            return clientOrientation;
+        }
+
+    } @catch (__unused NSException *exception) {}
+
+    return UIInterfaceOrientationUnknown;
+}
+
+static UIInterfaceOrientation CV3InitialHostedOrientationForBundleID(NSString *bundleID,
+                                                                       UIInterfaceOrientation fallback) {
+    UIInterfaceOrientation liveOrientation = CV3LiveApplicationOrientationForBundleID(bundleID);
+    if (CV3IsValidInterfaceOrientation(liveOrientation)) return liveOrientation;
+    if (!CV3BundleDeclaresLandscapeOnly(bundleID)) return fallback;
+    if (fallback == UIInterfaceOrientationLandscapeLeft || fallback == UIInterfaceOrientationLandscapeRight) {
+        return fallback;
+    }
+    return UIInterfaceOrientationLandscapeRight;
+}
+
+// The injected client publishes the orientation it last requested into a
+// per-bundle Darwin state. That value outlives the floating window, so a shell
+// created after the window was closed still matches an app whose real canvas is
+// landscape (fullscreen video) even though its Scene was reset to the portrait
+// display orientation in the meantime. The shell is only a simulated device
+// frame; the app canvas is the authority.
+static UIInterfaceOrientation CV3RealContentOrientationForBundleID(NSString *bundleID) {
+    if (bundleID.length == 0) return UIInterfaceOrientationUnknown;
+
+    NSString *name = CV3BundleScopedNotificationName(
+        [NSString stringWithUTF8String:CV3RealContentOrientationNotificationPrefix], bundleID);
+    if (name.length == 0) return UIInterfaceOrientationUnknown;
+
+    int token = -1;
+    if (notify_register_check(name.UTF8String, &token) != NOTIFY_STATUS_OK) {
+        return UIInterfaceOrientationUnknown;
+    }
+    uint64_t state = 0;
+    BOOL read = notify_get_state(token, &state) == NOTIFY_STATUS_OK;
+    notify_cancel(token);
+    if (!read) return UIInterfaceOrientationUnknown;
+
+    UIInterfaceOrientation orientation = (UIInterfaceOrientation)(state & 0xFFULL);
+    return CV3IsValidInterfaceOrientation(orientation) ? orientation : UIInterfaceOrientationUnknown;
+}
+
+// THE single decision for "how does a newly created shell for this bundle
+// present", consumed by creation, the drop preview and the shell's first
+// geometry pass.
+//
+// The drop preview is the user's only prediction of the window that is about to
+// appear, so it must not derive the shell axis on its own. When the preview read
+// the display orientation while creation read the client's own evidence, a
+// portrait App dragged out under a rotated display got a landscape dashed frame
+// and a portrait window: the promise and the delivery disagreed. Both paths now
+// ask this one function.
+//
+// Display rotation is NOT evidence about this App's canvas. A fullscreen video
+// rotates the physical display while SpringBoard's Scene stays portrait, so
+// "display is landscape" says nothing about a WeChat window. Only the client's
+// own last request (real/live) or a landscape-only bundle makes the shell
+// landscape; without that the App is portrait however the phone is held.
+typedef struct {
+    UIInterfaceOrientation resolvedOrientation;     // what the shell seeds itself with
+    UIInterfaceOrientation contentOrientation;      // what the canvas will actually be
+    UIInterfaceOrientation realContentOrientation;  // Unknown when the client never published one
+    UIInterfaceOrientation liveSceneOrientation;    // Unknown when the App has no live Scene
+    BOOL prefersLandscape;
+    BOOL hasRealContent;
+    BOOL hasLiveScene;
+    BOOL requiresLandscape;
+} CV3InitialPresentation;
+
+static CV3InitialPresentation CV3ResolveInitialPresentation(NSString *bundleID,
+                                                            UIInterfaceOrientation displayOrientation) {
+    CV3InitialPresentation presentation;
+    presentation.requiresLandscape = CV3BundleDeclaresLandscapeOnly(bundleID);
+
+    // Seed from the client's own last request first: both the Scene and the
+    // display orientation can be stale once the previous window has been closed.
+    presentation.realContentOrientation = CV3RealContentOrientationForBundleID(bundleID);
+    presentation.hasRealContent = CV3IsValidInterfaceOrientation(presentation.realContentOrientation);
+    presentation.liveSceneOrientation = CV3LiveApplicationOrientationForBundleID(bundleID);
+    presentation.hasLiveScene = CV3IsValidInterfaceOrientation(presentation.liveSceneOrientation);
+
+    if (presentation.hasRealContent) {
+        presentation.resolvedOrientation = presentation.realContentOrientation;
+    } else if (presentation.hasLiveScene) {
+        presentation.resolvedOrientation = presentation.liveSceneOrientation;
+    } else {
+        presentation.resolvedOrientation =
+            CV3InitialHostedOrientationForBundleID(bundleID, displayOrientation);
+    }
+
+    presentation.prefersLandscape =
+        UIInterfaceOrientationIsLandscape(presentation.resolvedOrientation) &&
+        (presentation.hasRealContent || presentation.hasLiveScene ||
+         presentation.requiresLandscape);
+    presentation.contentOrientation = presentation.prefersLandscape
+        ? presentation.resolvedOrientation
+        : UIInterfaceOrientationPortrait;
+    return presentation;
+}
+
+static BOOL isGlobalExposeActive = NO;
+static UIWindow *globalExposeBackdrop = nil;
+static UIView *globalExposeContentView = nil;
+static NSArray<CV3FloatingAppWindow *> *globalExposeWindows = nil;
+static CGFloat globalExposeScrollOffset = 0.0;
+static NSInteger globalExposeSelectedIndex = 0;
+static BOOL globalExposeIsLandscape = NO;
+static NSUInteger globalExposeRotationGeneration = 0;
+static void CV3ExitExposeModeSelectingWindow(CV3FloatingAppWindow *selectedWindow, BOOL focusSelected);
+
+static BOOL CV3WindowIsExpandedForExpose(id object) {
+    if (![object isKindOfClass:[CV3FloatingAppWindow class]]) return NO;
+    CV3FloatingAppWindow *window = (CV3FloatingAppWindow *)object;
+    if (window.isClosing || window.isStashed) return NO;
+
+    // During the genie transition restoreFromStash clears isStashed before the
+    // full window is visible. Treat that interval as icon state so Expose only
+    // contains windows whose expanded content is actually on screen.
+    UIView *content = window.appContentWrapper;
+    UIView *chrome = window.clippingContainer;
+    return content && chrome && content.alpha > 0.01 && chrome.alpha > 0.01;
+}
+
+static NSArray<CV3FloatingAppWindow *> *CV3ExpandedWindowsForExpose(void) {
+    NSMutableArray<CV3FloatingAppWindow *> *expandedWindows = [NSMutableArray array];
+    for (id object in [floatingWindows copy]) {
+        if (CV3WindowIsExpandedForExpose(object)) {
+            [expandedWindows addObject:(CV3FloatingAppWindow *)object];
+        }
+    }
+    return [expandedWindows copy];
+}
+
+static CGFloat CV3ClampCGFloat(CGFloat value, CGFloat minValue, CGFloat maxValue) {
+    if (maxValue < minValue) return minValue;
+    return MAX(minValue, MIN(maxValue, value));
+}
+
+static CGRect CV3ExposeLayoutBounds(CGRect bounds) {
+    UIEdgeInsets safeArea = UIEdgeInsetsZero;
+    if (globalExposeBackdrop && !globalExposeContentView) {
+        safeArea = globalExposeBackdrop.safeAreaInsets;
+    }
+    CGRect layoutBounds = CGRectMake(bounds.origin.x + safeArea.left + kCV3ExposeOuterPadding,
+                                     bounds.origin.y + safeArea.top + kCV3ExposeOuterPadding,
+                                     bounds.size.width - safeArea.left - safeArea.right - kCV3ExposeOuterPadding * 2.0,
+                                     bounds.size.height - safeArea.top - safeArea.bottom - kCV3ExposeOuterPadding * 2.0);
+    if (layoutBounds.size.width < 1.0) layoutBounds.size.width = 1.0;
+    if (layoutBounds.size.height < 1.0) layoutBounds.size.height = 1.0;
+    return layoutBounds;
+}
+
+static CGFloat CV3ExposePortraitAspectRatio(CGRect bounds) {
+    CGFloat shortSide = MIN(bounds.size.width, bounds.size.height);
+    CGFloat longSide = MAX(bounds.size.width, bounds.size.height);
+    return longSide / MAX(shortSide, 1.0);
+}
+
+static NSInteger CV3ExposeColumnCountForWindows(NSInteger count, BOOL landscape) {
+    if (count <= 0) return 0;
+    return landscape ? MAX(1, count) : MIN(kCV3ExposeColumnCount, count);
+}
+
+static NSInteger CV3ExposeRowCountForWindows(NSInteger count, BOOL landscape) {
+    if (count <= 0) return 0;
+    if (landscape) return 1;
+    NSInteger cols = CV3ExposeColumnCountForWindows(count, NO);
+    return MAX(1, (NSInteger)ceil((double)count / (double)MAX(1, cols)));
+}
+
+static CGSize CV3ExposeCellSize(CGRect bounds, NSInteger count, BOOL landscape) {
+    if (count <= 0 || CGRectIsEmpty(bounds)) return CGSizeZero;
+
+    CGRect layoutBounds = CV3ExposeLayoutBounds(bounds);
+    NSInteger visibleCols = landscape ? MIN(MAX(1, count), 4) : MIN(kCV3ExposeColumnCount, MAX(1, count));
+    NSInteger visibleRows = landscape ? 1 : MIN(MAX(1, CV3ExposeRowCountForWindows(count, NO)), 2);
+    CGFloat totalSpacingX = kCV3ExposeInterItemSpacing * MAX(0, visibleCols - 1);
+    CGFloat totalSpacingY = kCV3ExposeInterItemSpacing * MAX(0, visibleRows - 1);
+    CGFloat maxCellWidth = MAX(1.0, (layoutBounds.size.width - totalSpacingX) / (CGFloat)visibleCols);
+    CGFloat maxCellHeight = MAX(1.0, (layoutBounds.size.height - totalSpacingY) / (CGFloat)visibleRows);
+    CGFloat aspectRatio = CV3ExposePortraitAspectRatio(bounds);
+    CGFloat viewportWidthCap = layoutBounds.size.width * (landscape ? 0.25 : kCV3ExposeMaxCellWidthRatio);
+    CGFloat viewportHeightCap = layoutBounds.size.height * (landscape ? 0.96 : 0.52);
+
+    maxCellWidth = MIN(maxCellWidth, MAX(1.0, viewportWidthCap));
+    maxCellHeight = MIN(maxCellHeight, MAX(1.0, viewportHeightCap));
+
+    CGFloat cellWidth = MIN(maxCellWidth, maxCellHeight / MAX(aspectRatio, 1.0));
+    CGFloat cellHeight = cellWidth * aspectRatio;
+    if (cellHeight > maxCellHeight) {
+        cellHeight = maxCellHeight;
+        cellWidth = cellHeight / MAX(aspectRatio, 1.0);
+    }
+
+    return CGSizeMake(MAX(1.0, cellWidth), MAX(1.0, cellHeight));
+}
+
+static CGFloat CV3ExposeMaxScrollForWindows(NSArray<CV3FloatingAppWindow *> *windows, CGRect bounds, BOOL landscape) {
+    NSInteger count = windows.count;
+    if (count <= 0 || CGRectIsEmpty(bounds)) return 0.0;
+
+    CGRect layoutBounds = CV3ExposeLayoutBounds(bounds);
+    NSInteger cols = CV3ExposeColumnCountForWindows(count, landscape);
+    NSInteger rows = CV3ExposeRowCountForWindows(count, landscape);
+    CGSize cellSize = CV3ExposeCellSize(bounds, count, landscape);
+    CGFloat contentWidth = cellSize.width * cols + kCV3ExposeInterItemSpacing * MAX(0, cols - 1);
+    CGFloat contentHeight = cellSize.height * rows + kCV3ExposeInterItemSpacing * MAX(0, rows - 1);
+    return landscape ? MAX(0.0, contentWidth - layoutBounds.size.width) : MAX(0.0, contentHeight - layoutBounds.size.height);
+}
+
+static CGRect CV3ExposeCellFrameForIndex(NSInteger index, NSInteger count, CGRect bounds, BOOL landscape) {
+    if (count <= 0 || CGRectIsEmpty(bounds)) return CGRectZero;
+
+    NSInteger cols = CV3ExposeColumnCountForWindows(count, landscape);
+    NSInteger rows = CV3ExposeRowCountForWindows(count, landscape);
+    NSInteger row = index / cols;
+    NSInteger col = index % cols;
+
+    CGRect layoutBounds = CV3ExposeLayoutBounds(bounds);
+    CGSize cellSize = CV3ExposeCellSize(bounds, count, landscape);
+    CGFloat cellW = cellSize.width;
+    CGFloat cellH = cellSize.height;
+    CGFloat gridWidth = cellW * cols + kCV3ExposeInterItemSpacing * MAX(0, cols - 1);
+    CGFloat gridHeight = cellH * rows + kCV3ExposeInterItemSpacing * MAX(0, rows - 1);
+    CGFloat centeredOffsetX = MAX(0.0, (layoutBounds.size.width - gridWidth) * 0.5);
+    CGFloat startX = layoutBounds.origin.x + centeredOffsetX - (landscape ? globalExposeScrollOffset : 0.0);
+    CGFloat centeredOffsetY = MAX(0.0, (layoutBounds.size.height - gridHeight) * 0.5);
+    CGFloat startY = layoutBounds.origin.y + centeredOffsetY - (landscape ? 0.0 : globalExposeScrollOffset);
+
+    NSInteger itemsInRow = cols;
+    if (row == rows - 1) {
+        NSInteger remaining = count - row * cols;
+        if (remaining > 0) itemsInRow = MIN(cols, remaining);
+    }
+    CGFloat rowWidth = cellW * itemsInRow + kCV3ExposeInterItemSpacing * MAX(0, itemsInRow - 1);
+    CGFloat rowStartX = startX + MAX(0.0, (gridWidth - rowWidth) * 0.5);
+
+    CGFloat x = landscape ? startX + col * (cellW + kCV3ExposeInterItemSpacing) : rowStartX + col * (cellW + kCV3ExposeInterItemSpacing);
+    return CGRectMake(x,
+                      startY + row * (cellH + kCV3ExposeInterItemSpacing),
+                      cellW,
+                      cellH);
+}
+
+static void CV3UpdateExposeSelection(NSInteger selectedIndex) {
+    if (!globalExposeWindows || globalExposeWindows.count == 0) return;
+    globalExposeSelectedIndex = MAX(0, MIN(selectedIndex, (NSInteger)globalExposeWindows.count - 1));
+
+    for (NSInteger i = 0; i < (NSInteger)globalExposeWindows.count; i++) {
+        CV3FloatingAppWindow *win = globalExposeWindows[i];
+        UIView *overlay = win.exposeOverlayView;
+        if (!overlay) continue;
+
+        BOOL selected = (i == globalExposeSelectedIndex);
+        UIColor *focusColor = [UIColor colorWithRed:0.18 green:0.82 blue:1.0 alpha:1.0];
+        overlay.layer.borderWidth = selected ? 3.0 : 0.0; // 222：未选中卡片去白框（1pt 白 20% 同属“白线”类杂质）
+        overlay.layer.borderColor = (selected
+                                     ? focusColor
+                                     : [[UIColor whiteColor] colorWithAlphaComponent:0.20]).CGColor;
+        overlay.layer.cornerRadius = kCV3ExposeCardCornerRadius;
+        overlay.backgroundColor = selected ? [focusColor colorWithAlphaComponent:0.10] : [[UIColor blackColor] colorWithAlphaComponent:0.14];
+        overlay.layer.shadowColor = [UIColor blackColor].CGColor;
+        overlay.layer.shadowOpacity = selected ? (float)(kCV3ExposeCardShadowOpacity + 0.08) : (float)kCV3ExposeCardShadowOpacity;
+        overlay.layer.shadowRadius = selected ? kCV3ExposeCardShadowRadius + 6.0 : kCV3ExposeCardShadowRadius;
+        overlay.layer.shadowOffset = CGSizeMake(0, selected ? 18.0 : 12.0);
+        overlay.transform = selected ? CGAffineTransformMakeScale(kCV3ExposeCardSelectedScale, kCV3ExposeCardSelectedScale) : CGAffineTransformIdentity;
+    }
+}
+
+static void CV3UpdateExposeSelectionForViewportCenter(void) {
+    if (!globalExposeWindows || globalExposeWindows.count == 0 || !globalExposeBackdrop) return;
+
+    CGRect bounds = globalExposeContentView ? globalExposeContentView.bounds : globalExposeBackdrop.bounds;
+    CGPoint viewportCenter = CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds));
+    CGFloat bestDistance = CGFLOAT_MAX;
+    NSInteger bestIndex = globalExposeSelectedIndex;
+
+    for (NSInteger i = 0; i < (NSInteger)globalExposeWindows.count; i++) {
+        CGRect cellFrame = CV3ExposeCellFrameForIndex(i, globalExposeWindows.count, bounds, globalExposeIsLandscape);
+        CGPoint center = CGPointMake(CGRectGetMidX(cellFrame), CGRectGetMidY(cellFrame));
+        CGFloat dx = center.x - viewportCenter.x;
+        CGFloat dy = center.y - viewportCenter.y;
+        CGFloat distance = dx * dx + dy * dy;
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            bestIndex = i;
+        }
+    }
+
+    CV3UpdateExposeSelection(bestIndex);
+}
+
+static void CV3LayoutExposeLiveContent(CV3FloatingAppWindow *win) {
+    UIView *cardView = win.exposeOverlayView;
+    UIView *contentContainer = win.exposeLiveContentContainer;
+    UIView *liveContent = win.appContentWrapper;
+    if (!cardView || !contentContainer || !liveContent) return;
+
+    contentContainer.frame = cardView.bounds;
+    contentContainer.layer.cornerRadius = kCV3ExposeCardCornerRadius;
+
+    CGRect sourceBounds = win.exposeContentOriginalBounds;
+    if (CGRectIsEmpty(sourceBounds)) sourceBounds = liveContent.bounds;
+    if (CGRectIsEmpty(sourceBounds)) return;
+
+    CGFloat scaleX = CGRectGetWidth(contentContainer.bounds) / MAX(CGRectGetWidth(sourceBounds), 1.0);
+    CGFloat scaleY = CGRectGetHeight(contentContainer.bounds) / MAX(CGRectGetHeight(sourceBounds), 1.0);
+    CGFloat scale = MIN(scaleX, scaleY);
+
+    liveContent.bounds = sourceBounds;
+    liveContent.center = CGPointMake(CGRectGetMidX(contentContainer.bounds), CGRectGetMidY(contentContainer.bounds));
+    liveContent.transform = CGAffineTransformMakeScale(scale, scale);
+}
+
+static void CV3FreezeExposeCardsForRotation(void) {
+    NSUInteger frozenCount = 0;
+    for (CV3FloatingAppWindow *window in globalExposeWindows) {
+        UIView *cardView = window.exposeOverlayView;
+        UIView *contentContainer = window.exposeLiveContentContainer;
+        if (!cardView || !contentContainer) continue;
+
+        UIView *existingSnapshot = [cardView viewWithTag:kCV3ExposeRotationSnapshotTag];
+        if (!existingSnapshot) {
+            CV3LayoutExposeLiveContent(window);
+            UIView *snapshot = [contentContainer snapshotViewAfterScreenUpdates:NO];
+            if (!snapshot) continue;
+            snapshot.tag = kCV3ExposeRotationSnapshotTag;
+            snapshot.frame = cardView.bounds;
+            snapshot.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            snapshot.userInteractionEnabled = NO;
+            snapshot.layer.cornerRadius = kCV3ExposeCardCornerRadius;
+            snapshot.layer.masksToBounds = YES;
+            [cardView addSubview:snapshot];
+        }
+        contentContainer.hidden = YES;
+        frozenCount++;
+    }
+    CV3LogToFile(@"[ExposeRotation] phase=freeze cards=%lu", (unsigned long)frozenCount);
+}
+
+static void CV3ThawExposeCardsAfterRotation(void) {
+    NSUInteger thawedCount = 0;
+    for (CV3FloatingAppWindow *window in globalExposeWindows) {
+        UIView *cardView = window.exposeOverlayView;
+        UIView *contentContainer = window.exposeLiveContentContainer;
+        if (!cardView || !contentContainer) continue;
+
+        CV3LayoutExposeLiveContent(window);
+        contentContainer.hidden = NO;
+        UIView *snapshot = [cardView viewWithTag:kCV3ExposeRotationSnapshotTag];
+        [snapshot removeFromSuperview];
+        thawedCount++;
+    }
+    CV3LogToFile(@"[ExposeRotation] phase=thaw cards=%lu", (unsigned long)thawedCount);
+}
+
+static void CV3RestoreExposeLiveContent(CV3FloatingAppWindow *win, BOOL preserveCardImage) {
+    UIView *cardView = win.exposeOverlayView;
+    UIView *contentContainer = win.exposeLiveContentContainer;
+    UIView *liveContent = win.appContentWrapper;
+    if (!contentContainer || !liveContent || liveContent.superview != contentContainer) return;
+
+    if (preserveCardImage && cardView && !CGRectIsEmpty(contentContainer.bounds)) {
+        UIView *transitionSnapshot = [contentContainer snapshotViewAfterScreenUpdates:NO];
+        if (transitionSnapshot) {
+            transitionSnapshot.frame = contentContainer.frame;
+            transitionSnapshot.userInteractionEnabled = NO;
+            transitionSnapshot.layer.cornerRadius = kCV3ExposeCardCornerRadius;
+            transitionSnapshot.layer.masksToBounds = YES;
+            [cardView insertSubview:transitionSnapshot atIndex:0];
+        }
+    }
+
+    UIView *originalSuperview = win.exposeContentOriginalSuperview ?: win.rootTransformContainer;
+    if (originalSuperview) {
+        NSInteger insertionIndex = MAX(0, win.exposeContentOriginalIndex);
+        insertionIndex = MIN(insertionIndex, (NSInteger)originalSuperview.subviews.count);
+        [originalSuperview insertSubview:liveContent atIndex:(NSUInteger)insertionIndex];
+    }
+
+    liveContent.bounds = win.exposeContentOriginalBounds;
+    liveContent.center = win.exposeContentOriginalCenter;
+    liveContent.transform = win.exposeContentOriginalTransform;
+    liveContent.autoresizingMask = win.exposeContentOriginalAutoresizingMask;
+    liveContent.userInteractionEnabled = win.exposeContentOriginalUserInteractionEnabled;
+
+    [contentContainer removeFromSuperview];
+    win.exposeLiveContentContainer = nil;
+    win.exposeContentOriginalSuperview = nil;
+    [win setNeedsLayout];
+    [win layoutIfNeeded];
+}
+
+static void CV3LayoutExposeWindowsAnimated(BOOL animated) {
+    if (!globalExposeWindows || globalExposeWindows.count == 0 || !globalExposeBackdrop) return;
+
+    CGRect bounds = globalExposeContentView ? globalExposeContentView.bounds : globalExposeBackdrop.bounds;
+    globalExposeScrollOffset = CV3ClampCGFloat(globalExposeScrollOffset,
+                                               0.0,
+                                               CV3ExposeMaxScrollForWindows(globalExposeWindows, bounds, globalExposeIsLandscape));
+
+    void (^layoutBlock)(void) = ^{
+        for (NSInteger i = 0; i < (NSInteger)globalExposeWindows.count; i++) {
+            CV3FloatingAppWindow *win = globalExposeWindows[i];
+            if (win.isClosing) continue;
+
+            CGRect cellFrame = CV3ExposeCellFrameForIndex(i, globalExposeWindows.count, bounds, globalExposeIsLandscape);
+            UIView *cardView = win.exposeOverlayView;
+            if (!cardView) continue;
+            cardView.frame = cellFrame;
+            cardView.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:cardView.bounds cornerRadius:kCV3ExposeCardCornerRadius].CGPath;
+            CV3LayoutExposeLiveContent(win);
+        }
+    };
+
+    if (animated) {
+        [UIView animateWithDuration:0.28 delay:0 usingSpringWithDamping:0.82 initialSpringVelocity:0.0 options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionAllowUserInteraction animations:layoutBlock completion:nil];
+    } else {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        layoutBlock();
+        [CATransaction commit];
+    }
+
+    CV3UpdateExposeSelection(globalExposeSelectedIndex);
+}
+
+@implementation CV3HostedSceneSession
+
+- (instancetype)initWithWindow:(CV3FloatingAppWindow *)window {
+    self = [super init];
+    if (self) self.window = window;
+    return self;
+}
+
+- (void)setActive:(BOOL)active {
+    if (_active == active) return;
+    _active = active;
+
+    [self.continuityTimer invalidate];
+    self.continuityTimer = nil;
+    CV3PostHostedState(self.window.bundleID, active);
+
+    if (active) {
+        [self validateNow:@"HostedSessionActivated"];
+        // Scene updates are expensive for clients with complex accessibility
+        // trees. A slower lease heartbeat avoids feeding the scene-update
+        // watchdog while still recovering a genuinely lost host layer.
+        self.continuityTimer = [NSTimer scheduledTimerWithTimeInterval:3.0
+                                                               target:self
+                                                             selector:@selector(continuityTimerFired:)
+                                                             userInfo:nil
+                                                              repeats:YES];
+    }
+}
+
+- (void)continuityTimerFired:(NSTimer *)timer {
+    [self validateNow:@"HostedSessionHeartbeat"];
+}
+
+- (void)validateNow:(NSString *)reason {
+    CV3FloatingAppWindow *window = self.window;
+    if (!self.active || !window || window.isClosing || window.isStashed) return;
+    NSUInteger generationBeforeRecovery = window.sceneHostGeneration;
+    [window recoverHostedPresentationIfNeeded:reason];
+    // A recovery invalidates the old host generation. Do not mutate the
+    // detached Scene again in the same heartbeat.
+    if (window.sceneHostGeneration != generationBeforeRecovery ||
+        window.hostLifecycleState != CV3HostLifecycleStateLive) return;
+    [window stabilizeForegroundForWorkspaceTransition:reason];
+}
+
+- (void)invalidate {
+    [self setActive:NO];
+    self.window = nil;
+}
+
+- (void)dealloc {
+    [self.continuityTimer invalidate];
+}
+
+@end
+
+static void CV3UpdateExposeForSceneRotation(CV3SceneRotationContext context, BOOL animated) {
+    if (!isGlobalExposeActive || !globalExposeBackdrop || !globalExposeContentView) return;
+
+    CV3FloatingAppWindow *selectedWindow = nil;
+    if (globalExposeSelectedIndex >= 0 && globalExposeSelectedIndex < (NSInteger)globalExposeWindows.count) {
+        selectedWindow = globalExposeWindows[globalExposeSelectedIndex];
+    }
+
+    NSMutableArray<CV3FloatingAppWindow *> *expandedSnapshot = [NSMutableArray array];
+    for (CV3FloatingAppWindow *window in globalExposeWindows) {
+        if (CV3WindowIsExpandedForExpose(window)) {
+            [expandedSnapshot addObject:window];
+        } else {
+            CV3RestoreExposeLiveContent(window, NO);
+            [window.exposeOverlayView removeFromSuperview];
+            window.exposeOverlayView = nil;
+        }
+    }
+    if (expandedSnapshot.count != globalExposeWindows.count) {
+        globalExposeWindows = [expandedSnapshot copy];
+        NSInteger preservedIndex = selectedWindow ? [globalExposeWindows indexOfObject:selectedWindow] : NSNotFound;
+        globalExposeSelectedIndex = preservedIndex == NSNotFound
+            ? MIN(globalExposeSelectedIndex, MAX(0, (NSInteger)globalExposeWindows.count - 1))
+            : preservedIndex;
+        globalExposeScrollOffset = 0.0;
+    }
+    if (globalExposeWindows.count < 2) {
+        CV3ExitExposeModeSelectingWindow(globalExposeWindows.firstObject, globalExposeWindows.count == 1);
+        return;
+    }
+
+    CGRect sceneBounds = context.sceneBounds;
+    if (CGRectIsEmpty(sceneBounds)) sceneBounds = [UIScreen mainScreen].bounds;
+    CGRect backdropSceneBounds = globalExposeBackdrop.windowScene.coordinateSpace.bounds;
+    if (CGRectIsEmpty(backdropSceneBounds)) {
+        backdropSceneBounds = CV3DisplayBoundsForWindow(globalExposeBackdrop);
+    }
+
+    CGFloat shortSide = MIN(sceneBounds.size.width, sceneBounds.size.height);
+    CGFloat longSide = MAX(sceneBounds.size.width, sceneBounds.size.height);
+    CGSize layoutSize = context.isLandscape
+        ? CGSizeMake(longSide, shortSide)
+        : CGSizeMake(shortSide, longSide);
+
+    BOOL layoutAxisChanged = (globalExposeIsLandscape != context.isLandscape);
+    NSUInteger rotationGeneration = ++globalExposeRotationGeneration;
+    void (^commitLayout)(void) = ^{
+        if (!isGlobalExposeActive || !globalExposeBackdrop || !globalExposeContentView ||
+            rotationGeneration != globalExposeRotationGeneration) return;
+
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        // The trusted rotation context comes from SpringBoard's physical
+        // display Scene. Expose is hosted by the floating-window Scene, whose
+        // coordinate space can remain portrait while the display is landscape.
+        // Never assign the physical Scene bounds as this window's local frame.
+        globalExposeBackdrop.frame = backdropSceneBounds;
+        for (UIView *subview in globalExposeBackdrop.subviews) {
+            if (subview != globalExposeContentView) subview.frame = globalExposeBackdrop.bounds;
+        }
+        globalExposeContentView.bounds = CGRectMake(0, 0, layoutSize.width, layoutSize.height);
+        globalExposeContentView.center = CGPointMake(CGRectGetMidX(globalExposeBackdrop.bounds),
+                                                     CGRectGetMidY(globalExposeBackdrop.bounds));
+        BOOL backingBoundsLandscape = CGRectGetWidth(globalExposeBackdrop.bounds) > CGRectGetHeight(globalExposeBackdrop.bounds);
+        globalExposeContentView.transform = (backingBoundsLandscape == context.isLandscape)
+            ? CGAffineTransformIdentity
+            : context.transform;
+        [CATransaction commit];
+
+        globalExposeIsLandscape = context.isLandscape;
+        if (layoutAxisChanged) globalExposeScrollOffset = 0.0;
+        // The coordinate-space swap and every card frame must become visible in
+        // one display pass. Animating the child frames while SpringBoard is
+        // still rotating the parent Scene briefly places cards off-screen.
+        CV3LayoutExposeWindowsAnimated(layoutAxisChanged ? NO : animated);
+        CV3UpdateExposeSelectionForViewportCenter();
+        globalExposeBackdrop.userInteractionEnabled = YES;
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!isGlobalExposeActive ||
+                rotationGeneration != globalExposeRotationGeneration) return;
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            CV3ThawExposeCardsAfterRotation();
+            [CATransaction commit];
+        });
+
+        NSMutableArray<NSString *> *frames = [NSMutableArray array];
+        for (CV3FloatingAppWindow *window in globalExposeWindows) {
+            if (window.exposeOverlayView) {
+                [frames addObject:[NSString stringWithFormat:@"%@=%@",
+                    window.bundleID ?: @"nil", NSStringFromCGRect(window.exposeOverlayView.frame)]];
+            }
+        }
+        CV3LogToFile(@"[ExposeRotation] phase=commit generation=%lu landscape=%d physicalScene=%@ backdropScene=%@ content=%@ transform=%@ cards=[%@]",
+                     (unsigned long)rotationGeneration, context.isLandscape,
+                     NSStringFromCGRect(sceneBounds), NSStringFromCGRect(backdropSceneBounds),
+                     NSStringFromCGSize(layoutSize),
+                     NSStringFromCGAffineTransform(globalExposeContentView.transform),
+                     [frames componentsJoinedByString:@", "]);
+    };
+
+    if (layoutAxisChanged) {
+        globalExposeBackdrop.userInteractionEnabled = NO;
+        CV3FreezeExposeCardsForRotation();
+        CV3LogToFile(@"[ExposeRotation] phase=defer generation=%lu fromLandscape=%d toLandscape=%d physicalScene=%@ backdropScene=%@ content=%@",
+                     (unsigned long)rotationGeneration, globalExposeIsLandscape,
+                     context.isLandscape, NSStringFromCGRect(sceneBounds),
+                     NSStringFromCGRect(backdropSceneBounds), NSStringFromCGSize(layoutSize));
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.42 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), commitLayout);
+    } else {
+        commitLayout();
+    }
+}
+
+static void CV3ExitExposeModeSelectingWindow(CV3FloatingAppWindow *selectedWindow, BOOL focusSelected) {
+    if (!isGlobalExposeActive) {
+        if (focusSelected && selectedWindow && !selectedWindow.isClosing) {
+            [selectedWindow setWindowFocused:YES];
+        }
+        return;
+    }
+
+    isGlobalExposeActive = NO;
+    globalExposeRotationGeneration++;
+    NSArray *windowsSnapshot = [globalExposeWindows copy] ?: @[];
+    UIWindow *backdrop = globalExposeBackdrop;
+    globalExposeWindows = nil;
+    globalExposeScrollOffset = 0.0;
+    globalExposeSelectedIndex = 0;
+
+    for (id obj in windowsSnapshot) {
+        if (![obj isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+        CV3FloatingAppWindow *win = (CV3FloatingAppWindow *)obj;
+        CV3RestoreExposeLiveContent(win, YES);
+    }
+
+    if (focusSelected && selectedWindow && !selectedWindow.isClosing) {
+        [selectedWindow promoteFloatingWindowInZOrder];
+    }
+
+    [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.86 initialSpringVelocity:0.0 options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionAllowUserInteraction animations:^{
+        for (id obj in windowsSnapshot) {
+            if (![obj isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+            CV3FloatingAppWindow *win = (CV3FloatingAppWindow *)obj;
+            win.alpha = 1.0;
+            win.exposeOverlayView.alpha = 0.0;
+        }
+        if (backdrop) backdrop.alpha = 0.0;
+    } completion:^(BOOL finished) {
+        for (id obj in windowsSnapshot) {
+            if (![obj isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+            CV3FloatingAppWindow *win = (CV3FloatingAppWindow *)obj;
+            [win.exposeOverlayView removeFromSuperview];
+            win.exposeOverlayView = nil;
+        }
+
+        if (backdrop) {
+            backdrop.hidden = YES;
+            if (globalExposeBackdrop == backdrop) globalExposeBackdrop = nil;
+        }
+        if (globalExposeContentView) {
+            [globalExposeContentView removeFromSuperview];
+            globalExposeContentView = nil;
+        }
+
+        if (focusSelected && selectedWindow && !selectedWindow.isClosing) {
+            [selectedWindow setWindowFocused:YES];
+        }
+    }];
+}
+
+static BOOL CV3ExitExposeModeIfNeeded(CV3FloatingAppWindow *selectedWindow, BOOL focusSelected) {
+    if (!isGlobalExposeActive) return NO;
+    CV3ExitExposeModeSelectingWindow(selectedWindow, focusSelected);
+    return YES;
+}
+
+void CV3ToggleExposeMode(void) {
+    if (isGlobalExposeActive) {
+        CV3ExitExposeModeSelectingWindow(nil, NO);
+    } else {
+        if (!floatingWindows || floatingWindows.count == 0) return;
+
+        NSMutableArray<CV3FloatingAppWindow *> *activeWindows = [CV3ExpandedWindowsForExpose() mutableCopy];
+        if (activeWindows.count < 2) {
+            CV3FloatingAppWindow *onlyWindow = activeWindows.firstObject;
+            if (onlyWindow) [onlyWindow setWindowFocused:YES];
+            return;
+        }
+
+        CV3FloatingAppWindow *preferredFirstWindow = nil;
+        for (CV3FloatingAppWindow *win in activeWindows) {
+            if (win.isFocused && CV3WindowIsExpandedForExpose(win)) {
+                preferredFirstWindow = win;
+                break;
+            }
+        }
+        if (!preferredFirstWindow) {
+            for (NSInteger i = (NSInteger)floatingWindows.count - 1; i >= 0; i--) {
+                id obj = floatingWindows[i];
+                if (![obj isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+                CV3FloatingAppWindow *win = (CV3FloatingAppWindow *)obj;
+                if (CV3WindowIsExpandedForExpose(win) && [activeWindows containsObject:win]) {
+                    preferredFirstWindow = win;
+                    break;
+                }
+            }
+        }
+        if (preferredFirstWindow && activeWindows.firstObject != preferredFirstWindow) {
+            [activeWindows removeObject:preferredFirstWindow];
+            [activeWindows insertObject:preferredFirstWindow atIndex:0];
+        }
+
+        // Enter Exposé
+        isGlobalExposeActive = YES;
+        
+        UIWindowScene *scene = nil;
+        for (CV3FloatingAppWindow *win in activeWindows) {
+            scene = win.windowScene;
+            if (scene) break;
+        }
+        
+        if (!globalExposeBackdrop) {
+            if (scene) {
+                globalExposeBackdrop = [[UIWindow alloc] initWithWindowScene:scene];
+            } else {
+                globalExposeBackdrop = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+            }
+            globalExposeBackdrop.windowLevel = CV3Style.floatingApp + 5;
+            
+            UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
+            UIVisualEffectView *bg = [[UIVisualEffectView alloc] initWithEffect:blur];
+            bg.frame = globalExposeBackdrop.bounds;
+            bg.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            [globalExposeBackdrop addSubview:bg];
+            
+            UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:[CV3FloatingAppWindow class] action:@selector(handleExposeBackdropTap:)];
+            [globalExposeBackdrop addGestureRecognizer:tap];
+            UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:[CV3FloatingAppWindow class] action:@selector(handleExposeBackdropPan:)];
+            [globalExposeBackdrop addGestureRecognizer:pan];
+        }
+
+        UIInterfaceOrientation exposeOrientation = CV3TrustedInterfaceOrientation(scene);
+        BOOL exposeLandscape = UIInterfaceOrientationIsLandscape(exposeOrientation);
+        CGRect rawBackdropBounds = CGRectZero;
+        if (scene && !CGRectIsEmpty(scene.coordinateSpace.bounds)) {
+            rawBackdropBounds = scene.coordinateSpace.bounds;
+        }
+        if (CGRectIsEmpty(rawBackdropBounds)) {
+            rawBackdropBounds = [UIScreen mainScreen].bounds;
+        }
+
+        CGFloat shortSide = MIN(rawBackdropBounds.size.width, rawBackdropBounds.size.height);
+        CGFloat longSide = MAX(rawBackdropBounds.size.width, rawBackdropBounds.size.height);
+        CGRect backdropFrame = exposeLandscape
+            ? CGRectMake(0, 0, longSide, shortSide)
+            : CGRectMake(0, 0, shortSide, longSide);
+        CGRect windowFrame = rawBackdropBounds;
+        globalExposeBackdrop.frame = windowFrame;
+        for (UIView *subview in globalExposeBackdrop.subviews) {
+            subview.frame = globalExposeBackdrop.bounds;
+        }
+
+        if (!globalExposeContentView) {
+            globalExposeContentView = [[UIView alloc] initWithFrame:CGRectZero];
+            globalExposeContentView.backgroundColor = [UIColor clearColor];
+            globalExposeContentView.clipsToBounds = NO;
+            [globalExposeBackdrop addSubview:globalExposeContentView];
+        }
+
+        globalExposeContentView.bounds = CGRectMake(0, 0, backdropFrame.size.width, backdropFrame.size.height);
+        globalExposeContentView.center = CGPointMake(CGRectGetMidX(globalExposeBackdrop.bounds),
+                                                     CGRectGetMidY(globalExposeBackdrop.bounds));
+        BOOL backingBoundsLandscape = CGRectGetWidth(globalExposeBackdrop.bounds) > CGRectGetHeight(globalExposeBackdrop.bounds);
+        globalExposeContentView.transform = (backingBoundsLandscape == exposeLandscape)
+            ? CGAffineTransformIdentity
+            : CV3RotationTransformForInterfaceOrientation(exposeOrientation);
+        
+        globalExposeBackdrop.alpha = 0.0;
+        globalExposeBackdrop.hidden = NO;
+
+        globalExposeWindows = [activeWindows copy];
+        globalExposeScrollOffset = 0.0;
+        globalExposeSelectedIndex = 0;
+        globalExposeIsLandscape = exposeLandscape;
+        
+        [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.75 initialSpringVelocity:0.0 options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionAllowUserInteraction animations:^{
+            globalExposeBackdrop.alpha = 1.0;
+            
+            for (NSInteger i=0; i<(NSInteger)activeWindows.count; i++) {
+                CV3FloatingAppWindow *win = activeWindows[i];
+                
+                win.preExposeFrame = win.frame;
+                win.preExposeTransform = win.transform;
+                win.alpha = 0.22;
+                
+                // Add Overlay
+                if (!win.exposeOverlayView) {
+                    UIView *cardView = [[UIView alloc] initWithFrame:CGRectZero];
+                    cardView.layer.cornerRadius = kCV3ExposeCardCornerRadius;
+                    cardView.layer.masksToBounds = NO;
+                    cardView.clipsToBounds = NO;
+
+                    UIView *liveContent = win.appContentWrapper;
+                    if (liveContent && liveContent.superview) {
+                        UIView *originalSuperview = liveContent.superview;
+                        win.exposeContentOriginalSuperview = originalSuperview;
+                        win.exposeContentOriginalIndex = (NSInteger)[originalSuperview.subviews indexOfObject:liveContent];
+                        win.exposeContentOriginalBounds = liveContent.bounds;
+                        win.exposeContentOriginalCenter = liveContent.center;
+                        win.exposeContentOriginalTransform = liveContent.transform;
+                        win.exposeContentOriginalAutoresizingMask = liveContent.autoresizingMask;
+                        win.exposeContentOriginalUserInteractionEnabled = liveContent.userInteractionEnabled;
+
+                        UIView *contentContainer = [[UIView alloc] initWithFrame:cardView.bounds];
+                        contentContainer.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                        contentContainer.backgroundColor = [UIColor clearColor];
+                        contentContainer.userInteractionEnabled = NO;
+                        contentContainer.clipsToBounds = YES;
+                        contentContainer.layer.cornerRadius = kCV3ExposeCardCornerRadius;
+                        [cardView addSubview:contentContainer];
+                        [contentContainer addSubview:liveContent];
+                        liveContent.autoresizingMask = UIViewAutoresizingNone;
+                        liveContent.userInteractionEnabled = NO;
+                        win.exposeLiveContentContainer = contentContainer;
+                    } else {
+                        UIView *snapshotSourceView = win.rootTransformContainer ?: win;
+                        UIView *snapshotView = [snapshotSourceView snapshotViewAfterScreenUpdates:NO];
+                        if (snapshotView) {
+                            snapshotView.frame = cardView.bounds;
+                            snapshotView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                            snapshotView.layer.cornerRadius = kCV3ExposeCardCornerRadius;
+                            snapshotView.layer.masksToBounds = YES;
+                            [cardView addSubview:snapshotView];
+                        }
+                    }
+
+                    UIView *scrim = [[UIView alloc] initWithFrame:cardView.bounds];
+                    scrim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                    scrim.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.06];
+                    scrim.userInteractionEnabled = NO;
+                    scrim.layer.cornerRadius = kCV3ExposeCardCornerRadius;
+                    [cardView addSubview:scrim];
+
+                    win.exposeOverlayView = cardView;
+                    UITapGestureRecognizer *winTap = [[UITapGestureRecognizer alloc] initWithTarget:win action:@selector(handleExposeSelectionTap:)];
+                    [cardView addGestureRecognizer:winTap];
+                    UIPanGestureRecognizer *winPan = [[UIPanGestureRecognizer alloc] initWithTarget:win action:@selector(handleExposeCardPan:)];
+                    [cardView addGestureRecognizer:winPan];
+                    [globalExposeContentView addSubview:cardView];
+                }
+            }
+            CV3LayoutExposeWindowsAnimated(NO);
+        } completion:nil];
+    }
+}
+
+@implementation CV3FloatingAppWindow
+- (CGFloat)angleForInterfaceOrientation:(UIInterfaceOrientation)orientation {
+    switch (orientation) {
+        case UIInterfaceOrientationLandscapeLeft:
+            return (CGFloat)(-M_PI_2);
+        case UIInterfaceOrientationLandscapeRight:
+            return (CGFloat)(M_PI_2);
+        case UIInterfaceOrientationPortraitUpsideDown:
+            return (CGFloat)M_PI;
+        case UIInterfaceOrientationPortrait:
+        default:
+            return 0.0;
+    }
+}
+
+// The single image-rotation primitive: everything else routes through it.
+- (UIImage *)imageByRotatingImage:(UIImage *)image byAngle:(CGFloat)rawDelta {
+    if (!image) return image;
+    CGFloat delta = CV3NormalizedAngleDelta(rawDelta);
+    if (fabs(delta) < 0.001) return image;
+
+    CGSize sourceSize = image.size;
+    CGRect sourceRect = CGRectMake(0, 0, sourceSize.width, sourceSize.height);
+    CGRect rotatedRect = CGRectApplyAffineTransform(sourceRect, CGAffineTransformMakeRotation(delta));
+    CGSize rotatedSize = CGSizeMake(fabs(rotatedRect.size.width), fabs(rotatedRect.size.height));
+
+    UIGraphicsBeginImageContextWithOptions(rotatedSize, NO, image.scale);
+    CGContextRef context = UIGraphicsGetCurrentContext();
+    if (!context) {
+        UIGraphicsEndImageContext();
+        return image;
+    }
+
+    CGContextTranslateCTM(context, rotatedSize.width * 0.5, rotatedSize.height * 0.5);
+    CGContextRotateCTM(context, delta);
+    [image drawInRect:CGRectMake(-sourceSize.width * 0.5, -sourceSize.height * 0.5, sourceSize.width, sourceSize.height)];
+    UIImage *rotatedImage = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return rotatedImage ?: image;
+}
+
+- (UIImage *)imageByRotatingImage:(UIImage *)image fromOrientation:(UIInterfaceOrientation)fromOrientation toOrientation:(UIInterfaceOrientation)toOrientation {
+    if (!image || fromOrientation == toOrientation) return image;
+    CGFloat delta = [self angleForInterfaceOrientation:toOrientation] - [self angleForInterfaceOrientation:fromOrientation];
+    return [self imageByRotatingImage:image byAngle:delta];
+}
+
+- (UIView *)stashAnimationSnapshotSourceView {
+    // Capture the same clipped surface the user currently sees. The hosted
+    // proxy uses the client's logical coordinate space and may remain portrait
+    // even while the floating surface is visibly landscape.
+    return self.clippingContainer ?: self.appContentWrapper ?: self.hostContainerProxy;
+}
+
+- (UIImage *)snapshotImageForRestoreAnimation {
+    UIView *view = [self stashAnimationSnapshotSourceView];
+    if (!view || CGRectIsEmpty(view.bounds)) return nil;
+
+    CGRect visibleFrame = [self convertRect:view.bounds fromView:view];
+    if (CGRectIsEmpty(visibleFrame)) return nil;
+
+    CGPoint localOrigin = view.bounds.origin;
+    CGPoint windowOrigin = [view convertPoint:localOrigin toView:self];
+    CGPoint windowX = [view convertPoint:CGPointMake(localOrigin.x + 1.0, localOrigin.y) toView:self];
+    CGPoint windowY = [view convertPoint:CGPointMake(localOrigin.x, localOrigin.y + 1.0) toView:self];
+    CGFloat a = windowX.x - windowOrigin.x;
+    CGFloat b = windowX.y - windowOrigin.y;
+    CGFloat c = windowY.x - windowOrigin.x;
+    CGFloat d = windowY.y - windowOrigin.y;
+    CGAffineTransform localToSnapshot = CGAffineTransformMake(
+        a, b, c, d,
+        windowOrigin.x - CGRectGetMinX(visibleFrame) - a * localOrigin.x - c * localOrigin.y,
+        windowOrigin.y - CGRectGetMinY(visibleFrame) - b * localOrigin.x - d * localOrigin.y);
+
+    // Draw in the window's visible coordinate space. Capturing view.bounds
+    // alone omits rootTransformContainer's physical-orientation rotation.
+    UIGraphicsBeginImageContextWithOptions(visibleFrame.size, NO, [UIScreen mainScreen].scale);
+    CGContextRef context = UIGraphicsGetCurrentContext();
+    if (context) CGContextConcatCTM(context, localToSnapshot);
+    BOOL didDraw = [view drawViewHierarchyInRect:view.bounds afterScreenUpdates:NO];
+    if (!didDraw) {
+        if (context) [view.layer renderInContext:context];
+    }
+    UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+
+    UIInterfaceOrientation orientation = CV3IsValidInterfaceOrientation(self.targetOrientation)
+        ? self.targetOrientation
+        : CV3TrustedInterfaceOrientation(self.windowScene);
+    CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=capture phase=snapshot view=%@ local_bounds=%@ visible_frame=%@ transform=%@ image=%@ content_orientation=%ld",
+                 self.stashAnimationTraceID ?: @"pending",
+                 NSStringFromClass(view.class),
+                 NSStringFromCGRect(view.bounds),
+                 NSStringFromCGRect(visibleFrame),
+                 NSStringFromCGAffineTransform(localToSnapshot),
+                 image ? NSStringFromCGSize(image.size) : @"nil",
+                 (long)orientation);
+    return image;
+}
+
+// The rotation the content ACTUALLY renders with while the window is visible.
+//
+// This is the single source of truth for snapshot orientation. It is NOT
+// baseRotationTransform: for landscape content the live tree applies
+// CV3HostedContentRotationInScene to rootTransformContainer, which differs from
+// context.transform. Recording baseRotationTransform therefore rotated the
+// snapshot by the wrong amount (the logs showed a ±180° delta where the
+// orientation implied ±90°). The stashed branch resets rootTransformContainer to
+// identity, so its live transform cannot be read either — it has to be derived.
+- (CGAffineTransform)cv3EffectiveVisibleRotation {
+    if (self.prefersLandscapePresentation &&
+        UIInterfaceOrientationIsLandscape(self.hostedContentOrientation)) {
+        return CV3HostedContentRotationInScene(self);
+    }
+    return self.baseRotationTransform;
+}
+
+- (void)updateStashedRestoreSnapshotForOrientation:(UIInterfaceOrientation)orientation {
+    if (!CV3IsValidInterfaceOrientation(orientation)) return;
+    CGAffineTransform currentRotation = [self cv3EffectiveVisibleRotation];
+    CGAffineTransform recorded = self.stashedRestoreSnapshotVisualRotation;
+    BOOL hasRecorded = !(recorded.a == 0.0 && recorded.b == 0.0 &&
+                         recorded.c == 0.0 && recorded.d == 0.0);
+
+    // Nothing captured yet: just remember the current rendered rotation.
+    if (!self.stashedRestoreSnapshotImage || !hasRecorded) {
+        self.stashedRestoreSnapshotOrientation = orientation;
+        self.stashedRestoreSnapshotVisualRotation = currentRotation;
+        CV3LogToFile(@"[SnapshotOrient] phase=seed bundle=%@ orientation=%ld current=%@ hasImage=%d",
+                     self.bundleID ?: @"nil", (long)orientation,
+                     NSStringFromCGAffineTransform(currentRotation),
+                     self.stashedRestoreSnapshotImage != nil);
+        return;
+    }
+
+    // Rotate by how much the RENDERED rotation actually changed. A shell-axis
+    // flip rotates the visible space by 90° while the orientation value itself
+    // stays the same, so keying off the orientation alone silently missed it and
+    // the restored snapshot came back sideways / upside down.
+    CGFloat delta = CV3RotationAngleOfTransform(currentRotation) -
+                    CV3RotationAngleOfTransform(recorded);
+    BOOL applied = fabs(delta) > 0.001;
+    if (applied) {
+        self.stashedRestoreSnapshotImage = [self imageByRotatingImage:self.stashedRestoreSnapshotImage
+                                                              byAngle:delta];
+    }
+    self.stashedRestoreSnapshotOrientation = orientation;
+    self.stashedRestoreSnapshotVisualRotation = currentRotation;
+    CV3LogToFile(@"[SnapshotOrient] phase=update bundle=%@ orientation=%ld deltaDeg=%.1f applied=%d recorded=%@ current=%@",
+                 self.bundleID ?: @"nil", (long)orientation,
+                 delta * 180.0 / M_PI, applied,
+                 NSStringFromCGAffineTransform(recorded),
+                 NSStringFromCGAffineTransform(currentRotation));
+}
+
+- (CGRect)interpolatedRectFrom:(CGRect)fromRect to:(CGRect)toRect progress:(CGFloat)progress {
+    CGFloat p = MIN(1.0, MAX(0.0, progress));
+    return CGRectMake(fromRect.origin.x + (toRect.origin.x - fromRect.origin.x) * p,
+                      fromRect.origin.y + (toRect.origin.y - fromRect.origin.y) * p,
+                      fromRect.size.width + (toRect.size.width - fromRect.size.width) * p,
+                      fromRect.size.height + (toRect.size.height - fromRect.size.height) * p);
+}
+
+- (CATransform3D)genieTransformWithProgress:(CGFloat)progress towardLeft:(BOOL)towardLeft presenting:(BOOL)presenting {
+    CGFloat p = MIN(1.0, MAX(0.0, progress));
+    CGFloat wave = sin((CGFloat)M_PI * p);
+    CGFloat direction = towardLeft ? -1.0 : 1.0;
+    CGFloat xScale = 1.0 - 0.10 * wave;
+    CGFloat yScale = 1.0 + 0.035 * wave;
+    CGFloat rotationY = direction * 0.10 * wave * (presenting ? -1.0 : 1.0);
+    CATransform3D transform = CATransform3DIdentity;
+    transform.m34 = -1.0 / 900.0;
+    transform = CATransform3DScale(transform, xScale, yScale, 1.0);
+    transform = CATransform3DRotate(transform, rotationY, 0, 1, 0);
+    return transform;
+}
+
+- (void)animateGenieSurfaceImage:(UIImage *)image
+                     sourceFrame:(CGRect)sourceFrame
+                       iconFrame:(CGRect)iconFrame
+                      presenting:(BOOL)presenting
+                      completion:(void (^)(void))completion {
+    if (!image || CGRectIsEmpty(sourceFrame) || CGRectIsEmpty(iconFrame)) {
+        if (completion) completion();
+        return;
+    }
+
+    NSString *direction = presenting ? @"restore" : @"minimize";
+    NSString *traceID = self.stashAnimationTraceID ?: @"unknown";
+    CFTimeInterval surfaceStartTime = CACurrentMediaTime();
+    CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=%@ phase=surface.begin source=%@ icon=%@ duration_ms=340",
+                 traceID,
+                 direction,
+                 NSStringFromCGRect(sourceFrame),
+                 NSStringFromCGRect(iconFrame));
+
+    BOOL towardLeft = CGRectGetMidX(iconFrame) < CGRectGetMidX(sourceFrame);
+    CGRect stageFrame = [self interpolatedRectFrom:sourceFrame to:iconFrame progress:0.64];
+    CGFloat stageInset = MAX(0.0, MIN(stageFrame.size.width * 0.16, fabs(sourceFrame.size.width - iconFrame.size.width) * 0.18));
+    stageFrame = CGRectInset(stageFrame, stageInset, -8.0);
+    stageFrame.size.width = MAX(iconFrame.size.width * 1.25, stageFrame.size.width);
+    stageFrame.size.height = MAX(iconFrame.size.height * 1.4, stageFrame.size.height * 0.62);
+
+    UIView *shadowSurface = [[UIView alloc] initWithFrame:presenting ? iconFrame : sourceFrame];
+    shadowSurface.backgroundColor = [UIColor clearColor];
+    shadowSurface.userInteractionEnabled = NO;
+    shadowSurface.layer.shadowColor = [UIColor blackColor].CGColor;
+    shadowSurface.layer.shadowOffset = presenting ? CGSizeMake(0, 2) : [self visualShadowLayer].shadowOffset;
+    shadowSurface.layer.shadowOpacity = presenting ? 0.0 : MIN(0.14, MAX(0.08, [self visualShadowLayer].shadowOpacity));
+    shadowSurface.layer.shadowRadius = presenting ? 3.0 : MIN(18.0, MAX(10.0, [self visualShadowLayer].shadowRadius * 0.65));
+    shadowSurface.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:shadowSurface.bounds cornerRadius:(presenting ? CV3Style.iconCornerRadius : self.clippingContainer.layer.cornerRadius)].CGPath;
+    shadowSurface.layer.allowsEdgeAntialiasing = YES;
+
+    UIImageView *imageView = [[UIImageView alloc] initWithFrame:shadowSurface.bounds];
+    imageView.image = image;
+    imageView.contentMode = UIViewContentModeScaleToFill;
+    imageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    imageView.clipsToBounds = YES;
+    imageView.layer.cornerRadius = presenting ? CV3Style.iconCornerRadius : self.clippingContainer.layer.cornerRadius;
+    imageView.layer.magnificationFilter = kCAFilterTrilinear;
+    imageView.layer.minificationFilter = kCAFilterTrilinear;
+    imageView.layer.allowsEdgeAntialiasing = YES;
+    [shadowSurface addSubview:imageView];
+    shadowSurface.alpha = presenting ? 0.0 : 1.0;
+    [self addSubview:shadowSurface];
+
+    NSTimeInterval duration = 0.34;
+    [UIView animateKeyframesWithDuration:duration
+                                   delay:0
+                                 options:UIViewKeyframeAnimationOptionCalculationModeCubic | UIViewAnimationOptionBeginFromCurrentState
+                              animations:^{
+        if (presenting) {
+            [UIView addKeyframeWithRelativeStartTime:0.0 relativeDuration:0.54 animations:^{
+                shadowSurface.frame = stageFrame;
+                shadowSurface.alpha = 0.92;
+                shadowSurface.layer.transform = [self genieTransformWithProgress:0.58 towardLeft:towardLeft presenting:YES];
+                shadowSurface.layer.shadowOpacity = 0.08;
+                shadowSurface.layer.shadowRadius = 10.0;
+                shadowSurface.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:shadowSurface.bounds cornerRadius:self.clippingContainer.layer.cornerRadius * 1.8].CGPath;
+                imageView.layer.cornerRadius = self.clippingContainer.layer.cornerRadius * 1.8;
+            }];
+            [UIView addKeyframeWithRelativeStartTime:0.34 relativeDuration:0.66 animations:^{
+                shadowSurface.frame = sourceFrame;
+                shadowSurface.alpha = 1.0;
+                shadowSurface.layer.transform = CATransform3DIdentity;
+                shadowSurface.layer.shadowOpacity = MIN(0.14, MAX(0.08, [self visualShadowLayer].shadowOpacity));
+                shadowSurface.layer.shadowRadius = MIN(18.0, MAX(10.0, [self visualShadowLayer].shadowRadius * 0.65));
+                shadowSurface.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:shadowSurface.bounds cornerRadius:self.clippingContainer.layer.cornerRadius].CGPath;
+                imageView.layer.cornerRadius = self.clippingContainer.layer.cornerRadius;
+            }];
+        } else {
+            [UIView addKeyframeWithRelativeStartTime:0.0 relativeDuration:0.52 animations:^{
+                shadowSurface.frame = stageFrame;
+                shadowSurface.alpha = 0.96;
+                shadowSurface.layer.transform = [self genieTransformWithProgress:0.58 towardLeft:towardLeft presenting:NO];
+                shadowSurface.layer.shadowOpacity = 0.08;
+                shadowSurface.layer.shadowRadius = 10.0;
+                shadowSurface.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:shadowSurface.bounds cornerRadius:self.clippingContainer.layer.cornerRadius * 1.8].CGPath;
+                imageView.layer.cornerRadius = self.clippingContainer.layer.cornerRadius * 1.8;
+            }];
+            [UIView addKeyframeWithRelativeStartTime:0.34 relativeDuration:0.54 animations:^{
+                shadowSurface.frame = iconFrame;
+                shadowSurface.alpha = 0.0;
+                shadowSurface.layer.transform = CATransform3DIdentity;
+                shadowSurface.layer.shadowOpacity = 0.0;
+                shadowSurface.layer.shadowRadius = 2.0;
+                shadowSurface.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:shadowSurface.bounds cornerRadius:CV3Style.iconCornerRadius].CGPath;
+                imageView.layer.cornerRadius = CV3Style.iconCornerRadius;
+            }];
+        }
+    } completion:^(BOOL finished) {
+        [shadowSurface removeFromSuperview];
+        CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=%@ phase=surface.completion finished=%d elapsed_ms=%.1f",
+                     traceID,
+                     direction,
+                     finished,
+                     (CACurrentMediaTime() - surfaceStartTime) * 1000.0);
+        if (completion) completion();
+    }];
+}
+
+- (UIEdgeInsets)currentSafeAreaInsets {
+    UIEdgeInsets safeArea = self.safeAreaInsets;
+    if (safeArea.top == 0 && safeArea.bottom == 0 && safeArea.left == 0 && safeArea.right == 0) {
+        UIWindow *keyWindow = nil;
+        if (@available(iOS 15.0, *)) {
+            keyWindow = self.windowScene.keyWindow;
+        } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            keyWindow = [UIApplication sharedApplication].keyWindow;
+#pragma clang diagnostic pop
+        }
+        safeArea = keyWindow ? keyWindow.safeAreaInsets : UIEdgeInsetsMake(47, 0, 34, 0);
+    }
+    return safeArea;
+}
++ (void)handleExposeBackdropTap:(UITapGestureRecognizer *)sender {
+    CV3ExitExposeModeSelectingWindow(nil, NO);
+}
+
++ (void)handleExposeBackdropPan:(UIPanGestureRecognizer *)sender {
+    if (!isGlobalExposeActive || !globalExposeBackdrop) return;
+
+    UIView *gestureView = globalExposeContentView ?: globalExposeBackdrop;
+    CGPoint translation = [sender translationInView:gestureView];
+    if (sender.state == UIGestureRecognizerStateChanged) {
+        globalExposeScrollOffset -= globalExposeIsLandscape ? translation.x : translation.y;
+        [sender setTranslation:CGPointZero inView:gestureView];
+        CV3LayoutExposeWindowsAnimated(NO);
+        CV3UpdateExposeSelectionForViewportCenter();
+    } else if (sender.state == UIGestureRecognizerStateEnded ||
+               sender.state == UIGestureRecognizerStateCancelled ||
+               sender.state == UIGestureRecognizerStateFailed) {
+        CGRect layoutBounds = globalExposeContentView ? globalExposeContentView.bounds : globalExposeBackdrop.bounds;
+        globalExposeScrollOffset = CV3ClampCGFloat(globalExposeScrollOffset,
+                                                   0.0,
+                                                   CV3ExposeMaxScrollForWindows(globalExposeWindows, layoutBounds, globalExposeIsLandscape));
+        CV3LayoutExposeWindowsAnimated(YES);
+        CV3UpdateExposeSelectionForViewportCenter();
+    }
+}
+
+- (void)handleExposeSelectionTap:(UITapGestureRecognizer *)sender {
+    if (!globalExposeWindows || sender.state != UIGestureRecognizerStateEnded) return;
+
+    NSInteger index = [globalExposeWindows indexOfObject:self];
+    if (index == NSNotFound) return;
+
+    if (index != globalExposeSelectedIndex) {
+        CV3UpdateExposeSelection(index);
+        return;
+    }
+
+    CV3ExitExposeModeSelectingWindow(self, YES);
+}
+
+- (void)handleExposeCardPan:(UIPanGestureRecognizer *)sender {
+    [CV3FloatingAppWindow handleExposeBackdropPan:sender];
+}
+
+- (void)enforcePortraitWindowGeometry {
+    if (self.isStashed || self.isClosing) return;
+
+    self.transform = CGAffineTransformIdentity;
+    CV3SceneRotationContext context = CV3MakeSceneRotationContext(self.windowScene);
+    UIInterfaceOrientation effectiveOrientation =
+        self.prefersLandscapePresentation && UIInterfaceOrientationIsLandscape(self.hostedContentOrientation)
+            ? self.hostedContentOrientation
+            : context.orientation;
+    if (!CV3IsValidInterfaceOrientation(effectiveOrientation)) {
+        effectiveOrientation = UIInterfaceOrientationPortrait;
+    }
+
+    BOOL wantsLandscape = CV3ShellShouldBeLandscape(self, effectiveOrientation);
+    BOOL shellIsLandscape = self.bounds.size.width > self.bounds.size.height;
+    if (wantsLandscape != shellIsLandscape && self.bounds.size.width > 0.0 && self.bounds.size.height > 0.0) {
+        CGSize size = self.bounds.size;
+        CGRect fitted = [self safeAreaClampedFrame:CGRectMake(0, 0, size.height, size.width)
+                                  preferredCenter:self.center preserveSize:NO];
+        self.bounds = CGRectMake(0, 0, fitted.size.width, fitted.size.height);
+        self.center = CGPointMake(CGRectGetMidX(fitted), CGRectGetMidY(fitted));
+    }
+
+    self.targetOrientation = effectiveOrientation;
+    self.baseRotationTransform = CV3RotationTransformForInterfaceOrientation(effectiveOrientation);
+    // A landscape-only client is simulated inside a portrait SpringBoard
+    // Scene. Its outer chrome already has landscape bounds, so rotating the
+    // root again would mix portrait chrome with a landscape hosted canvas.
+    self.rootTransformContainer.transform = self.prefersLandscapePresentation
+        ? CV3HostedContentRotationInScene(self)
+        : self.baseRotationTransform;
+}
+
+- (CGSize)portraitLogicalSizeForDisplayBounds:(CGRect)displayBounds widthRatio:(CGFloat)widthRatio {
+    if (CGRectIsEmpty(displayBounds)) {
+        displayBounds = CV3DisplayBoundsForWindow(self);
+    }
+
+    CGFloat shortSide = MIN(displayBounds.size.width, displayBounds.size.height);
+    CGFloat longSide = MAX(displayBounds.size.width, displayBounds.size.height);
+    CGFloat aspect = longSide / MAX(shortSide, 1.0);
+    CGFloat logicalW = shortSide * widthRatio;
+    return CGSizeMake(MAX(1.0, logicalW), MAX(1.0, logicalW * aspect));
+}
+
+- (CGSize)physicalFloatingSizeForLogicalWidth:(CGFloat)logicalWidth displayBounds:(CGRect)displayBounds orientation:(UIInterfaceOrientation)orientation {
+    if (CGRectIsEmpty(displayBounds)) {
+        displayBounds = CV3DisplayBoundsForWindow(self);
+    }
+
+    CGFloat shortSide = MIN(displayBounds.size.width, displayBounds.size.height);
+    CGFloat longSide = MAX(displayBounds.size.width, displayBounds.size.height);
+    CGFloat aspect = longSide / MAX(shortSide, 1.0);
+    CGSize logicalSize = CGSizeMake(MAX(1.0, logicalWidth), MAX(1.0, logicalWidth * aspect));
+    BOOL sceneShellLandscape = CV3ShellShouldBeLandscape(self, orientation);
+    CGSize sceneSize = sceneShellLandscape
+        ? CGSizeMake(logicalSize.height, logicalSize.width)
+        : logicalSize;
+
+    id<UICoordinateSpace> sceneSpace = self.windowScene.coordinateSpace;
+    id<UICoordinateSpace> displaySpace = self.windowScene.screen.coordinateSpace;
+    CGRect sceneRect = CGRectMake(0, 0, sceneSize.width, sceneSize.height);
+    CGRect displayRect = (sceneSpace && displaySpace)
+        ? [displaySpace convertRect:sceneRect fromCoordinateSpace:sceneSpace]
+        : sceneRect;
+    CGRect safeRect = CGRectInset([self physicalDisplaySafeRect],
+                                  CV3Style.safeAreaBreath,
+                                  CV3Style.safeAreaBreath);
+    CGFloat fitScale = MIN(1.0, MIN(safeRect.size.width / MAX(displayRect.size.width, 1.0),
+                                   safeRect.size.height / MAX(displayRect.size.height, 1.0)));
+    if (fitScale < 1.0) {
+        sceneSize.width *= fitScale;
+        sceneSize.height *= fitScale;
+    }
+
+    return CGSizeMake(MAX(1.0, sceneSize.width), MAX(1.0, sceneSize.height));
+}
+
+- (CGSize)defaultPhysicalFloatingSizeForOrientation:(UIInterfaceOrientation)orientation displayBounds:(CGRect)displayBounds {
+    CGSize logicalSize = [self portraitLogicalSizeForDisplayBounds:displayBounds widthRatio:kCV3FloatingDefaultWidthRatio];
+    return [self physicalFloatingSizeForLogicalWidth:logicalSize.width displayBounds:displayBounds orientation:orientation];
+}
+
+- (void)applyInterfaceOrientation:(UIInterfaceOrientation)orientation force:(BOOL)force {
+    if (!CV3IsValidInterfaceOrientation(orientation)) return;
+
+    CV3SceneRotationContext context = CV3MakeSceneRotationContext(self.windowScene);
+    context.orientation = orientation;
+    context.isLandscape = UIInterfaceOrientationIsLandscape(orientation);
+    context.transform = CV3RotationTransformForInterfaceOrientation(orientation);
+    [self applySceneRotationContext:context force:force];
+}
+
+- (void)applySceneRotationContext:(CV3SceneRotationContext)context force:(BOOL)force {
+    if (!CV3IsValidInterfaceOrientation(context.orientation) || self.isClosing) return;
+    [self recordOrientationTrace:@"applySceneRotationContext.begin" force:YES];
+    UIInterfaceOrientation incomingOrientation = context.orientation;
+
+    // A landscape-only client owns the initial presentation orientation. The
+    // display Scene may still report portrait while the app is being hosted;
+    // letting that value overwrite the window produces a portrait shell with
+    // a partially rotated landscape client.
+    if (!self.isStashed && self.prefersLandscapePresentation &&
+        UIInterfaceOrientationIsLandscape(self.hostedContentOrientation) &&
+        !UIInterfaceOrientationIsLandscape(context.orientation)) {
+        context.orientation = self.hostedContentOrientation;
+        context.isLandscape = YES;
+        context.transform = CV3RotationTransformForInterfaceOrientation(context.orientation);
+    }
+
+    BOOL orientationChanged = (self.lastLayoutOrientation != context.orientation);
+    BOOL rotationChanged = !CGAffineTransformEqualToTransform(self.baseRotationTransform, context.transform);
+
+    // Window-local content overrides must not become the shared display direction.
+    if (force || orientationChanged || rotationChanged) {
+        CV3LogToFile(@"[OrientationSource] bundle=%@ incoming=%ld effective=%ld trustedDisplay=%ld hosted=%ld scene=%ld localOverride=%d",
+            self.bundleID, (long)incomingOrientation, (long)context.orientation,
+            (long)CV3LastTrustedInterfaceOrientation, (long)self.hostedContentOrientation,
+            (long)self.windowScene.interfaceOrientation, incomingOrientation != context.orientation);
+    }
+    self.targetOrientation = context.orientation;
+
+    if (self.isStashed) {
+        CGPoint preferredCenter = CGRectIsEmpty(self.preStashFrame) ? self.center : CGPointMake(CGRectGetMidX(self.preStashFrame), CGRectGetMidY(self.preStashFrame));
+        CGRect preStashBeforeRotation = self.preStashFrame;
+        if (CGRectIsEmpty(self.preStashFrame)) {
+            self.preStashFrame = [self restorableFrameForOrientation:context.orientation preferredCenter:preferredCenter];
+        } else {
+            self.preStashFrame = [self safeAreaClampedFrame:self.preStashFrame preferredCenter:preferredCenter preserveSize:YES];
+        }
+        CV3TracePreStashFrameWrite(self,
+                                   [NSString stringWithFormat:@"applySceneRotationContext.stashed orient=%ld", (long)context.orientation],
+                                   preStashBeforeRotation);
+        // The rotation must be published BEFORE the snapshot is reconciled. The
+        // correction is the delta between the recorded and the CURRENT
+        // baseRotationTransform, so updating the transform afterwards left that
+        // delta at zero and the snapshot was never re-oriented.
+        self.baseRotationTransform = context.transform;
+        // rotationChanged matters as much as orientationChanged: a shell-axis
+        // flip rotates the visible space by 90° while the orientation value
+        // itself stays the same — exactly the case that used to slip through.
+        if (orientationChanged || rotationChanged ||
+            !CV3IsValidInterfaceOrientation(self.stashedRestoreSnapshotOrientation)) {
+            [self updateStashedRestoreSnapshotForOrientation:context.orientation];
+        }
+        self.lastLayoutOrientation = context.orientation;
+        self.rootTransformContainer.transform = CGAffineTransformIdentity;
+        [self normalizeStashedGrabberLayout];
+        [self recordOrientationTrace:@"applySceneRotationContext.stashed" force:YES];
+        return;
+    }
+
+    if (!force && !orientationChanged && !rotationChanged) {
+        [self recordOrientationTrace:@"applySceneRotationContext.noChange" force:NO];
+        return;
+    }
+
+    CGPoint oldCenter = self.center;
+    CGRect screenBounds = CGRectIsEmpty(context.sceneBounds) ? CV3DisplayBoundsForWindow(self) : context.sceneBounds;
+    CGSize currentSize = self.bounds.size;
+    BOOL currentLandscape = currentSize.width > currentSize.height;
+    BOOL targetLandscape = CV3ShellShouldBeLandscape(self, context.orientation);
+    // A shell that flips its axes needs the same re-centring as a plain
+    // orientation change; the window would otherwise keep its old centre.
+    BOOL shellAxisSwapped = (currentLandscape != targetLandscape);
+
+    // Same single authority as window creation and the drop preview: the stored
+    // user size (or the live/default logical size), laid out on the new shell
+    // axis, then fitted to the visible area. Rotation no longer carries its own
+    // copy of this logic, which is what let the paths drift apart.
+    CGSize fallbackLogicalSize = currentSize;
+    if (currentSize.width <= 1.0 || currentSize.height <= 1.0) {
+        fallbackLogicalSize = [self defaultPhysicalFloatingSizeForOrientation:context.orientation
+                                                                displayBounds:screenBounds];
+    }
+    CGSize rotationVisibleSize = CV3SceneVisibleSizeForScene(self.windowScene);
+    CGSize newSize = CV3ResolvedFloatingSizeForBundle(self.bundleID,
+                                                      targetLandscape,
+                                                      fallbackLogicalSize,
+                                                      rotationVisibleSize);
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.transform = CGAffineTransformIdentity;
+    self.bounds = CGRectMake(0, 0, MAX(1.0, newSize.width), MAX(1.0, newSize.height));
+    
+    self.center = oldCenter;
+
+    self.baseRotationTransform = context.transform;
+    self.rootTransformContainer.transform = self.prefersLandscapePresentation
+        ? CV3HostedContentRotationInScene(self)
+        : context.transform;
+    
+    [CATransaction commit];
+
+    self.lastLayoutOrientation = context.orientation;
+    [self syncHostedSceneLayoutForce:YES];
+    [self setNeedsLayout];
+    [self layoutIfNeeded];
+    [self clampToScreenBounds];
+    [self syncWindowBoundsToClient];
+
+    // Centre LAST, after the synchronous layout above has settled. That pass
+    // re-derives the frame from the pre-rotation centre (via
+    // physicalSafeAreaClampedFrame) and parks the window against the display
+    // edge, so a spring started before it was always overwritten. Running it now
+    // makes the new orientation's centre the final authority. shellAxisSwapped
+    // is included because the shell can flip its axes without the orientation
+    // value itself changing.
+    if (orientationChanged || shellAxisSwapped) {
+        NSInteger index = 0;
+        if (floatingWindows) {
+            index = [floatingWindows indexOfObject:self];
+            if (index == NSNotFound) index = 0;
+        }
+        CGFloat cascade = index * kCV3RotationCascadeStep;
+        CGRect centreBounds = CV3DisplayBoundsForWindow(self);
+        UIEdgeInsets safeArea = [self currentSafeAreaInsets];
+        CGFloat breath = CV3Style.safeAreaBreath;
+        CGFloat halfW = newSize.width * 0.5;
+        CGFloat halfH = newSize.height * 0.5;
+        CGPoint target = CGPointMake(CGRectGetMidX(centreBounds) + cascade,
+                                     CGRectGetMidY(centreBounds) + cascade);
+        target.x = MIN(MAX(target.x, safeArea.left + breath + halfW),
+                       MAX(safeArea.left + breath + halfW,
+                           centreBounds.size.width - safeArea.right - breath - halfW));
+        target.y = MIN(MAX(target.y, safeArea.top + breath + halfH),
+                       MAX(safeArea.top + breath + halfH,
+                           centreBounds.size.height - safeArea.bottom - breath - halfH));
+        UIWindowScene *axisScene = self.windowScene;
+        CGRect axisSceneBounds = axisScene ? axisScene.coordinateSpace.bounds : CGRectZero;
+        CGRect axisScreenBounds = axisScene.screen ? axisScene.screen.bounds : CGRectZero;
+        CGRect axisScreenSpaceBounds = axisScene.screen ? axisScene.screen.coordinateSpace.bounds : CGRectZero;
+        CV3LogToFile(@"[RotationCentre] bundle=%@ orientation=%ld swapped=%d size=%.1fx%.1f from=%@ to=%@ bounds=%@ hosted=%ld prefersLandscape=%d scenePtr=%p sceneBounds=%@ screenBounds=%@ screenSpaceBounds=%@ axesDiffer=%d targetLandscape=%d",
+                     self.bundleID ?: @"nil", (long)context.orientation, shellAxisSwapped,
+                     newSize.width, newSize.height,
+                     NSStringFromCGPoint(self.center), NSStringFromCGPoint(target),
+                     NSStringFromCGRect(centreBounds),
+                     (long)self.hostedContentOrientation, self.prefersLandscapePresentation,
+                     axisScene,
+                     NSStringFromCGRect(axisSceneBounds),
+                     NSStringFromCGRect(axisScreenBounds),
+                     NSStringFromCGRect(axisScreenSpaceBounds),
+                     CV3SceneAndDisplayAxesDifferForScene(axisScene),
+                     targetLandscape);
+        [UIView animateWithDuration:0.55
+                              delay:0
+             usingSpringWithDamping:0.48 // 果冻物理阻尼系数
+              initialSpringVelocity:0.6
+                            options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionBeginFromCurrentState
+                         animations:^{
+            self.center = target;
+        } completion:nil];
+    }
+    [self recordOrientationTrace:@"applySceneRotationContext.end" force:YES];
+}
+
+- (CGRect)restorableFrameForOrientation:(UIInterfaceOrientation)orientation preferredCenter:(CGPoint)preferredCenter {
+    CGRect screenBounds = CV3DisplayBoundsForWindow(self);
+    CGSize targetSize = [self defaultPhysicalFloatingSizeForOrientation:orientation displayBounds:screenBounds];
+
+    CGRect targetFrame = CGRectMake(preferredCenter.x - targetSize.width * 0.5,
+                                    preferredCenter.y - targetSize.height * 0.5,
+                                    targetSize.width,
+                                    targetSize.height);
+    return [self safeAreaClampedFrame:targetFrame preferredCenter:preferredCenter preserveSize:YES];
+}
+
+- (CGRect)safeAreaClampedFrame:(CGRect)frame preferredCenter:(CGPoint)preferredCenter preserveSize:(BOOL)preserveSize {
+    return [self physicalSafeAreaClampedFrame:frame
+                               preferredCenter:preferredCenter
+                                  preserveSize:preserveSize];
+}
+
+- (CGRect)restorableFramePreservingStashedSizeForOrientation:(UIInterfaceOrientation)orientation preferredCenter:(CGPoint)preferredCenter {
+    // Restore now goes through the same geometry authority as creation, the drop
+    // preview and rotation: the stored user size (laid out on the shell axis and
+    // fitted to the visible area) wins over whatever size the stashed frame
+    // happens to carry. Using the stashed frame's size made the icon round-trip
+    // reset an enlarged window.
+    BOOL shellLandscape = CV3ShellShouldBeLandscape(self, orientation);
+    CGSize fallbackLogicalSize = CGRectIsEmpty(self.preStashFrame)
+        ? (self.bounds.size.width > 1.0 ? self.bounds.size : CGSizeMake(200.0, 400.0))
+        : self.preStashFrame.size;
+    CGSize visibleSize = CV3SceneVisibleSizeForScene(self.windowScene);
+    CGSize size = CV3ResolvedFloatingSizeForBundle(self.bundleID,
+                                                   shellLandscape,
+                                                   fallbackLogicalSize,
+                                                   visibleSize);
+    CGRect frame = CGRectMake(preferredCenter.x - size.width * 0.5,
+                              preferredCenter.y - size.height * 0.5,
+                              size.width, size.height);
+    // preserveSize:YES — the size was already decided above; clamping must only
+    // move the frame, never re-fit it. Calling safeAreaClampedFrame with
+    // preserveSize:NO here would be a second, competing authority.
+    return [self safeAreaClampedFrame:frame preferredCenter:preferredCenter preserveSize:YES];
+}
+
+- (CGRect)visiblePortraitContentFrame {
+    if (self.rootTransformContainer && !CGRectIsEmpty(self.rootTransformContainer.bounds)) {
+        return self.rootTransformContainer.bounds;
+    }
+    return self.bounds;
+}
+
+- (CGRect)currentHostedSceneBounds {
+    // This proxy lives inside rootTransformContainer's upright logical coordinate
+    // space. The root container applies the physical device rotation, while the
+    // hosted Scene settings below describe the app's own content orientation.
+    id sceneSettings = self.targetScene
+        ? CV3InvokeObject(self.targetScene, @selector(settings))
+        : nil;
+    UIInterfaceOrientation hostedOrientation = CV3IsValidInterfaceOrientation(self.hostedContentOrientation)
+        ? self.hostedContentOrientation
+        : UIInterfaceOrientationPortrait;
+    CGAffineTransform localRotation = CV3HostedContentRotationInScene(self);
+    BOOL localRotationSwapsAxes = fabs(localRotation.b) > 0.5 || fabs(localRotation.c) > 0.5;
+    // When SpringBoard remains portrait but the hosted App requests landscape,
+    // FrontBoard still publishes the remote Scene in portrait reference
+    // coordinates. Preserve that complete 430x932 canvas and rotate it once in
+    // rootTransformContainer. Asking the host for 932x430 at the same time
+    // stretches only the container; the producer's valid 430-wide Surface then
+    // occupies the left half and leaves the remainder transparent.
+    // Display compensation rotates the shell, not the producer's canvas.
+    CGSize canvasSize = localRotationSwapsAxes && !CV3HostedLandscapeNeedsSceneCompensation(self)
+        ? CV3CanonicalApplicationSceneFrame(sceneSettings).size
+        : CV3HostedCanvasSizeForOrientation(hostedOrientation, sceneSettings);
+    return CGRectMake(0, 0, canvasSize.width, canvasSize.height);
+}
+
+- (BOOL)applyHostedSceneLayoutToSettings:(id)settings force:(BOOL)force {
+    if (!settings) return NO;
+
+    BOOL modified = NO;
+    UIInterfaceOrientation targetOrientation = CV3IsValidInterfaceOrientation(self.hostedContentOrientation)
+        ? self.hostedContentOrientation
+        : UIInterfaceOrientationPortrait;
+    // FBS scene frames use the display's portrait reference coordinates. The
+    // host presentation rotates this canonical canvas when the hosted App and
+    // SpringBoard Scene differ; swapping this frame itself leaves only the
+    // producer's original 430-wide content visible in a 932-wide container.
+    CGRect targetFrame = CV3CanonicalApplicationSceneFrame(settings);
+    CV3LogToFile(@"[Strict] trace=%@ phase=settingsLayout.begin force=%d targetOrientation=%ld targetFrame=%@ before={%@} resolver={%@}",
+                 self.coldLaunchTraceID, force, (long)targetOrientation,
+                 NSStringFromCGRect(targetFrame), CV3SceneSettingsFingerprint(settings),
+                 CV3OrientationResolverTrace(settings));
+
+    @try {
+        if (force ||
+            fabs(((FBSMutableSceneSettings *)settings).frame.size.width - targetFrame.size.width) > 0.1 ||
+            fabs(((FBSMutableSceneSettings *)settings).frame.size.height - targetFrame.size.height) > 0.1) {
+            if ([settings respondsToSelector:@selector(setFrame:)]) {
+                [(FBSMutableSceneSettings *)settings setFrame:targetFrame];
+                modified = YES;
+                CV3LogToFile(@"[Strict] trace=%@ phase=settingsLayout.frame.written value=%@ now={%@}",
+                             self.coldLaunchTraceID, NSStringFromCGRect(targetFrame),
+                             CV3SceneSettingsFingerprint(settings));
+            }
+        }
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Strict] trace=%@ phase=settingsLayout.frame.exception exception=%@",
+                     self.coldLaunchTraceID, e);
+    }
+
+    NSInteger orientationValue = (NSInteger)targetOrientation;
+    modified |= CV3SetIntegerSetting(settings,
+                                     @selector(interfaceOrientation),
+                                     @selector(setInterfaceOrientation:),
+                                     @"interfaceOrientation",
+                                     orientationValue,
+                                     force);
+    CV3LogToFile(@"[Strict] trace=%@ phase=settingsLayout.interfaceOrientation.applied requested=%ld modified=%d now={%@}",
+                 self.coldLaunchTraceID, (long)orientationValue, modified,
+                 CV3SceneSettingsFingerprint(settings));
+
+    UIDeviceOrientation deviceOrientation = CV3DeviceOrientationFromInterface(targetOrientation);
+    if (deviceOrientation != UIDeviceOrientationUnknown) {
+        modified |= CV3SetIntegerSetting(settings,
+                                         @selector(deviceOrientation),
+                                         @selector(setDeviceOrientation:),
+                                         @"deviceOrientation",
+                                         (NSInteger)deviceOrientation,
+                                         force);
+        CV3LogToFile(@"[Strict] trace=%@ phase=settingsLayout.deviceOrientation.applied requested=%ld modified=%d now={%@}",
+                     self.coldLaunchTraceID, (long)deviceOrientation, modified,
+                     CV3SceneSettingsFingerprint(settings));
+    }
+
+    modified |= CV3ApplyLockedOrientationTraitsToSettings(settings, targetOrientation, force);
+    CV3LogToFile(@"[Strict] trace=%@ phase=settingsLayout.traits.applied target=%ld modified=%d traits=%@ clientTraits=%@ preferredTraits=%@ effectiveTraits=%@",
+                 self.coldLaunchTraceID, (long)targetOrientation, modified,
+                 CV3SafeSettingValue(settings, @"traitCollection"),
+                 CV3SafeSettingValue(settings, @"clientTraitCollection"),
+                 CV3SafeSettingValue(settings, @"preferredTraitCollection"),
+                 CV3SafeSettingValue(settings, @"effectiveTraitCollection"));
+
+    UIInterfaceOrientation presentationOrientation = CV3HostedPresentationOrientation(self);
+    BOOL sceneBoundsMatchTarget =
+        CV3SceneSettingsBoundsMatchOrientation(settings, targetOrientation);
+    BOOL needsCrossOrientationMap =
+        CV3IsValidInterfaceOrientation(presentationOrientation) &&
+        UIInterfaceOrientationIsLandscape(presentationOrientation) !=
+            UIInterfaceOrientationIsLandscape(targetOrientation) &&
+        !sceneBoundsMatchTarget;
+    id currentOrientationResolver = CV3OrientationMapResolverFromSettings(settings);
+    if (needsCrossOrientationMap) {
+        if (!self.hasCapturedOrientationMapBaseline) {
+            self.originalOrientationMapResolver = CV3OrientationMapResolverFromSettings(settings);
+            SEL modeGetter = NSSelectorFromString(@"interfaceOrientationMode");
+            if ([settings respondsToSelector:modeGetter]) {
+                @try {
+                    self.originalInterfaceOrientationMode =
+                        ((NSInteger (*)(id, SEL))objc_msgSend)(settings, modeGetter);
+                    self.hasOriginalInterfaceOrientationMode = YES;
+                } @catch (__unused NSException *exception) {}
+            }
+            self.hasCapturedOrientationMapBaseline = YES;
+        }
+
+        BOOL mappingChanged =
+            self.mappedPresentationOrientation != presentationOrientation ||
+            self.mappedHostedOrientation != targetOrientation;
+        BOOL resolverDrifted = !CV3OrientationMapResolverMatches(
+            currentOrientationResolver, presentationOrientation, targetOrientation);
+        BOOL mappingStateChanged = !self.crossOrientationMapApplied || mappingChanged || resolverDrifted;
+        BOOL mapModified = CV3ApplyCrossOrientationMapToSettings(
+            settings, presentationOrientation, targetOrientation,
+            force || !self.crossOrientationMapApplied || mappingChanged || resolverDrifted);
+        modified |= mapModified;
+        if (mapModified || CV3OrientationMapResolverFromSettings(settings)) {
+            self.crossOrientationMapApplied = YES;
+            self.activeOrientationMapResolver = CV3OrientationMapResolverFromSettings(settings);
+            self.mappedPresentationOrientation = presentationOrientation;
+            self.mappedHostedOrientation = targetOrientation;
+        }
+        if (mapModified && mappingStateChanged && self.hostView) {
+            self.hostPresentationRepublishPending = YES;
+            CV3LogToFile(@"[HostRepublish] trace=%@ phase=marked reason=orientationMapChanged host=%p contextId=%@ presentation=%ld hosted=%ld",
+                         self.coldLaunchTraceID, self.hostView,
+                         CV3HostedLayerContextID(self.hostView.layer) ?: @"nil",
+                         (long)presentationOrientation, (long)targetOrientation);
+        }
+        CV3LogToFile(@"[Strict] trace=%@ phase=settingsLayout.orientationMap needs=1 presentation=%ld hosted=%ld modified=%d resolver={%@}",
+                     self.coldLaunchTraceID, (long)presentationOrientation,
+                     (long)targetOrientation, mapModified,
+                     CV3OrientationResolverTrace(settings));
+    } else if (self.hasCapturedOrientationMapBaseline) {
+        // Matching orientations do not establish ownership of a system resolver.
+        // Restore the captured baseline only while our mapping is still active.
+        BOOL ownsCurrentMapping = self.crossOrientationMapApplied &&
+            self.activeOrientationMapResolver &&
+            (currentOrientationResolver == self.activeOrientationMapResolver ||
+             CV3OrientationMapResolverMatches(currentOrientationResolver,
+                 self.mappedPresentationOrientation, self.mappedHostedOrientation));
+        if (ownsCurrentMapping) {
+            modified |= CV3RestoreCrossOrientationMapOnSettings(settings,
+                self.originalOrientationMapResolver, self.originalInterfaceOrientationMode,
+                self.hasOriginalInterfaceOrientationMode);
+        }
+        self.originalOrientationMapResolver = nil;
+        self.activeOrientationMapResolver = nil;
+        self.hasOriginalInterfaceOrientationMode = NO;
+        self.hasCapturedOrientationMapBaseline = NO;
+        self.crossOrientationMapApplied = NO;
+        self.mappedPresentationOrientation = UIInterfaceOrientationUnknown;
+        self.mappedHostedOrientation = UIInterfaceOrientationUnknown;
+        self.hostPresentationRepublishPending = NO;
+        CV3LogToFile(@"[Strict] trace=%@ phase=settingsLayout.orientationMap released owned=%d presentation=%ld hosted=%ld boundsMatch=%d resolver={%@}",
+                     self.coldLaunchTraceID, ownsCurrentMapping, (long)presentationOrientation,
+                     (long)targetOrientation, sceneBoundsMatchTarget,
+                     CV3OrientationResolverTrace(settings));
+    }
+
+    CV3LogToFile(@"[Strict] trace=%@ phase=settingsLayout.end modified=%d after={%@} resolver={%@}",
+                 self.coldLaunchTraceID, modified, CV3SceneSettingsFingerprint(settings),
+                 CV3OrientationResolverTrace(settings));
+
+    return modified;
+}
+
+static NSString *CV3VideoLayerValue(id object, NSString *key) {
+    if (!object || key.length == 0) return @"nil";
+    @try {
+        id value = [object valueForKey:key];
+        return value ? [value description] : @"nil";
+    } @catch (__unused NSException *exception) {
+        return @"n/a";
+    }
+}
+
+static void CV3CollectVideoFullscreenLayers(CALayer *layer,
+                                            NSString *path,
+                                            NSUInteger depth,
+                                            NSMutableArray<NSString *> *entries) {
+    if (!layer || depth > 12 || entries.count >= 64) return;
+
+    CALayer *presentation = layer.presentationLayer;
+    id contents = nil;
+    @try { contents = layer.contents; } @catch (__unused NSException *exception) {}
+    [entries addObject:[NSString stringWithFormat:
+        @"%@:%@ frame=%@ bounds=%@ position=%@ anchor=%@ presFrame=%@ presBounds=%@ affine=%@ hidden=%d opacity=%.2f masks=%d gravity=%@ contentsRect=%@ contentsScale=%.3f context=%@ contextAlt=%@ hostedLayer=%@ remoteLayer=%@ contents=%@:%p children=%lu",
+        path,
+        NSStringFromClass(layer.class),
+        NSStringFromCGRect(layer.frame),
+        NSStringFromCGRect(layer.bounds),
+        NSStringFromCGPoint(layer.position),
+        NSStringFromCGPoint(layer.anchorPoint),
+        presentation ? NSStringFromCGRect(presentation.frame) : @"nil",
+        presentation ? NSStringFromCGRect(presentation.bounds) : @"nil",
+        NSStringFromCGAffineTransform(layer.affineTransform),
+        layer.hidden,
+        layer.opacity,
+        layer.masksToBounds,
+        layer.contentsGravity ?: @"nil",
+        NSStringFromCGRect(layer.contentsRect),
+        layer.contentsScale,
+        CV3VideoLayerValue(layer, @"contextId"),
+        CV3VideoLayerValue(layer, @"_contextId"),
+        CV3VideoLayerValue(layer, @"hostedLayer"),
+        CV3VideoLayerValue(layer, @"remoteLayer"),
+        contents ? NSStringFromClass([contents class]) : @"nil",
+        contents,
+        (unsigned long)layer.sublayers.count]];
+
+    NSUInteger index = 0;
+    for (CALayer *child in layer.sublayers ?: @[]) {
+        CV3CollectVideoFullscreenLayers(child,
+                                        [path stringByAppendingFormat:@".%lu", (unsigned long)index++],
+                                        depth + 1,
+                                        entries);
+    }
+}
+
+static NSString *CV3SceneLayerManagerAudit(FBScene *scene) {
+    if (!scene) return @"scene=nil";
+    id manager = CV3InvokeObject(scene, @selector(layerManager));
+    if (!manager) manager = CV3SafeSettingValue(scene, @"_layerManager");
+    id rawLayers = CV3InvokeObject(manager, @selector(layers));
+    NSArray *layers = [rawLayers isKindOfClass:NSArray.class]
+        ? rawLayers
+        : ([rawLayers respondsToSelector:@selector(array)] ? [rawLayers array] : nil);
+    NSMutableArray<NSString *> *entries = [NSMutableArray array];
+    NSUInteger index = 0;
+    for (id layer in layers ?: @[]) {
+        NSMutableArray<NSString *> *values = [NSMutableArray array];
+        for (NSString *key in @[@"identifier", @"level", @"role", @"contextID", @"contextId",
+                                @"interfaceOrientation", @"orientation", @"frame", @"bounds",
+                                @"externalSceneID", @"keyboardLayer", @"isKeyboardLayer"]) {
+            [values addObject:[NSString stringWithFormat:@"%@=%@", key,
+                               CV3VideoLayerValue(layer, key)]];
+        }
+        [entries addObject:[NSString stringWithFormat:@"%lu:%@{%@}",
+                            (unsigned long)index++, NSStringFromClass([layer class]),
+                            [values componentsJoinedByString:@";"]]];
+    }
+    return [NSString stringWithFormat:@"manager=%@:%p layers=%lu [%@]",
+            manager ? NSStringFromClass([manager class]) : @"nil", manager,
+            (unsigned long)layers.count, [entries componentsJoinedByString:@" | "]];
+}
+
+static NSUInteger CV3SynchronizeHostedContextLayerGeometry(CALayer *layer,
+                                                            NSUInteger depth) {
+    if (!layer || depth > 12) return 0;
+
+    NSUInteger updated = 0;
+    for (CALayer *child in layer.sublayers ?: @[]) {
+        if ([NSStringFromClass(child.class) isEqualToString:@"CALayerHost"]) {
+            CGRect expectedFrame = child.superlayer.bounds;
+            if (!CGRectEqualToRect(child.frame, expectedFrame) ||
+                !CGSizeEqualToSize(child.bounds.size, expectedFrame.size)) {
+                child.frame = expectedFrame;
+                child.bounds = CGRectMake(0, 0,
+                                          CGRectGetWidth(expectedFrame),
+                                          CGRectGetHeight(expectedFrame));
+                updated++;
+            }
+        }
+        updated += CV3SynchronizeHostedContextLayerGeometry(child, depth + 1);
+    }
+    return updated;
+}
+
+- (void)synchronizeHostedContextLayerGeometry {
+    [self recordStrictSplitTrace:@"layerGeometrySync.entry" details:nil];
+    if (!self.hostView || self.isClosing || self.isStashed) {
+        [self recordStrictSplitTrace:@"layerGeometrySync.rejected" details:nil];
+        return;
+    }
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    NSUInteger updated = CV3SynchronizeHostedContextLayerGeometry(self.hostView.layer, 0);
+    [CATransaction commit];
+    if (updated > 0) {
+        [self.hostView.layer setNeedsLayout];
+    }
+    [self recordStrictSplitTrace:@"layerGeometrySync.exit"
+                         details:[NSString stringWithFormat:@"updatedLayerHosts=%lu", (unsigned long)updated]];
+}
+
+- (void)recordVideoFullscreenTrace:(NSString *)phase requestedOrientation:(UIInterfaceOrientation)orientation {
+    id settings = self.targetScene ? CV3InvokeObject(self.targetScene, @selector(settings)) : nil;
+    CGRect settingsFrame = CGRectZero;
+    @try {
+        if ([settings respondsToSelector:@selector(frame)]) {
+            settingsFrame = ((FBSMutableSceneSettings *)settings).frame;
+        }
+    } @catch (__unused NSException *exception) {}
+    NSInteger settingsOrientation = CV3InvokeInteger(settings,
+                                                      @selector(interfaceOrientation),
+                                                      NSIntegerMin);
+    NSInteger contentState = CV3InvokeInteger(self.targetScene,
+                                              @selector(contentState),
+                                              NSIntegerMin);
+    CALayer *hostLayer = self.hostView.layer;
+    CALayer *presentation = hostLayer.presentationLayer;
+    NSMutableArray<NSString *> *hostLayers = [NSMutableArray array];
+    CV3CollectVideoFullscreenLayers(hostLayer, @"host", 0, hostLayers);
+    CV3LogVideoFullscreen(@"[DEBUG-VIDEOFULLSCREEN] phase=%@ bundle=%@ requested=%ld target=%ld hosted=%ld client=%ld display=%ld physical=%ld scene=%ld axesDiffer=%d sceneBounds=%@ screenBounds=%@ prefersLandscape=%d requiresLandscape=%d stashed=%d windowFrame=%@ windowBounds=%@ rootBounds=%@ rootTransform=%@ wrapper=%@ clip=%@ proxy=%@ hostFrame=%@ hostBounds=%@ hostAttached=%d hostChildren=%lu layerFrame=%@ layerBounds=%@ presentationFrame=%@ settingsFrame=%@ settingsOrientation=%ld contentState=%ld hostLayers=[%@]",
+                          phase ?: @"unknown",
+                          self.bundleID ?: @"unknown",
+                          (long)orientation,
+                          (long)self.targetOrientation,
+                          (long)self.hostedContentOrientation,
+                          (long)CV3HostedClientOrientation(self),
+                          (long)CV3TrustedInterfaceOrientation(self.windowScene),
+                          (long)CV3LastPhysicalDeviceInterfaceOrientation,
+                          (long)self.windowScene.interfaceOrientation,
+                          CV3SceneAndDisplayAxesDiffer(self),
+                          NSStringFromCGRect(self.windowScene.coordinateSpace.bounds),
+                          NSStringFromCGRect(self.windowScene.screen.bounds),
+                          self.prefersLandscapePresentation,
+                          self.requiresLandscapeContent,
+                          self.isStashed,
+                          NSStringFromCGRect(self.frame),
+                          NSStringFromCGRect(self.bounds),
+                          NSStringFromCGRect(self.rootTransformContainer.bounds),
+                          NSStringFromCGAffineTransform(self.rootTransformContainer.transform),
+                          NSStringFromCGRect(self.appContentWrapper.frame),
+                          NSStringFromCGRect(self.clippingContainer.frame),
+                          NSStringFromCGRect(self.hostContainerProxy.frame),
+                          NSStringFromCGRect(self.hostView.frame),
+                          NSStringFromCGRect(self.hostView.bounds),
+                          self.hostView.superview == self.hostContainerProxy,
+                          (unsigned long)(self.hostView.subviews.count + self.hostView.layer.sublayers.count),
+                          NSStringFromCGRect(hostLayer.frame),
+                          NSStringFromCGRect(hostLayer.bounds),
+                          presentation ? NSStringFromCGRect(presentation.frame) : @"nil",
+                          NSStringFromCGRect(settingsFrame),
+                          (long)settingsOrientation,
+                          (long)contentState,
+                          [hostLayers componentsJoinedByString:@" | "]);
+}
+
+static NSString *CV3OrientationAxisNameForValue(UIInterfaceOrientation orientation) {
+    if (UIInterfaceOrientationIsLandscape(orientation)) return @"landscape";
+    if (UIInterfaceOrientationIsPortrait(orientation)) return @"portrait";
+    return @"unknown";
+}
+
+static NSString *CV3OrientationAxisNameForSize(CGSize size) {
+    if (size.width > size.height + 0.5) return @"landscape";
+    if (size.height > size.width + 0.5) return @"portrait";
+    return @"square";
+}
+
+static NSString *CV3OrientationResolverTrace(id settings) {
+    if (!settings) return @"settings=nil";
+
+    id resolver = nil;
+    NSInteger mode = NSIntegerMin;
+    @try {
+        SEL resolverGetter = NSSelectorFromString(@"interfaceOrientationMapResolver");
+        if ([settings respondsToSelector:resolverGetter]) {
+            resolver = ((id (*)(id, SEL))objc_msgSend)(settings, resolverGetter);
+        }
+        SEL modeGetter = NSSelectorFromString(@"interfaceOrientationMode");
+        if ([settings respondsToSelector:modeGetter]) {
+            mode = ((NSInteger (*)(id, SEL))objc_msgSend)(settings, modeGetter);
+        }
+    } @catch (__unused NSException *exception) {}
+
+    NSMutableArray<NSString *> *values = [NSMutableArray arrayWithObjects:
+        [NSString stringWithFormat:@"mode=%ld", (long)mode],
+        [NSString stringWithFormat:@"resolverClass=%@", resolver ? NSStringFromClass([resolver class]) : @"nil"],
+        nil];
+    for (NSString *key in @[@"targetOrientation", @"currentOrientation",
+                             @"sourceOrientation", @"interfaceOrientation"]) {
+        @try {
+            id value = [resolver valueForKey:key];
+            if (value) [values addObject:[NSString stringWithFormat:@"%@=%@", key, value]];
+        } @catch (__unused NSException *exception) {}
+    }
+    if (resolver) {
+        @try {
+            [values addObject:[NSString stringWithFormat:@"resolver=%@", resolver]];
+        } @catch (__unused NSException *exception) {}
+    }
+    return [values componentsJoinedByString:@" "];
+}
+
+- (void)recordSplitWindowOrientationTrace:(NSString *)phase
+                     requestedOrientation:(UIInterfaceOrientation)orientation
+                                   source:(NSString *)source {
+    id settings = self.targetScene ? CV3InvokeObject(self.targetScene, @selector(settings)) : nil;
+    UIInterfaceOrientation settingsOrientation = (UIInterfaceOrientation)CV3InvokeInteger(
+        settings, @selector(interfaceOrientation), UIInterfaceOrientationUnknown);
+    UIInterfaceOrientation sceneOrientation = self.windowScene
+        ? CV3TrustedInterfaceOrientation(self.windowScene)
+        : UIInterfaceOrientationUnknown;
+    NSString *requestedAxis = CV3OrientationAxisNameForValue(orientation);
+    NSString *windowAxis = CV3OrientationAxisNameForSize(self.bounds.size);
+    NSString *wrapperAxis = CV3OrientationAxisNameForSize(self.appContentWrapper.bounds.size);
+    NSString *hostAxis = CV3OrientationAxisNameForSize(self.hostView.bounds.size);
+    BOOL requestedWindowMismatch = ![requestedAxis isEqualToString:@"unknown"] &&
+        ![windowAxis isEqualToString:@"square"] &&
+        ![requestedAxis isEqualToString:windowAxis];
+    BOOL hostedWindowMismatch = CV3IsValidInterfaceOrientation(self.hostedContentOrientation) &&
+        ![CV3OrientationAxisNameForValue(self.hostedContentOrientation) isEqualToString:windowAxis];
+    BOOL settingsWindowMismatch = CV3IsValidInterfaceOrientation(settingsOrientation) &&
+        ![CV3OrientationAxisNameForValue(settingsOrientation) isEqualToString:windowAxis];
+    NSUInteger layerHostCount = 0;
+    NSMutableArray<CALayer *> *pending = [NSMutableArray array];
+    if (self.hostView.layer) [pending addObject:self.hostView.layer];
+    while (pending.count > 0) {
+        CALayer *layer = pending.lastObject;
+        [pending removeLastObject];
+        if ([NSStringFromClass(layer.class) isEqualToString:@"CALayerHost"]) layerHostCount++;
+        if (layer.sublayers.count > 0) [pending addObjectsFromArray:layer.sublayers];
+    }
+    CV3LogWindowOrientation(@"[WindowOrientationTrace] phase=%@ bundle=%@ source=%@ requested=%ld requestedAxis=%@ target=%ld hosted=%ld settings=%ld scene=%ld windowAxis=%@ wrapperAxis=%@ hostAxis=%@ window=%@ wrapper=%@ host=%@ mismatch.requestedWindow=%d mismatch.hostedWindow=%d mismatch.settingsWindow=%d layerHosts=%lu stashed=%d closing=%d orientationResolver={%@}",
+                            phase ?: @"unknown", self.bundleID ?: @"unknown", source ?: @"unknown",
+                            (long)orientation, requestedAxis, (long)self.targetOrientation,
+                            (long)self.hostedContentOrientation, (long)settingsOrientation,
+                            (long)sceneOrientation, windowAxis, wrapperAxis, hostAxis,
+                            NSStringFromCGSize(self.bounds.size),
+                            NSStringFromCGSize(self.appContentWrapper.bounds.size),
+                            NSStringFromCGSize(self.hostView.bounds.size),
+                            requestedWindowMismatch, hostedWindowMismatch, settingsWindowMismatch,
+                            (unsigned long)layerHostCount, self.isStashed, self.isClosing,
+                            CV3OrientationResolverTrace(settings));
+}
+
+- (void)recordStrictSplitTrace:(NSString *)phase details:(NSString *)details {
+    id settings = self.targetScene ? CV3InvokeObject(self.targetScene, @selector(settings)) : nil;
+    id clientSettings = self.targetScene
+        ? CV3InvokeObject(self.targetScene, NSSelectorFromString(@"clientSettings"))
+        : nil;
+    NSMutableArray<NSString *> *layers = [NSMutableArray array];
+    CV3CollectVideoFullscreenLayers(self.hostView.layer, @"host", 0, layers);
+    CGRect sceneBounds = self.windowScene ? self.windowScene.coordinateSpace.bounds : CGRectZero;
+    CGRect screenBounds = self.windowScene.screen ? self.windowScene.screen.bounds : UIScreen.mainScreen.bounds;
+    UIInterfaceOrientation sceneOrientation = self.windowScene
+        ? self.windowScene.interfaceOrientation
+        : UIInterfaceOrientationUnknown;
+    CGAffineTransform calculatedRotation = CV3HostedContentRotationInScene(self);
+    CGRect calculatedCanvas = [self currentHostedSceneBounds];
+    BOOL presentationContext = self.hostView &&
+        CV3InvokeObject(self.hostView, NSSelectorFromString(@"presentationContext")) != nil;
+    CV3LogToFile(@"[Strict] trace=%@ phase=%@ details={%@} bundle=%@ generation=%lu lifecycle=%@ "
+                 "flags={closing=%d stashed=%d moving=%d liveResize=%d awaitingFirst=%d focused=%d "
+                 "prefersLandscape=%d requiresLandscape=%d} orientations={scene=%ld target=%ld hosted=%ld "
+                 "lastLayout=%ld device=%ld} spaces={scene=%@ screen=%@ calculatedCanvas=%@ calculatedRotation=%@} "
+                 "settings={%@ resolver={%@}} clientSettings={%@} contentState=%ld sceneValid=%d "
+                 "views={window:%@ root:%@ wrapper:%@ clip:%@ proxy:%@ host:%@} "
+                 "hosting={attached=%d presentationContext=%d requester=%@ childViews=%lu childLayers=%lu} layers=[%@]",
+                 self.coldLaunchTraceID ?: @"unassigned", phase ?: @"unknown", details ?: @"none",
+                 self.bundleID ?: @"nil", (unsigned long)self.sceneHostGeneration,
+                 CV3HostLifecycleStateName(self.hostLifecycleState), self.isClosing, self.isStashed,
+                 self.isMovingWindow, self.isLiveResizing, self.awaitingInitialRenderableContent,
+                 self.isFocused, self.prefersLandscapePresentation, self.requiresLandscapeContent,
+                 (long)sceneOrientation, (long)self.targetOrientation,
+                 (long)self.hostedContentOrientation, (long)self.lastLayoutOrientation,
+                 (long)UIDevice.currentDevice.orientation, NSStringFromCGRect(sceneBounds),
+                 NSStringFromCGRect(screenBounds), NSStringFromCGRect(calculatedCanvas),
+                 NSStringFromCGAffineTransform(calculatedRotation), CV3SceneSettingsFingerprint(settings),
+                 CV3OrientationResolverTrace(settings), CV3SceneSettingsFingerprint(clientSettings),
+                 (long)CV3InvokeInteger(self.targetScene, @selector(contentState), NSIntegerMin),
+                 self.targetScene ? CV3InvokeBool(self.targetScene, @selector(isValid), YES) : NO,
+                 CV3DirectionTraceView(self), CV3DirectionTraceView(self.rootTransformContainer),
+                 CV3DirectionTraceView(self.appContentWrapper), CV3DirectionTraceView(self.clippingContainer),
+                 CV3DirectionTraceView(self.hostContainerProxy), CV3DirectionTraceView(self.hostView),
+                 self.hostView.superview == self.hostContainerProxy, presentationContext,
+                 self.sceneHostingRequester ?: @"nil", (unsigned long)self.hostView.subviews.count,
+                 (unsigned long)self.hostView.layer.sublayers.count,
+                 [layers componentsJoinedByString:@" | "]);
+}
+
+- (void)recordProducerGeometryTrace:(NSString *)phase {
+    id settings = self.targetScene ? CV3InvokeObject(self.targetScene, @selector(settings)) : nil;
+    id clientSettings = self.targetScene
+        ? CV3InvokeObject(self.targetScene, NSSelectorFromString(@"clientSettings"))
+        : nil;
+    NSMutableArray<NSString *> *layers = [NSMutableArray array];
+    CV3CollectVideoFullscreenLayers(self.hostView.layer, @"host", 0, layers);
+    CV3LogToFile(@"[ProducerGeometry] trace=%@ phase=%@ generation=%lu target=%@ "
+                 "sceneOrientation=%ld targetOrientation=%ld hostedOrientation=%ld clientAck=%ld "
+                 "sceneBounds=%@ screenBounds=%@ settings={%@} clientSettings={%@} "
+                 "window={%@} root={%@} wrapper={%@} clip={%@} proxy={%@} host={%@} layers=[%@]",
+                 self.coldLaunchTraceID ?: @"unassigned", phase ?: @"unknown",
+                 (unsigned long)self.sceneHostGeneration,
+                 CV3DiagnosticObjectFingerprint(self.targetScene),
+                 (long)(self.windowScene ? self.windowScene.interfaceOrientation : UIInterfaceOrientationUnknown),
+                 (long)self.targetOrientation, (long)self.hostedContentOrientation,
+                 (long)self.clientAcknowledgedOrientation,
+                 NSStringFromCGRect(self.windowScene ? self.windowScene.coordinateSpace.bounds : CGRectZero),
+                 NSStringFromCGRect(self.windowScene.screen ? self.windowScene.screen.bounds : UIScreen.mainScreen.bounds),
+                 CV3DiagnosticObjectFingerprint(settings),
+                 CV3DiagnosticObjectFingerprint(clientSettings),
+                 CV3DirectionTraceView(self), CV3DirectionTraceView(self.rootTransformContainer),
+                 CV3DirectionTraceView(self.appContentWrapper), CV3DirectionTraceView(self.clippingContainer),
+                 CV3DirectionTraceView(self.hostContainerProxy), CV3DirectionTraceView(self.hostView),
+                 [layers componentsJoinedByString:@" | "]);
+}
+
+- (void)recordViewportConstraintAudit:(NSString *)phase force:(BOOL)force {
+    if (self.isClosing) return;
+    CGRect display = CV3DisplayBoundsForWindow(self);
+    UIEdgeInsets insets = [self currentSafeAreaInsets];
+    CGFloat breath = CV3Style.safeAreaBreath;
+    // Use the same coordinate limits as safeAreaClampedFrame/clampToScreenBounds.
+    CGRect allowed = CGRectMake(insets.left + breath, insets.top + breath,
+        display.size.width - insets.left - insets.right - 2.0 * breath,
+        display.size.height - insets.top - insets.bottom - 2.0 * breath);
+    CALayer *presentation = self.layer.presentationLayer;
+    CGRect model = self.frame;
+    CGRect presented = presentation ? presentation.frame : model;
+    BOOL valid = isfinite(allowed.size.width) && isfinite(allowed.size.height) &&
+        allowed.size.width > 0 && allowed.size.height > 0 &&
+        isfinite(model.origin.x) && isfinite(model.origin.y) &&
+        isfinite(model.size.width) && isfinite(model.size.height) &&
+        isfinite(presented.origin.x) && isfinite(presented.origin.y) &&
+        isfinite(presented.size.width) && isfinite(presented.size.height);
+    CGFloat tolerance = 1.0 / MAX(1.0, self.screen.scale);
+    CGFloat widthOver = MAX(0.0, model.size.width - allowed.size.width);
+    CGFloat heightOver = MAX(0.0, model.size.height - allowed.size.height);
+    CGFloat presentedWidthOver = MAX(0.0, presented.size.width - allowed.size.width);
+    CGFloat presentedHeightOver = MAX(0.0, presented.size.height - allowed.size.height);
+    UIEdgeInsets overflow = UIEdgeInsetsMake(
+        MAX(0.0, CGRectGetMinY(allowed) - CGRectGetMinY(model)),
+        MAX(0.0, CGRectGetMinX(allowed) - CGRectGetMinX(model)),
+        MAX(0.0, CGRectGetMaxY(model) - CGRectGetMaxY(allowed)),
+        MAX(0.0, CGRectGetMaxX(model) - CGRectGetMaxX(allowed)));
+    BOOL sizeExceeded = widthOver > tolerance || heightOver > tolerance;
+    BOOL presentedSizeExceeded = presentedWidthOver > tolerance || presentedHeightOver > tolerance;
+    BOOL positionExceeded = MAX(MAX(overflow.top, overflow.bottom), MAX(overflow.left, overflow.right)) > tolerance;
+    NSString *verdict = self.isStashed ? @"notApplicable.stashed" : !valid ? @"invalidGeometry" :
+        (sizeExceeded || presentedSizeExceeded || positionExceeded) ? @"exceeded" : @"within";
+    NSString *signature = [NSString stringWithFormat:@"%@ model=%@ presented=%@ allowed=%@ moving=%d resizing=%d",
+        verdict, NSStringFromCGRect(model), NSStringFromCGRect(presented), NSStringFromCGRect(allowed),
+        self.isMovingWindow, self.isLiveResizing];
+    CFTimeInterval now = CACurrentMediaTime();
+    BOOL changed = ![signature isEqualToString:self.lastViewportConstraintSignature];
+    if (!force && !changed && now - self.lastViewportConstraintLogTime < 5.0) return;
+    self.lastViewportConstraintSignature = signature;
+    self.lastViewportConstraintLogTime = now;
+    CV3LogToFile(@"[ViewportConstraint] phase=%@ event=%@ bundle=%@ verdict=%@ valid=%d applicable=%d units=pt tolerance=%.3f display=%@ safeArea=%@ breath=%.3f allowed=%@ model=%@ presentation=%@ presentationAvailable=%d sizeExceeded=%d widthOver=%.3f heightOver=%.3f presentationSizeExceeded=%d presentationWidthOver=%.3f presentationHeightOver=%.3f positionExceeded=%d overflowTLBR=%@ moving=%d resizing=%d fullscreen=%d compact=%d target=%ld",
+        phase, changed ? @"change" : @"heartbeat", self.bundleID, verdict, valid, !self.isStashed,
+        tolerance, NSStringFromCGRect(display), NSStringFromUIEdgeInsets(insets), breath,
+        NSStringFromCGRect(allowed), NSStringFromCGRect(model), NSStringFromCGRect(presented), presentation != nil,
+        sizeExceeded, widthOver, heightOver, presentedSizeExceeded, presentedWidthOver, presentedHeightOver,
+        positionExceeded, NSStringFromUIEdgeInsets(overflow), self.isMovingWindow, self.isLiveResizing,
+        self.isFullscreenMode, self.isCompactMode, (long)self.targetOrientation);
+}
+
+- (void)recordSurfaceOrientationAudit:(NSString *)phase force:(BOOL)force {
+    [self recordViewportConstraintAudit:phase force:force];
+    if (self.isClosing) return;
+    id settings = CV3InvokeObject(self.targetScene, @selector(settings));
+    id clientSettings = CV3InvokeObject(self.targetScene, NSSelectorFromString(@"clientSettings"));
+    UIInterfaceOrientation sceneOrientation = self.windowScene
+        ? self.windowScene.interfaceOrientation : UIInterfaceOrientationUnknown;
+    UIInterfaceOrientation settingsOrientation = (UIInterfaceOrientation)CV3InvokeInteger(
+        settings, @selector(interfaceOrientation), UIInterfaceOrientationUnknown);
+    UIInterfaceOrientation clientOrientation = (UIInterfaceOrientation)CV3InvokeInteger(
+        clientSettings, @selector(interfaceOrientation), UIInterfaceOrientationUnknown);
+    CGAffineTransform decision = CV3HostedContentRotationInScene(self);
+    NSString *sceneAxis = CV3OrientationAxisNameForValue(sceneOrientation);
+    NSString *settingsAxis = CV3OrientationAxisNameForValue(settingsOrientation);
+    NSString *clientAxis = CV3OrientationAxisNameForValue(clientOrientation);
+    NSString *shellAxis = CV3OrientationAxisNameForSize(self.bounds.size);
+    NSString *hostAxis = CV3OrientationAxisNameForSize(self.hostView.bounds.size);
+    CALayer *hostLayer = self.hostView.layer;
+    CALayer *hostPresentation = hostLayer.presentationLayer;
+    NSString *modelAxis = CV3OrientationAxisNameForSize(hostLayer.bounds.size);
+    NSString *presentationAxis = CV3OrientationAxisNameForSize(
+        hostPresentation ? hostPresentation.bounds.size : CGSizeZero);
+    NSString *contextID = CV3HostedLayerContextID(hostLayer) ?: @"nil";
+    id hostManagerPublic = CV3InvokeObject(self.targetScene, @selector(hostManager));
+    id hostManagerPrivate = CV3SafeSettingValue(self.targetScene, @"_hostManager");
+    BOOL crossAxis = ![sceneAxis isEqualToString:@"unknown"] &&
+        ![clientAxis isEqualToString:@"unknown"] && ![sceneAxis isEqualToString:clientAxis];
+    BOOL identityDecision = CGAffineTransformIsIdentity(decision);
+    BOOL pixelOrientationUnverified = crossAxis && identityDecision;
+
+    NSString *signature = [NSString stringWithFormat:
+        @"bundle=%@ orientations={scene=%ld settings=%ld client=%ld target=%ld hosted=%ld ack=%ld mappedPresentation=%ld mappedHosted=%ld} "
+         "axes={scene=%@ settings=%@ client=%@ shell=%@ host=%@ model=%@ presentation=%@} "
+         "rotation={decision=%@ root=%@ proxy=%@ host=%@} "
+         "surface={contextId=%@ host=%p hostClass=%@ hostSubviews=%lu hostSublayers=%lu modelBounds=%@ presentationBounds=%@} "
+         "mapping={applied=%d resolver={%@}} manager={public=%@:%p private=%@:%p requester=%@ pendingRequester=%@} "
+         "verdict={crossAxis=%d identityDecision=%d pixelOrientationUnverified=%d} sceneLayers={%@}",
+        self.bundleID ?: @"nil", (long)sceneOrientation, (long)settingsOrientation,
+        (long)clientOrientation, (long)self.targetOrientation,
+        (long)self.hostedContentOrientation, (long)self.clientAcknowledgedOrientation,
+        (long)self.mappedPresentationOrientation, (long)self.mappedHostedOrientation,
+        sceneAxis, settingsAxis, clientAxis, shellAxis, hostAxis, modelAxis,
+        presentationAxis, NSStringFromCGAffineTransform(decision),
+        NSStringFromCGAffineTransform(self.rootTransformContainer.transform),
+        NSStringFromCGAffineTransform(self.hostContainerProxy.transform),
+        NSStringFromCGAffineTransform(self.hostView.transform), contextID, self.hostView,
+        self.hostView ? NSStringFromClass(self.hostView.class) : @"nil",
+        (unsigned long)self.hostView.subviews.count,
+        (unsigned long)self.hostView.layer.sublayers.count,
+        NSStringFromCGRect(hostLayer.bounds),
+        hostPresentation ? NSStringFromCGRect(hostPresentation.bounds) : @"nil",
+        self.crossOrientationMapApplied, CV3OrientationResolverTrace(settings),
+        hostManagerPublic ? NSStringFromClass([hostManagerPublic class]) : @"nil", hostManagerPublic,
+        hostManagerPrivate ? NSStringFromClass([hostManagerPrivate class]) : @"nil", hostManagerPrivate,
+        self.sceneHostingRequester ?: @"nil", self.pendingRepublishedRequester ?: @"nil",
+        crossAxis, identityDecision, pixelOrientationUnverified,
+        CV3SceneLayerManagerAudit(self.targetScene)];
+
+    CFTimeInterval now = CACurrentMediaTime();
+    BOOL changed = ![signature isEqualToString:self.lastSurfaceOrientationAuditSignature];
+    BOOL heartbeatDue = now - self.lastSurfaceOrientationAuditTime >= 1.0;
+    if (!force && !changed && !heartbeatDue) return;
+    self.lastSurfaceOrientationAuditSignature = signature;
+    self.lastSurfaceOrientationAuditTime = now;
+    CV3LogToFile(@"[SurfaceOrientationAudit] event=%@ phase=%@ %@",
+                 changed ? @"change" : @"heartbeat", phase ?: @"unknown", signature);
+}
+
+- (void)applyHostedContentOrientation:(UIInterfaceOrientation)orientation source:(uint8_t)source {
+    CFTimeInterval orientationStart = CACurrentMediaTime();
+    UIInterfaceOrientation previousHostedOrientation = self.hostedContentOrientation;
+    [self recordSurfaceOrientationAudit:@"orientation.request.before" force:YES];
+    [self recordStrictSplitTrace:@"orientation.request.received"
+                         details:[NSString stringWithFormat:@"requested=%ld source=%@ sourceCode=%u mode=signalSynchronized",
+                                  (long)orientation, CV3VideoOrientationSourceName(source), source]];
+    [self recordVideoFullscreenTrace:@"applyHosted.entry" requestedOrientation:orientation];
+    if (!CV3IsValidInterfaceOrientation(orientation) || self.isClosing) {
+        [self recordStrictSplitTrace:@"orientation.request.rejected.invalidOrClosing"
+                             details:[NSString stringWithFormat:@"requested=%ld", (long)orientation]];
+        [self recordVideoFullscreenTrace:@"applyHosted.rejected.invalidOrClosing" requestedOrientation:orientation];
+        return;
+    }
+    if (self.requiresLandscapeContent && !UIInterfaceOrientationIsLandscape(orientation)) {
+        [self recordStrictSplitTrace:@"orientation.request.rejected.landscapeOnly"
+                             details:[NSString stringWithFormat:@"requested=%ld", (long)orientation]];
+        [self recordVideoFullscreenTrace:@"applyHosted.rejected.landscapeOnly" requestedOrientation:orientation];
+        return;
+    }
+    UIInterfaceOrientation liveClientOrientation = CV3HostedClientOrientation(self);
+    BOOL sourceIsAuthoritative = source == 1 || source == 5;
+    BOOL staleLandscapeReassert = !sourceIsAuthoritative &&
+        UIInterfaceOrientationIsLandscape(previousHostedOrientation) &&
+        UIInterfaceOrientationIsLandscape(orientation) &&
+        UIInterfaceOrientationIsPortrait(liveClientOrientation);
+    if (staleLandscapeReassert) {
+        [self recordStrictSplitTrace:@"orientation.request.staleLandscapeRemapped"
+                             details:[NSString stringWithFormat:@"received=%ld effective=%ld liveClient=%ld",
+                                      (long)orientation, (long)liveClientOrientation,
+                                      (long)liveClientOrientation]];
+        CV3LogToFile(@"[OrientationShellPolicy] phase=staleLandscapeRemapped bundle=%@ received=%ld effective=%ld liveClient=%ld",
+                     self.bundleID ?: @"nil", (long)orientation,
+                     (long)liveClientOrientation, (long)liveClientOrientation);
+        orientation = liveClientOrientation;
+    }
+    BOOL liveClientMatchesRequest =
+        CV3IsValidInterfaceOrientation(liveClientOrientation) &&
+        liveClientOrientation == orientation;
+    if (self.hostedContentOrientation == orientation && liveClientMatchesRequest) {
+        [self recordStrictSplitTrace:@"orientation.request.shortCircuit.sameOrientation"
+                             details:[NSString stringWithFormat:@"requested=%ld", (long)orientation]];
+        [self recordVideoFullscreenTrace:@"applyHosted.shortCircuit.sameOrientation" requestedOrientation:orientation];
+        return;
+    }
+
+    CV3LogToFile(@"[OrientationShellPolicy] bundle=%@ from=%ld to=%ld liveClient=%ld clientConfirmed=%d source=%@ sourceCode=%u mode=signalSynchronized",
+                 self.bundleID ?: @"nil", (long)previousHostedOrientation,
+                 (long)orientation, (long)liveClientOrientation,
+                 liveClientMatchesRequest, CV3VideoOrientationSourceName(source), source);
+
+    BOOL repairingClientDrift = self.hostedContentOrientation == orientation &&
+        CV3IsValidInterfaceOrientation(liveClientOrientation) &&
+        !liveClientMatchesRequest;
+    if (repairingClientDrift) {
+        [self recordStrictSplitTrace:@"orientation.request.repair.clientDrift"
+                             details:[NSString stringWithFormat:@"requested=%ld liveClient=%ld cachedAck=%ld",
+                                      (long)orientation, (long)liveClientOrientation,
+                                      (long)self.clientAcknowledgedOrientation]];
+        CV3LogToFile(@"[OrientationRepair] phase=requestRepair bundle=%@ requested=%ld liveClient=%ld cachedAck=%ld",
+                     self.bundleID ?: @"nil", (long)orientation,
+                     (long)liveClientOrientation, (long)self.clientAcknowledgedOrientation);
+    }
+
+    if (!self.isStashed && !self.requiresLandscapeContent &&
+        UIInterfaceOrientationIsLandscape(orientation) &&
+        UIInterfaceOrientationIsPortrait(self.hostedContentOrientation) &&
+        self.bounds.size.width > 0 && self.bounds.size.height > self.bounds.size.width &&
+        CGRectIsEmpty(self.preHostedLandscapePortraitFrame)) {
+        CGSize size = self.bounds.size;
+        self.preHostedLandscapePortraitFrame = CGRectMake(self.center.x - size.width * 0.5,
+            self.center.y - size.height * 0.5, size.width, size.height);
+        CV3LogToFile(@"[PortraitWindowRestore] phase=saved bundle=%@ frame=%@",
+                     self.bundleID, NSStringFromCGRect(self.preHostedLandscapePortraitFrame));
+    }
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    [self recordStrictSplitTrace:@"orientation.state.beforeMutation"
+                         details:[NSString stringWithFormat:@"requested=%ld", (long)orientation]];
+    [self recordProducerGeometryTrace:@"orientation.beforeMutation"];
+    self.clientAcknowledgedOrientation = UIInterfaceOrientationUnknown;
+    self.hostedContentOrientation = orientation;
+    self.prefersLandscapePresentation = UIInterfaceOrientationIsLandscape(orientation);
+    self.targetOrientation = orientation;
+    self.lastLayoutOrientation = orientation;
+    [self recordStrictSplitTrace:@"orientation.state.afterMutation"
+                         details:[NSString stringWithFormat:@"requested=%ld", (long)orientation]];
+    [self recordProducerGeometryTrace:@"orientation.afterMutation"];
+    [self syncHostedSceneLayoutForce:YES];
+    [self recordStrictSplitTrace:@"orientation.afterSceneSync" details:[NSString stringWithFormat:@"elapsedMs=%.3f", (CACurrentMediaTime() - orientationStart) * 1000.0]];
+    [self recordProducerGeometryTrace:@"orientation.afterSceneSync"];
+    [self refreshHostViewPresentation];
+    [self recordStrictSplitTrace:@"orientation.afterPresentationRefresh" details:[NSString stringWithFormat:@"elapsedMs=%.3f", (CACurrentMediaTime() - orientationStart) * 1000.0]];
+    [self recordProducerGeometryTrace:@"orientation.afterPresentationRefresh"];
+    CGRect portraitRestoreFrame = CGRectZero;
+    if (!self.isStashed && UIInterfaceOrientationIsPortrait(orientation) &&
+        !CV3ShellShouldBeLandscape(self, orientation) &&
+        !CGRectIsEmpty(self.preHostedLandscapePortraitFrame)) {
+        CGRect saved = self.preHostedLandscapePortraitFrame;
+        portraitRestoreFrame = [self safeAreaClampedFrame:saved
+                                       preferredCenter:CGPointMake(CGRectGetMidX(saved), CGRectGetMidY(saved))
+                                          preserveSize:NO];
+        self.preHostedLandscapePortraitFrame = CGRectZero;
+        CV3LogToFile(@"[PortraitWindowRestore] phase=restored bundle=%@ saved=%@ fitted=%@",
+                     self.bundleID, NSStringFromCGRect(saved), NSStringFromCGRect(portraitRestoreFrame));
+    }
+    [self setNeedsLayout];
+    [self recordStrictSplitTrace:@"orientation.afterSetNeedsLayout" details:nil];
+    void (^applyShellGeometry)(void) = ^{
+        if (!CGRectIsEmpty(portraitRestoreFrame)) {
+            self.bounds = CGRectMake(0, 0,
+                                     portraitRestoreFrame.size.width,
+                                     portraitRestoreFrame.size.height);
+            self.center = CGPointMake(CGRectGetMidX(portraitRestoreFrame),
+                                      CGRectGetMidY(portraitRestoreFrame));
+        }
+        [self layoutIfNeeded];
+    };
+    [self recordStrictSplitTrace:@"orientation.shellGeometry.signalSynchronized"
+                         details:[NSString stringWithFormat:@"from=%ld to=%ld source=%@",
+                                  (long)previousHostedOrientation, (long)orientation,
+                                  CV3VideoOrientationSourceName(source)]];
+    applyShellGeometry();
+    [self recordStrictSplitTrace:@"orientation.afterLayoutIfNeeded" details:[NSString stringWithFormat:@"elapsedMs=%.3f", (CACurrentMediaTime() - orientationStart) * 1000.0]];
+    [self recordProducerGeometryTrace:@"orientation.afterLayoutIfNeeded"];
+    [self synchronizeHostedContextLayerGeometry];
+    [self syncWindowShadowForCurrentState];
+    [CATransaction commit];
+    [self recordStrictSplitTrace:@"orientation.afterLayerGeometrySync" details:nil];
+    // Home bar placement belongs to the logical content container. Re-run it
+    // after the scene orientation transaction, otherwise the bar keeps the
+    // pre-hosting portrait edge while the shell is already landscape.
+    [self layoutFloatingHomeBarForBounds:self.appContentWrapper.bounds];
+    [self recordStrictSplitTrace:@"orientation.request.completed"
+                         details:[NSString stringWithFormat:@"requested=%ld", (long)orientation]];
+    [self recordSurfaceOrientationAudit:@"orientation.request.completed" force:YES];
+    [self recordVideoFullscreenTrace:@"applyHosted.completed" requestedOrientation:orientation];
+    CV3LogToFile(@"[VideoBridge] 已更新托管内容方向=%ld: %@", (long)orientation, self.bundleID);
+}
+
+- (BOOL)syncHostedSceneLayoutForce:(BOOL)force {
+    [self recordStrictSplitTrace:@"sceneSync.entry"
+                         details:[NSString stringWithFormat:@"force=%d", force]];
+    if (!self.targetScene || self.isClosing || self.isStashed) {
+        [self recordStrictSplitTrace:@"sceneSync.rejected.lifecycle"
+                             details:[NSString stringWithFormat:@"force=%d", force]];
+        return NO;
+    }
+    if (!force && (self.isMovingWindow || CACurrentMediaTime() < self.moveSceneSyncSuppressedUntil)) {
+        [self recordStrictSplitTrace:@"sceneSync.rejected.movementGate" details:nil];
+        return NO;
+    }
+
+    BOOL didUpdate = NO;
+    @try {
+        FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
+        CV3LogToFile(@"[Strict] trace=%@ phase=sceneSync.mutable.before force=%d fingerprint={%@}",
+                     self.coldLaunchTraceID, force, CV3SceneSettingsFingerprint(settings));
+        didUpdate = [self applyForegroundSovereigntyToSettings:settings clearDeactivation:YES forceLayout:force];
+        CV3LogToFile(@"[Strict] trace=%@ phase=sceneSync.mutable.afterApply didUpdate=%d fingerprint={%@}",
+                     self.coldLaunchTraceID, didUpdate, CV3SceneSettingsFingerprint(settings));
+        if (didUpdate) {
+            [self recordStrictSplitTrace:@"sceneSync.commit.begin"
+                                 details:[NSString stringWithFormat:@"force=%d outgoing={%@}", force, CV3SceneSettingsFingerprint(settings)]];
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            [self.targetScene updateSettings:settings withTransitionContext:nil];
+            [CATransaction commit];
+            [self recordStrictSplitTrace:@"sceneSync.commit.returned" details:nil];
+            [self beginHostPresentationRepublishIfNeeded:@"sceneSync.commit"];
+            CV3LogToFile(@"[Layout] 已同步托管 Scene 方向=%ld frame=%@", (long)self.targetOrientation, NSStringFromCGRect(((FBSMutableSceneSettings *)settings).frame));
+        }
+    } @catch (NSException *e) {
+        [self recordStrictSplitTrace:@"sceneSync.exception" details:e.description];
+        CV3LogToFile(@"[Error] syncHostedSceneLayoutForce 异常: %@", e);
+    }
+
+    [self recordStrictSplitTrace:@"sceneSync.exit"
+                         details:[NSString stringWithFormat:@"didUpdate=%d", didUpdate]];
+    return didUpdate;
+}
+
+- (BOOL)applyForegroundSovereigntyToSettings:(id)settings clearDeactivation:(BOOL)clearDeactivation forceLayout:(BOOL)forceLayout {
+    if (!settings) return NO;
+
+    BOOL modified = NO;
+    modified |= CV3SetBoolSettingIfNeeded(settings, @selector(setForeground:), @"foreground", YES);
+    modified |= CV3SetBoolSettingIfNeeded(settings, @selector(setBackgrounded:), @"backgrounded", NO);
+    modified |= CV3SetBoolSettingIfNeeded(settings, NSSelectorFromString(@"setOccluded:"), @"occluded", NO);
+    modified |= CV3SetIntegerSettingIfNeeded(settings, NSSelectorFromString(@"setVisibility:"), @"visibility", 2);
+    // Preserve the hosted app's idle-timer policy. Forcing this scene setting to
+    // YES can outlive the floating window and prevent system events that wait
+    // for a normal backlight-dim transition, including automatic appearance.
+    modified |= CV3SetIntegerSettingIfNeeded(settings,
+                                             @selector(setInterruptionPolicy:),
+                                             @"interruptionPolicy",
+                                             1);
+
+    if (clearDeactivation) {
+        modified |= CV3SetIntegerSettingIfNeeded(settings,
+                                                 @selector(setDeactivationReasons:),
+                                                 @"deactivationReasons",
+                                                 0);
+    }
+
+    modified |= [self applyHostedSceneLayoutToSettings:settings force:forceLayout];
+    return modified;
+}
+
+- (void)stabilizeForegroundForWorkspaceTransition:(NSString *)reason {
+    if (!self.targetScene || self.isClosing || self.isStashed) return;
+
+    NSTimeInterval now = CACurrentMediaTime();
+    if (now - self.lastForegroundSceneRepairAt < 2.5) {
+        return;
+    }
+    self.lastForegroundSceneRepairAt = now;
+
+    @try {
+        FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
+        BOOL modified = [self applyForegroundSovereigntyToSettings:settings clearDeactivation:YES forceLayout:NO];
+        if (modified) {
+            [self.targetScene updateSettings:settings withTransitionContext:nil];
+            CV3LogToFile(@"[Continuity] 已稳定分屏前台状态(%@): %@", reason ?: @"Unknown", self.bundleID);
+            CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=SceneForegroundRepaired bundle=%@ reason=%@",
+                         self.bundleID, reason ?: @"Unknown");
+        }
+
+        if ([self.targetScene respondsToSelector:@selector(_setContentState:)]) {
+            [self.targetScene _setContentState:2];
+        }
+
+        if (self.sceneHostingRequester.length > 0) {
+            id hostManager = CV3InvokeObject(self.targetScene, @selector(hostManager));
+            SEL orderFrontSelector = @selector(enableHostingForRequester:orderFront:);
+            if (CV3TargetRespondsToSelector(hostManager, orderFrontSelector)) {
+                ((void (*)(id, SEL, id, BOOL))objc_msgSend)(hostManager,
+                                                            orderFrontSelector,
+                                                            self.sceneHostingRequester,
+                                                            YES);
+            }
+        }
+
+        self.hostView.hidden = NO;
+        self.hostView.alpha = 1.0;
+        if (!self.rbsAssertion) {
+            [self updateSovereigntyAssertion];
+        }
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Error] stabilizeForegroundForWorkspaceTransition 异常: %@", e);
+    }
+}
+
+- (void)createFloatingHomeBarIfNeeded {
+    if (self.homeBarView) return;
+
+    UIView *bar = [[UIView alloc] initWithFrame:CGRectZero];
+    bar.userInteractionEnabled = YES;
+    bar.backgroundColor = [UIColor clearColor];
+    bar.layer.shadowColor = [UIColor blackColor].CGColor;
+    bar.layer.shadowOffset = CGSizeMake(0, 6);
+    bar.layer.shadowOpacity = 0.16;
+    bar.layer.shadowRadius = 14.0;
+
+    UIVisualEffectView *blurView = [[UIVisualEffectView alloc] initWithEffect:nil];
+    // 系统 chrome 材质退场：控制条玻璃改由公用 Liquid Glass 底提供（layoutFloatingHomeBarForBounds 内安装）
+    blurView.userInteractionEnabled = NO;
+    blurView.clipsToBounds = YES;
+    if (@available(iOS 13.0, *)) {
+        blurView.layer.cornerCurve = kCACornerCurveContinuous;
+    }
+    [bar addSubview:blurView];
+
+    // Apple Design: 经典 iOS 内嵌指示胶囊条 (Home Capsule Pill)
+    UIView *pill = [[UIView alloc] initWithFrame:CGRectZero];
+    pill.backgroundColor = [[UIColor labelColor] colorWithAlphaComponent:0.65];
+    pill.userInteractionEnabled = NO;
+    pill.layer.cornerRadius = 2.25;
+    if (@available(iOS 13.0, *)) {
+        pill.layer.cornerCurve = kCACornerCurveContinuous;
+    }
+    [blurView.contentView addSubview:pill];
+
+    CAGradientLayer *glow = [CAGradientLayer layer];
+    glow.startPoint = CGPointMake(0.0, 0.5);
+    glow.endPoint = CGPointMake(1.0, 0.5);
+    if (@available(iOS 13.0, *)) {
+        glow.cornerCurve = kCACornerCurveContinuous;
+    }
+    [bar.layer insertSublayer:glow atIndex:0];
+
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleHomeBarTap:)];
+    UILongPressGestureRecognizer *move = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleMoveLongPress:)];
+    move.minimumPressDuration = 0.22;
+    move.allowableMovement = 24.0;
+    move.delegate = self;
+    UIPanGestureRecognizer *resizePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleHomeBarResizePan:)];
+    resizePan.delegate = self;
+
+    [tap requireGestureRecognizerToFail:move];
+    [tap requireGestureRecognizerToFail:resizePan];
+    [bar addGestureRecognizer:tap];
+    [bar addGestureRecognizer:move];
+    [bar addGestureRecognizer:resizePan];
+
+    self.homeBarView = bar;
+    self.homeBarBlurView = blurView;
+    self.homeBarGlowLayer = glow;
+    self.homeBarPillIndicator = pill;
+    self.homeBarPlacement = 0;
+    UIView *homeBarContainer = self.appContentWrapper ?: self;
+    [homeBarContainer addSubview:self.homeBarView];
+    [self updateFloatingHomeBarAppearance];
+    CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=created bundle=%@ alpha=%.3f focused=%d stashed=%d frame=%@",
+                            self.bundleID, self.homeBarView.alpha, self.isFocused,
+                            self.isStashed, NSStringFromCGRect(self.homeBarView.frame));
+    [self scheduleFloatingHomeBarAutoHide];
+}
+
+- (NSInteger)preferredHomeBarPlacementForScreenFrame:(CGRect)frame {
+    UIEdgeInsets safeArea = [self currentSafeAreaInsets];
+    CGRect screenBounds = CV3DisplayBoundsForWindow(self);
+
+    // Once the floating window becomes key, its safeAreaInsets describe the
+    // small hosted window rather than the display. Use the largest peer window
+    // in the same scene as the display-level safe-area reference.
+    UIWindow *displayWindow = nil;
+    CGFloat largestWindowArea = 0.0;
+    for (UIWindow *candidate in self.windowScene.windows) {
+        if (candidate == self || candidate.hidden) continue;
+        CGFloat area = CGRectGetWidth(candidate.bounds) * CGRectGetHeight(candidate.bounds);
+        if (area > largestWindowArea) {
+            largestWindowArea = area;
+            displayWindow = candidate;
+        }
+    }
+    if (displayWindow) {
+        UIEdgeInsets displayInsets = displayWindow.safeAreaInsets;
+        if (displayInsets.top > 0.0 || displayInsets.bottom > 0.0 ||
+            displayInsets.left > 0.0 || displayInsets.right > 0.0) {
+            safeArea = displayInsets;
+        }
+    }
+
+    NSInteger bestScreenPlacement = 0;
+    CGFloat clearances[4] = {
+        MAX(0.0, screenBounds.size.height - safeArea.bottom - CGRectGetMaxY(frame)),
+        MAX(0.0, CGRectGetMinY(frame) - safeArea.top),
+        MAX(0.0, screenBounds.size.width - safeArea.right - CGRectGetMaxX(frame)),
+        MAX(0.0, CGRectGetMinX(frame) - safeArea.left)
+    };
+    CGFloat largestClearance = clearances[0];
+    for (NSInteger i = 1; i < 4; i++) {
+        if (clearances[i] > largestClearance) {
+            largestClearance = clearances[i];
+            bestScreenPlacement = i;
+        }
+    }
+
+    // Map the selected display edge through the actual view transform. An
+    // independently landscape app does not imply that its chrome is rotated.
+    UIView *container = self.appContentWrapper ?: self;
+    CGRect localBounds = container.bounds;
+    CGPoint localCenter = CGPointMake(CGRectGetMidX(localBounds), CGRectGetMidY(localBounds));
+    CGPoint centerInWindow = [container convertPoint:localCenter toView:self];
+    CGPoint edges[4] = {
+        CGPointMake(localCenter.x, CGRectGetMaxY(localBounds)),
+        CGPointMake(localCenter.x, CGRectGetMinY(localBounds)),
+        CGPointMake(CGRectGetMaxX(localBounds), localCenter.y),
+        CGPointMake(CGRectGetMinX(localBounds), localCenter.y)
+    };
+    CGPoint directions[4] = {CGPointMake(0, 1), CGPointMake(0, -1), CGPointMake(1, 0), CGPointMake(-1, 0)};
+    CGFloat bestScore = -CGFLOAT_MAX;
+    NSInteger localPlacement = bestScreenPlacement;
+    for (NSInteger i = 0; i < 4; i++) {
+        CGPoint edge = [container convertPoint:edges[i] toView:self];
+        CGFloat dx = edge.x - centerInWindow.x;
+        CGFloat dy = edge.y - centerInWindow.y;
+        CGFloat length = hypot(dx, dy);
+        if (length < 0.01) continue;
+        CGFloat score = (dx * directions[bestScreenPlacement].x + dy * directions[bestScreenPlacement].y) / length;
+        if (score > bestScore) {
+            bestScore = score;
+            localPlacement = i;
+        }
+    }
+    return localPlacement;
+}
+
+- (UIInterfaceOrientation)effectiveResizeOrientation {
+    if (CV3IsValidInterfaceOrientation(self.hostedContentOrientation)) {
+        return self.hostedContentOrientation;
+    }
+    if (CV3IsValidInterfaceOrientation(self.targetOrientation)) {
+        return self.targetOrientation;
+    }
+    return CV3TrustedInterfaceOrientation(self.windowScene);
+}
+
+- (CGRect)orientedDisplayBoundsForCurrentOrientation {
+    CGRect screenBounds = CV3DisplayBoundsForWindow(self);
+    CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
+    CGFloat longSide = MAX(screenBounds.size.width, screenBounds.size.height);
+    UIInterfaceOrientation orientation = [self effectiveResizeOrientation];
+
+    CGSize orientedSize = UIInterfaceOrientationIsLandscape(orientation)
+        ? CGSizeMake(longSide, shortSide)
+        : CGSizeMake(shortSide, longSide);
+    return CGRectMake(0, 0, orientedSize.width, orientedSize.height);
+}
+
+- (CGRect)physicalDisplaySafeRect {
+    UIScreen *screen = self.windowScene.screen ?: self.screen ?: [UIScreen mainScreen];
+    id<UICoordinateSpace> displaySpace = screen.coordinateSpace;
+    CGRect displayBounds = displaySpace.bounds;
+    CGRect bestSafeRect = CGRectZero;
+    CGFloat bestSafeArea = CGFLOAT_MAX;
+
+    // The floating window can remain in a portrait Scene while the display is
+    // physically landscape. Read the safe region from a full-display system
+    // window whose Scene follows the physical display, then convert it into the
+    // display coordinate space. Never reuse the floating window's own insets.
+    for (UIScene *connectedScene in [UIApplication sharedApplication].connectedScenes) {
+        if (![connectedScene isKindOfClass:[UIWindowScene class]]) continue;
+        UIWindowScene *scene = (UIWindowScene *)connectedScene;
+        if (scene.screen != screen) continue;
+        CGRect sceneBounds = scene.coordinateSpace.bounds;
+        if (CGRectIsEmpty(sceneBounds) ||
+            fabs(sceneBounds.size.width - displayBounds.size.width) > 1.0 ||
+            fabs(sceneBounds.size.height - displayBounds.size.height) > 1.0) continue;
+
+        for (UIWindow *candidate in scene.windows) {
+            if (candidate == self || [candidate isKindOfClass:[CV3FloatingAppWindow class]] ||
+                candidate.hidden || candidate.alpha < 0.01) continue;
+            UIEdgeInsets insets = candidate.safeAreaInsets;
+            if (insets.top <= 0.0 && insets.bottom <= 0.0 &&
+                insets.left <= 0.0 && insets.right <= 0.0) continue;
+
+            CGRect candidateDisplayFrame = [displaySpace convertRect:candidate.bounds fromCoordinateSpace:candidate];
+            CGRect coverage = CGRectIntersection(displayBounds, candidateDisplayFrame);
+            CGFloat displayArea = CGRectGetWidth(displayBounds) * CGRectGetHeight(displayBounds);
+            CGFloat coverageArea = CGRectGetWidth(coverage) * CGRectGetHeight(coverage);
+            if (displayArea <= 0.0 || coverageArea / displayArea < 0.80) continue;
+
+            CGRect localSafeRect = UIEdgeInsetsInsetRect(candidate.bounds, insets);
+            CGRect displaySafeRect = [displaySpace convertRect:localSafeRect fromCoordinateSpace:candidate];
+            displaySafeRect = CGRectIntersection(displayBounds, displaySafeRect);
+            CGFloat safeArea = CGRectGetWidth(displaySafeRect) * CGRectGetHeight(displaySafeRect);
+            if (!CGRectIsEmpty(displaySafeRect) && safeArea < bestSafeArea) {
+                bestSafeRect = displaySafeRect;
+                bestSafeArea = safeArea;
+            }
+        }
+    }
+
+    if (!CGRectIsEmpty(bestSafeRect)) return bestSafeRect;
+
+    // Conservative fallback for the brief interval where SpringBoard has
+    // rotated the display but has not yet published a matching system window.
+    UIEdgeInsets portraitInsets = [self currentSafeAreaInsets];
+    if (CGRectGetWidth(displayBounds) > CGRectGetHeight(displayBounds)) {
+        CGFloat protectedSide = MAX(47.0, MAX(portraitInsets.top, portraitInsets.bottom));
+        CGFloat protectedBottom = MAX(21.0, MIN(portraitInsets.top, portraitInsets.bottom));
+        return UIEdgeInsetsInsetRect(displayBounds,
+                                     UIEdgeInsetsMake(0.0, protectedSide,
+                                                      protectedBottom, protectedSide));
+    }
+    if (portraitInsets.top <= 0.0 && portraitInsets.bottom <= 0.0) {
+        portraitInsets = UIEdgeInsetsMake(47.0, 0.0, 34.0, 0.0);
+    }
+    return UIEdgeInsetsInsetRect(displayBounds, portraitInsets);
+}
+
+- (CGRect)physicalSafeAreaClampedFrame:(CGRect)frame
+                       preferredCenter:(CGPoint)preferredCenter
+                          preserveSize:(BOOL)preserveSize {
+    UIScreen *screen = self.windowScene.screen ?: self.screen ?: [UIScreen mainScreen];
+    id<UICoordinateSpace> displaySpace = screen.coordinateSpace;
+    id<UICoordinateSpace> sceneSpace = self.windowScene.coordinateSpace ?: displaySpace;
+    CGRect safeRect = [self physicalDisplaySafeRect];
+    CGFloat breath = CV3Style.safeAreaBreath;
+    safeRect = CGRectInset(safeRect, breath, breath);
+    if (safeRect.size.width < 1.0 || safeRect.size.height < 1.0) {
+        safeRect = displaySpace.bounds;
+    }
+
+    CGSize targetSize = frame.size;
+    targetSize.width = MAX(1.0, targetSize.width);
+    targetSize.height = MAX(1.0, targetSize.height);
+    CGRect sceneFrame = CGRectMake(preferredCenter.x - targetSize.width * 0.5,
+                                   preferredCenter.y - targetSize.height * 0.5,
+                                   targetSize.width, targetSize.height);
+    CGRect displayFrame = [displaySpace convertRect:sceneFrame fromCoordinateSpace:sceneSpace];
+
+    if (!preserveSize && displayFrame.size.width > 0.0 && displayFrame.size.height > 0.0) {
+        CGFloat scale = MIN(1.0, MIN(safeRect.size.width / displayFrame.size.width,
+                                     safeRect.size.height / displayFrame.size.height));
+        if (scale > 0.0 && scale < 1.0) {
+            targetSize.width *= scale;
+            targetSize.height *= scale;
+            sceneFrame = CGRectMake(preferredCenter.x - targetSize.width * 0.5,
+                                    preferredCenter.y - targetSize.height * 0.5,
+                                    targetSize.width, targetSize.height);
+            displayFrame = [displaySpace convertRect:sceneFrame fromCoordinateSpace:sceneSpace];
+        }
+    }
+    CGFloat maxX = CGRectGetMaxX(safeRect) - displayFrame.size.width;
+    CGFloat maxY = CGRectGetMaxY(safeRect) - displayFrame.size.height;
+    if (maxX < CGRectGetMinX(safeRect)) maxX = CGRectGetMinX(safeRect);
+    if (maxY < CGRectGetMinY(safeRect)) maxY = CGRectGetMinY(safeRect);
+    displayFrame.origin.x = MIN(MAX(displayFrame.origin.x, CGRectGetMinX(safeRect)), maxX);
+    displayFrame.origin.y = MIN(MAX(displayFrame.origin.y, CGRectGetMinY(safeRect)), maxY);
+
+    CGPoint clampedDisplayCenter = CGPointMake(CGRectGetMidX(displayFrame), CGRectGetMidY(displayFrame));
+    CGPoint clampedSceneCenter = [sceneSpace convertPoint:clampedDisplayCenter fromCoordinateSpace:displaySpace];
+    CV3LogToFile(@"[PhysicalSafeArea] bundle=%@ displayBounds=%@ safeRect=%@ sceneBounds=%@ requestedFrame=%@ displayFrame=%@ finalSceneCenter=%@ preserveSize=%d",
+                 self.bundleID ?: @"<nil>", NSStringFromCGRect(displaySpace.bounds),
+                 NSStringFromCGRect(safeRect), NSStringFromCGRect(sceneSpace.bounds),
+                 NSStringFromCGRect(frame), NSStringFromCGRect(displayFrame),
+                 NSStringFromCGPoint(clampedSceneCenter), preserveSize);
+    return CGRectMake(clampedSceneCenter.x - targetSize.width * 0.5,
+                      clampedSceneCenter.y - targetSize.height * 0.5,
+                      targetSize.width, targetSize.height);
+}
+
+- (void)resizeLimitsForAspect:(CGFloat)aspect minWidth:(CGFloat *)minWidth maxWidth:(CGFloat *)maxWidth {
+    CGRect screenBounds = self.windowScene.screen.coordinateSpace.bounds;
+    CGRect safeRect = CGRectInset([self physicalDisplaySafeRect],
+                                  CV3Style.safeAreaBreath,
+                                  CV3Style.safeAreaBreath);
+    CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
+    CGFloat visibleWidth = MAX(1.0, safeRect.size.width);
+    CGFloat visibleHeight = MAX(1.0, safeRect.size.height);
+    CGFloat minW = shortSide * 0.4;
+    UIInterfaceOrientation orientation = [self effectiveResizeOrientation];
+
+    // logicalWidth is the short edge of the portrait-shaped logical canvas.
+    // In landscape physicalFloatingSizeForLogicalWidth: swaps the axes, so the
+    // logical limit must be derived from {visibleWidth / aspect, visibleHeight}.
+    // The old shortSide * 0.75 cap survived that swap and kept a landscape
+    // video window constrained to the portrait scale even with ample width.
+    CGFloat normalizedAspect = MAX(aspect, 1.0);
+    CGFloat maxW = UIInterfaceOrientationIsLandscape(orientation)
+        ? MIN(visibleHeight, visibleWidth / normalizedAspect)
+        : MIN(visibleWidth, visibleHeight / normalizedAspect);
+    if (maxW < minW) minW = maxW;
+
+    if (minWidth) *minWidth = MAX(1.0, minW);
+    if (maxWidth) *maxWidth = MAX(1.0, maxW);
+}
+
+- (CGRect)constrainedFloatingFrameForSize:(CGSize)size preferredCenter:(CGPoint)center {
+    CGRect frame = CGRectMake(center.x - size.width * 0.5,
+                              center.y - size.height * 0.5,
+                              size.width, size.height);
+    return [self physicalSafeAreaClampedFrame:frame
+                               preferredCenter:center
+                                  preserveSize:NO];
+}
+
+- (void)startHomeBarResizeSessionIfNeeded {
+    if (self.isLiveResizing) return;
+
+
+    self.isLiveResizing = YES;
+    [self visualShadowLayer].shadowPath = nil;
+    [self startLiquidMotion];
+    [UIView animateWithDuration:0.2 animations:^{
+        [self visualShadowLayer].shadowOpacity = CV3Style.shadowOpacityUnfocused * 0.5;
+        self.glassBackdrop.effect = nil;
+        self.glassBackdrop.backgroundColor = [UIColor clearColor];
+    }];
+
+    if (self.hostView) {
+        self.liveResizeSnapshotView = [self.hostView snapshotViewAfterScreenUpdates:NO];
+        if (self.liveResizeSnapshotView) {
+            self.liveResizeSnapshotView.frame = self.hostContainerProxy.bounds;
+            self.liveResizeSnapshotView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            [self.hostContainerProxy addSubview:self.liveResizeSnapshotView];
+            self.hostView.alpha = 0;
+        }
+    }
+
+    if (self.targetScene) {
+        @try {
+            FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
+            if ([settings respondsToSelector:@selector(setInLiveResize:)]) {
+                [(UIMutableApplicationSceneSettings *)settings setInLiveResize:YES];
+                [self.targetScene updateSettings:settings withTransitionContext:nil];
+            }
+        } @catch (NSException *e) {
+            CV3LogToFile(@"[Critical] Failed to set home bar live resize state: %@", e);
+        }
+    }
+}
+
+- (void)updateFloatingHomeBarAppearance {
+    if (!self.homeBarView || !self.homeBarBlurView) return;
+
+    CGFloat alpha = self.isFocused ? 1.0 : 0.84;
+    self.homeBarView.alpha = (self.isStashed || self.isClosing || self.homeBarAutoHidden) ? 0.0 : alpha;
+
+    self.homeBarView.layer.shadowOpacity = self.isFocused ? 0.18 : 0.10;
+    self.homeBarView.layer.shadowRadius = self.isFocused ? 16.0 : 10.0;
+    CV3ApplyGlassAccentStyle(self.homeBarBlurView,
+                             self.homeBarBlurView.contentView,
+                             self.homeBarGlowLayer,
+                             nil,
+                             CGRectGetHeight(self.homeBarBlurView.bounds) / 2.0,
+                             self.isFocused ? 0.74 : 0.44,
+                             self.isFocused);
+}
+
+- (void)setFloatingHomeBarAutoHidden:(BOOL)hidden animated:(BOOL)animated {
+    if (!self.homeBarView) return;
+
+    BOOL previousHidden = self.homeBarAutoHidden;
+    CGFloat previousAlpha = self.homeBarView.alpha;
+    self.homeBarAutoHidden = hidden;
+    CGFloat targetAlpha = (hidden || self.isStashed || self.isClosing)
+        ? 0.0
+        : (self.isFocused ? 1.0 : 0.84);
+    BOOL shouldTraceVisibilityChange = previousHidden != hidden ||
+        fabs(previousAlpha - targetAlpha) >= 0.01;
+    if (shouldTraceVisibilityChange) {
+        CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=visibility.request bundle=%@ hidden=%d previousHidden=%d animated=%d alpha=%.3f target=%.3f focused=%d stashed=%d closing=%d",
+                                self.bundleID, hidden, previousHidden, animated,
+                                previousAlpha, targetAlpha, self.isFocused,
+                                self.isStashed, self.isClosing);
+    }
+
+    if (previousHidden == hidden && self.homeBarVisibilityAnimator) {
+        return;
+    }
+
+    if (self.homeBarVisibilityAnimator) {
+        [self.homeBarVisibilityAnimator stopAnimation:NO];
+        [self.homeBarVisibilityAnimator finishAnimationAtPosition:UIViewAnimatingPositionCurrent];
+        self.homeBarVisibilityAnimator = nil;
+    }
+
+    if (!animated || fabs(self.homeBarView.alpha - targetAlpha) < 0.01) {
+        self.homeBarView.alpha = targetAlpha;
+        if (shouldTraceVisibilityChange) {
+            CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=visibility.immediate bundle=%@ hidden=%d alpha=%.3f",
+                                    self.bundleID, hidden, self.homeBarView.alpha);
+        }
+        return;
+    }
+
+    NSTimeInterval duration = hidden ? 0.20 : 0.16;
+    UIViewPropertyAnimator *animator = [[UIViewPropertyAnimator alloc]
+        initWithDuration:duration
+        controlPoint1:CGPointMake(0.23, 1.0)
+        controlPoint2:CGPointMake(0.32, 1.0)
+        animations:^{
+            self.homeBarView.alpha = targetAlpha;
+        }];
+    self.homeBarVisibilityAnimator = animator;
+    __weak typeof(self) weakSelf = self;
+    __weak UIViewPropertyAnimator *weakAnimator = animator;
+    [animator addCompletion:^(__unused UIViewAnimatingPosition finalPosition) {
+        __strong typeof(weakSelf) self = weakSelf;
+        CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=visibility.completed bundle=%@ hidden=%d alpha=%.3f position=%ld",
+                                self.bundleID, self.homeBarAutoHidden,
+                                self.homeBarView.alpha, (long)finalPosition);
+        if (self.homeBarVisibilityAnimator == weakAnimator) {
+            self.homeBarVisibilityAnimator = nil;
+        }
+    }];
+    [animator startAnimation];
+}
+
+- (void)scheduleFloatingHomeBarAutoHide {
+    BOOL replacingActiveTimer = self.homeBarAutoHideTimer.isValid;
+    [self.homeBarAutoHideTimer invalidate];
+    self.homeBarAutoHideTimer = nil;
+    if (!self.homeBarView || self.isStashed || self.isClosing) return;
+
+    NSTimer *timer = [NSTimer timerWithTimeInterval:3.0
+                                             target:self
+                                           selector:@selector(homeBarAutoHideTimerFired:)
+                                           userInfo:nil
+                                            repeats:NO];
+    self.homeBarAutoHideTimer = timer;
+    [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+    if (!replacingActiveTimer) {
+        CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=timer.scheduled bundle=%@ idle=3.0 alpha=%.3f hidden=%d",
+                                self.bundleID, self.homeBarView.alpha, self.homeBarAutoHidden);
+    }
+}
+
+- (void)noteFloatingHomeBarInteraction {
+    if (!self.homeBarView || self.isStashed || self.isClosing) return;
+    CFTimeInterval now = CACurrentMediaTime();
+    if (self.homeBarAutoHidden || now - self.lastHomeBarInteractionTraceTime >= 0.5) {
+        CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=interaction.received bundle=%@ alpha=%.3f hidden=%d timer=%d",
+                                self.bundleID, self.homeBarView.alpha,
+                                self.homeBarAutoHidden, self.homeBarAutoHideTimer.isValid);
+        self.lastHomeBarInteractionTraceTime = now;
+    }
+    [self setFloatingHomeBarAutoHidden:NO animated:YES];
+    [self scheduleFloatingHomeBarAutoHide];
+}
+
+- (void)homeBarAutoHideTimerFired:(NSTimer *)timer {
+    if (timer != self.homeBarAutoHideTimer) return;
+    self.homeBarAutoHideTimer = nil;
+    if (self.isStashed || self.isClosing) return;
+    CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=timer.fired bundle=%@ alpha=%.3f hidden=%d",
+                            self.bundleID, self.homeBarView.alpha, self.homeBarAutoHidden);
+    [self setFloatingHomeBarAutoHidden:YES animated:YES];
+}
+
+- (void)layoutFloatingHomeBarForBounds:(CGRect)bounds {
+    [self createFloatingHomeBarIfNeeded];
+    if (!self.homeBarView) return;
+
+    CGFloat minEdge = MIN(bounds.size.width, bounds.size.height);
+    CGFloat scale = MIN(1.18, MAX(0.82, minEdge / 390.0));
+    CGFloat barLength = 56.0 * scale;
+    CGFloat barThickness = 18.0 * scale;
+    CGFloat protrusion = MAX(4.0, barThickness * 0.42);
+
+    self.homeBarPlacement = [self preferredHomeBarPlacementForScreenFrame:self.frame];
+    self.homeBarView.bounds = CGRectMake(0, 0, barLength, barThickness);
+    self.homeBarBlurView.frame = self.homeBarView.bounds;
+    self.homeBarBlurView.layer.cornerRadius = barThickness / 2.0;
+    self.homeBarGlowLayer.frame = self.homeBarView.bounds;
+    self.homeBarGlowLayer.cornerRadius = barThickness / 2.0;
+
+    // Liquid Glass：控制条玻璃底（公用配方；每次布局同步尺寸/圆角）
+    BOOL homeBarGlassCreated = NO;
+    CV3LiquidGlassEnsureBackdrop(self.homeBarView,
+                                 @"CV3HomeBarLiquidGlassBackdrop",
+                                 CV3LiquidGlassRecipeControl(),
+                                 barThickness / 2.0,
+                                 &homeBarGlassCreated);
+    if (homeBarGlassCreated) {
+        CV3LogToFile(@"[LiquidGlass] installed surface=home-bar bundle=%@ size=%.0fx%.0f",
+                     self.bundleID, barLength, barThickness);
+    }
+
+    if (self.homeBarPillIndicator) {
+        CGFloat pillW = 36.0 * scale;
+        CGFloat pillH = 4.5 * scale;
+        self.homeBarPillIndicator.bounds = CGRectMake(0, 0, pillW, pillH);
+        self.homeBarPillIndicator.center = CGPointMake(barLength * 0.5, barThickness * 0.5);
+        self.homeBarPillIndicator.layer.cornerRadius = pillH * 0.5;
+    }
+
+    CGPoint center = CGPointMake(CGRectGetMidX(bounds), CGRectGetMaxY(bounds) - barThickness * 0.5 + protrusion);
+    CGAffineTransform orientationTransform = CGAffineTransformIdentity;
+    if (self.homeBarPlacement == 1) {
+        center = CGPointMake(CGRectGetMidX(bounds), barThickness * 0.5 - protrusion);
+    } else if (self.homeBarPlacement == 2) {
+        center = CGPointMake(CGRectGetMaxX(bounds) - barThickness * 0.5 + protrusion, CGRectGetMidY(bounds));
+        orientationTransform = CGAffineTransformMakeRotation((CGFloat)(M_PI_2));
+    } else if (self.homeBarPlacement == 3) {
+        center = CGPointMake(barThickness * 0.5 - protrusion, CGRectGetMidY(bounds));
+        orientationTransform = CGAffineTransformMakeRotation((CGFloat)(M_PI_2));
+    }
+
+    self.homeBarView.center = center;
+    self.homeBarView.transform = orientationTransform;
+    [self updateFloatingHomeBarAppearance];
+    [self.homeBarView.superview bringSubviewToFront:self.homeBarView];
+}
+
+- (void)handleHomeBarTap:(UITapGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateEnded || self.isClosing || self.isStashed) return;
+    CV3ExitExposeModeIfNeeded(self, NO);
+    [self handleHideAction];
+}
+
+- (void)handleHomeBarResizePan:(UIPanGestureRecognizer *)gesture {
+    if (self.isClosing || self.isStashed) return;
+
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        CV3ExitExposeModeIfNeeded(self, YES);
+        self.isFullscreenMode = NO;
+        self.isCompactMode = NO;
+        self.initialResizeFrame = self.frame;
+        self.homeBarResizeStartPlacement = self.homeBarPlacement;
+        CGPoint axis = CGPointMake(1.0, 0.0);
+        if (self.homeBarView) {
+            CGRect barBounds = self.homeBarView.bounds;
+            CGPoint left = [self.homeBarView convertPoint:CGPointMake(CGRectGetMinX(barBounds), CGRectGetMidY(barBounds)) toView:nil];
+            CGPoint right = [self.homeBarView convertPoint:CGPointMake(CGRectGetMaxX(barBounds), CGRectGetMidY(barBounds)) toView:nil];
+            axis = CGPointMake(right.x - left.x, right.y - left.y);
+            CGFloat length = sqrt(axis.x * axis.x + axis.y * axis.y);
+            if (length > 0.1) {
+                axis.x /= length;
+                axis.y /= length;
+            } else {
+                axis = CGPointMake(1.0, 0.0);
+            }
+        }
+        if (self.homeBarResizeStartPlacement == 2 || self.homeBarResizeStartPlacement == 3) {
+            axis.x = -axis.x;
+            axis.y = -axis.y;
+        }
+        self.homeBarResizeAxis = axis;
+        CGPoint commandAxis = CGPointMake(-axis.y, axis.x);
+        if (self.homeBarView) {
+            UIView *container = self.homeBarView.superview ?: self.appContentWrapper ?: self;
+            CGPoint contentCenter = [container convertPoint:CGPointMake(CGRectGetMidX(container.bounds), CGRectGetMidY(container.bounds)) toView:nil];
+            CGPoint barCenter = [self.homeBarView convertPoint:CGPointMake(CGRectGetMidX(self.homeBarView.bounds), CGRectGetMidY(self.homeBarView.bounds)) toView:nil];
+            commandAxis = CGPointMake(barCenter.x - contentCenter.x, barCenter.y - contentCenter.y);
+            CGFloat commandLength = sqrt(commandAxis.x * commandAxis.x + commandAxis.y * commandAxis.y);
+            if (commandLength > 0.1) {
+                commandAxis.x /= commandLength;
+                commandAxis.y /= commandLength;
+            } else {
+                commandAxis = CGPointMake(-axis.y, axis.x);
+            }
+        }
+        CGFloat dot = commandAxis.x * axis.x + commandAxis.y * axis.y;
+        commandAxis = CGPointMake(commandAxis.x - axis.x * dot, commandAxis.y - axis.y * dot);
+        CGFloat commandAxisLength = sqrt(commandAxis.x * commandAxis.x + commandAxis.y * commandAxis.y);
+        if (commandAxisLength > 0.1) {
+            commandAxis.x /= commandAxisLength;
+            commandAxis.y /= commandAxisLength;
+        } else {
+            commandAxis = CGPointMake(-axis.y, axis.x);
+        }
+        self.homeBarCommandAxis = commandAxis;
+        [gesture setTranslation:CGPointZero inView:nil];
+        self.homeBarPanMode = 0;
+        self.homeBarCommandProjection = 0.0;
+    }
+
+    CGPoint translation = [gesture translationInView:nil];
+
+    if (gesture.state == UIGestureRecognizerStateChanged) {
+        CGRect screenBounds = [self orientedDisplayBoundsForCurrentOrientation];
+        CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
+        CGFloat longSide = MAX(screenBounds.size.width, screenBounds.size.height);
+        CGFloat aspect = longSide / MAX(shortSide, 1.0);
+        CGFloat minAllowedWidth = 1.0;
+        CGFloat maxAllowedWidth = 1.0;
+        [self resizeLimitsForAspect:aspect minWidth:&minAllowedWidth maxWidth:&maxAllowedWidth];
+
+        CGPoint axis = self.homeBarResizeAxis;
+        CGFloat axisLength = sqrt(axis.x * axis.x + axis.y * axis.y);
+        if (axisLength < 0.1) {
+            axis = CGPointMake(1.0, 0.0);
+        }
+        CGFloat dominantTranslation = translation.x * axis.x + translation.y * axis.y;
+        CGPoint commandAxis = self.homeBarCommandAxis;
+        CGFloat commandAxisLength = sqrt(commandAxis.x * commandAxis.x + commandAxis.y * commandAxis.y);
+        if (commandAxisLength < 0.1) {
+            commandAxis = CGPointMake(-axis.y, axis.x);
+        }
+        CGFloat commandTranslation = translation.x * commandAxis.x + translation.y * commandAxis.y;
+
+        if (self.homeBarPanMode == 0) {
+            CGFloat movement = sqrt(translation.x * translation.x + translation.y * translation.y);
+            if (movement < 8.0) return;
+
+            CV3LogToFile(@"[ResizeLimits] phase=homeBar.begin bundle=%@ sceneBounds=%@ orientedBounds=%@ initialFrame=%@ orientation=%ld initialLogical=%.3f minLogical=%.3f maxLogical=%.3f",
+                         self.bundleID ?: @"<nil>", NSStringFromCGRect(self.windowScene.coordinateSpace.bounds),
+                         NSStringFromCGRect(screenBounds), NSStringFromCGRect(self.initialResizeFrame),
+                         (long)self.targetOrientation,
+                         MIN(self.initialResizeFrame.size.width, self.initialResizeFrame.size.height),
+                         minAllowedWidth, maxAllowedWidth);
+
+            if (fabs(commandTranslation) > fabs(dominantTranslation) * 1.15) {
+                self.homeBarPanMode = 2;
+                self.homeBarCommandProjection = commandTranslation;
+                return;
+            }
+
+            self.homeBarPanMode = 1;
+            [self startHomeBarResizeSessionIfNeeded];
+        }
+
+        if (self.homeBarPanMode == 2) {
+            self.homeBarCommandProjection = commandTranslation;
+            return;
+        }
+
+        CGFloat initialLogicalWidth = MIN(self.initialResizeFrame.size.width, self.initialResizeFrame.size.height);
+        CGFloat targetWidth = initialLogicalWidth + dominantTranslation * 0.9;
+
+        NSArray *windowsSnapshot = [floatingWindows copy];
+        for (CV3FloatingAppWindow *other in windowsSnapshot) {
+            if (other == self || other.isStashed || ![other isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+
+            CGFloat distance = sqrt(pow(self.center.x - other.center.x, 2) + pow(self.center.y - other.center.y, 2));
+            CGFloat minGap = (self.bounds.size.width + other.bounds.size.width) / 2.0 + 20.0;
+            if (distance < minGap) {
+                targetWidth *= (0.8 + 0.2 * (distance / minGap));
+            }
+        }
+
+        CGFloat finalWidth = MIN(MAX(targetWidth, minAllowedWidth), maxAllowedWidth);
+
+        CGPoint preferredCenter = CGPointMake(CGRectGetMidX(self.initialResizeFrame), CGRectGetMidY(self.initialResizeFrame));
+        CGSize physicalSize = [self physicalFloatingSizeForLogicalWidth:finalWidth
+                                                           displayBounds:screenBounds
+                                                            orientation:[self effectiveResizeOrientation]];
+        CGRect newFrame = [self constrainedFloatingFrameForSize:physicalSize preferredCenter:preferredCenter];
+
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        self.bounds = CGRectMake(0, 0, newFrame.size.width, newFrame.size.height);
+        self.center = CGPointMake(CGRectGetMidX(newFrame), CGRectGetMidY(newFrame));
+        [self layoutFloatingHomeBarForBounds:self.appContentWrapper.bounds];
+        
+        // Apple Design Rule 8: 拖拽动态 Morphing 形变暗示
+        if (self.homeBarPillIndicator) {
+            CGFloat scale = MIN(1.18, MAX(0.82, finalWidth / 390.0));
+            CGFloat pillStretch = MIN(14.0, fabs(dominantTranslation) * 0.15);
+            CGFloat pillW = 36.0 * scale + pillStretch;
+            CGFloat pillH = 4.5 * scale;
+            self.homeBarPillIndicator.bounds = CGRectMake(0, 0, pillW, pillH);
+            self.homeBarPillIndicator.layer.cornerRadius = pillH * 0.5;
+            self.homeBarPillIndicator.backgroundColor = [[UIColor labelColor] colorWithAlphaComponent:0.95];
+        }
+        [CATransaction commit];
+        [self syncWindowBoundsToClientAndNotify:NO];
+    }
+
+    if (gesture.state == UIGestureRecognizerStateEnded ||
+        gesture.state == UIGestureRecognizerStateCancelled ||
+        gesture.state == UIGestureRecognizerStateFailed) {
+        if (self.homeBarPanMode == 2) {
+            CGPoint velocity = [gesture velocityInView:nil];
+            CGPoint commandAxis = self.homeBarCommandAxis;
+            CGFloat commandAxisLength = sqrt(commandAxis.x * commandAxis.x + commandAxis.y * commandAxis.y);
+            if (commandAxisLength < 0.1) {
+                CGPoint axis = self.homeBarResizeAxis;
+                CGFloat axisLength = sqrt(axis.x * axis.x + axis.y * axis.y);
+                if (axisLength < 0.1) axis = CGPointMake(1.0, 0.0);
+                commandAxis = CGPointMake(-axis.y, axis.x);
+            }
+            CGFloat commandVelocity = velocity.x * commandAxis.x + velocity.y * commandAxis.y;
+            CGFloat commandProjection = self.homeBarCommandProjection;
+            self.homeBarPanMode = 0;
+            self.homeBarCommandProjection = 0.0;
+
+            if (gesture.state == UIGestureRecognizerStateEnded &&
+                (fabs(commandProjection) > 42.0 || fabs(commandVelocity) > 520.0)) {
+                CGFloat commandSignal = fabs(commandVelocity) > 520.0 ? commandVelocity : commandProjection;
+                if (commandSignal > 0.0) {
+                    CV3ExitExposeModeIfNeeded(nil, NO);
+                    CV3LogToFile(@"[FullscreenLaunch] phase=trigger source=homeBar bundle=%@", self.bundleID);
+                    [self activateHostedAppFullscreenAndClose];
+                } else {
+                    CV3ToggleExposeMode();
+                }
+            }
+            return;
+        }
+
+        if (self.homeBarPanMode == 0 || !self.isLiveResizing) {
+            self.homeBarPanMode = 0;
+            self.homeBarCommandProjection = 0.0;
+            return;
+        }
+
+        self.homeBarPanMode = 0;
+        self.homeBarCommandProjection = 0.0;
+        [self stopLiquidMotion];
+
+        if (gesture.state != UIGestureRecognizerStateEnded) {
+            self.isLiveResizing = NO;
+            CGFloat minEdge = MIN(self.bounds.size.width, self.bounds.size.height);
+            CGFloat finalRadius = MAX(CV3Style.adaptiveCornerRadiusMin, MIN(CV3Style.adaptiveCornerRadiusMax, minEdge * CV3Style.adaptiveCornerRadiusRatio));
+            [self visualShadowLayer].shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:finalRadius].CGPath;
+            [self animateFocusShadow:self.isFocused];
+            [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.80 initialSpringVelocity:0.5 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+                self.glassBackdrop.effect = nil;
+                self.glassBackdrop.backgroundColor = [UIColor clearColor];
+                if (self.homeBarPillIndicator) {
+                    CGFloat minEdge = MIN(self.bounds.size.width, self.bounds.size.height);
+                    CGFloat scale = MIN(1.18, MAX(0.82, minEdge / 390.0));
+                    CGFloat pillW = 36.0 * scale;
+                    CGFloat pillH = 4.5 * scale;
+                    self.homeBarPillIndicator.bounds = CGRectMake(0, 0, pillW, pillH);
+                    self.homeBarPillIndicator.backgroundColor = [[UIColor labelColor] colorWithAlphaComponent:0.65];
+                }
+            } completion:nil];
+        }
+
+        CGRect screenBounds = [self orientedDisplayBoundsForCurrentOrientation];
+        CGFloat shortSide = MIN(screenBounds.size.width, screenBounds.size.height);
+        CGFloat longSide = MAX(screenBounds.size.width, screenBounds.size.height);
+        CGFloat aspect = longSide / MAX(shortSide, 1.0);
+        CGPoint initialCenter = CGPointMake(CGRectGetMidX(self.frame), CGRectGetMidY(self.frame));
+        UIEdgeInsets safeArea = [self currentSafeAreaInsets];
+
+        if (self.targetScene) {
+            @try {
+                FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
+                if ([settings respondsToSelector:@selector(setInLiveResize:)]) {
+                    [(UIMutableApplicationSceneSettings *)settings setInLiveResize:NO];
+                    [self.targetScene updateSettings:settings withTransitionContext:nil];
+                }
+                [self setNeedsLayout];
+                [self layoutIfNeeded];
+            } @catch (NSException *e) {}
+        }
+
+        UIView *snapshot = self.liveResizeSnapshotView;
+        self.liveResizeSnapshotView = nil;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [UIView animateWithDuration:0.25 delay:0 options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState animations:^{
+                self.hostView.alpha = 1.0;
+                if (snapshot) snapshot.alpha = 0;
+            } completion:^(BOOL finished) {
+                [snapshot removeFromSuperview];
+            }];
+        });
+
+        if (gesture.state == UIGestureRecognizerStateEnded) {
+            CGFloat finalWidth = MIN(self.bounds.size.width, self.bounds.size.height);
+            CGPoint velocity = [gesture velocityInView:nil];
+            CGPoint axis = self.homeBarResizeAxis;
+            CGFloat axisLength = sqrt(axis.x * axis.x + axis.y * axis.y);
+            if (axisLength < 0.1) axis = CGPointMake(1.0, 0.0);
+            CGFloat axisVelocity = velocity.x * axis.x + velocity.y * axis.y;
+            if (fabs(axisVelocity) > 300.0) {
+                finalWidth += axisVelocity * 0.015;
+            }
+
+            CGFloat minAllowedWidth = 1.0;
+            CGFloat maxAllowedWidth = 1.0;
+            [self resizeLimitsForAspect:aspect minWidth:&minAllowedWidth maxWidth:&maxAllowedWidth];
+            finalWidth = MAX(minAllowedWidth, MIN(maxAllowedWidth, finalWidth));
+
+            CGFloat previousLogicalWidth = finalWidth;
+            CGRect snapFrame = self.frame;
+            CGFloat snapThreshold = 25.0;
+            if (fabs(snapFrame.origin.y - safeArea.top) < snapThreshold) {
+                snapFrame.origin.y = safeArea.top;
+            }
+
+            CGFloat currentRatio = finalWidth / shortSide;
+            if (fabs(currentRatio - 0.5) < 0.03) finalWidth = shortSide * 0.5;
+            else if (fabs(currentRatio - 0.75) < 0.03) finalWidth = shortSide * 0.75;
+            finalWidth = MAX(minAllowedWidth, MIN(maxAllowedWidth, finalWidth));
+
+            CGSize finalSize = [self physicalFloatingSizeForLogicalWidth:finalWidth
+                                                            displayBounds:screenBounds
+                                                             orientation:[self effectiveResizeOrientation]];
+            snapFrame.size = finalSize;
+
+            if (fabs(finalWidth - previousLogicalWidth) > 0.1) {
+                snapFrame.origin.x = initialCenter.x - finalSize.width / 2.0;
+                snapFrame.origin.y = initialCenter.y - finalSize.height / 2.0;
+            }
+
+            snapFrame = [self constrainedFloatingFrameForSize:finalSize preferredCenter:CGPointMake(CGRectGetMidX(snapFrame), CGRectGetMidY(snapFrame))];
+
+            CV3LogToFile(@"[ResizeLimits] phase=homeBar.end bundle=%@ orientedBounds=%@ safeArea=%@ orientation=%ld requestedLogical=%.3f minLogical=%.3f maxLogical=%.3f finalSize=%@ finalFrame=%@",
+                         self.bundleID ?: @"<nil>", NSStringFromCGRect(screenBounds),
+                         NSStringFromUIEdgeInsets(safeArea), (long)self.targetOrientation,
+                         finalWidth, minAllowedWidth, maxAllowedWidth,
+                         NSStringFromCGSize(finalSize), NSStringFromCGRect(snapFrame));
+
+            CGFloat springVelocity = MIN(3.5, MAX(0.6, fabs(axisVelocity) / 750.0));
+            // Stage Manager 级流体 Spring 阻尼与动量过渡
+            [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.82 initialSpringVelocity:springVelocity options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+                self.bounds = CGRectMake(0, 0, snapFrame.size.width, snapFrame.size.height);
+                self.center = CGPointMake(CGRectGetMidX(snapFrame), CGRectGetMidY(snapFrame));
+                [self setNeedsLayout];
+                [self layoutIfNeeded];
+                [self layoutFloatingHomeBarForBounds:self.appContentWrapper.bounds];
+            } completion:^(BOOL finished) {
+                self.isLiveResizing = NO;
+                CGFloat minEdge = MIN(self.bounds.size.width, self.bounds.size.height);
+                CGFloat finalRadius = MAX(CV3Style.adaptiveCornerRadiusMin, MIN(CV3Style.adaptiveCornerRadiusMax, minEdge * CV3Style.adaptiveCornerRadiusRatio));
+                [self visualShadowLayer].shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:finalRadius].CGPath;
+                [UIView animateWithDuration:0.4 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
+                    self.glassBackdrop.effect = nil;
+                    self.glassBackdrop.backgroundColor = [UIColor clearColor];
+                } completion:nil];
+                [self syncWindowBoundsToClientAndNotify:YES];
+                [self syncWindowShadowForCurrentState];
+                CV3SaveWindowLayout(self);
+            }];
+
+            [self animateFocusShadow:self.isFocused];
+        }
+    }
+}
+
+- (void)activateHostedAppFullscreenAndClose {
+    if (self.isClosing || self.fullscreenLaunchPending || self.bundleID.length == 0) return;
+
+    // Screen Time 限额闸门：全屏化同样不允许绕过
+    if (!CV3ScreenTimeGateBundleID(self.bundleID, @"FullscreenActivate", YES, self.windowScene)) {
+        return;
+    }
+
+    CV3ExitExposeModeIfNeeded(nil, NO);
+    NSString *bundleID = [self.bundleID copy];
+    self.fullscreenLaunchPending = YES;
+    CV3BeginFullscreenLaunchBypass(bundleID);
+    CV3LogToFile(@"[FullscreenLaunch] phase=request.begin bundle=%@ windows=%lu",
+                 bundleID, (unsigned long)floatingWindows.count);
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        __block BOOL opened = NO;
+        @try {
+            id workspace = [CV3ClassNamed(@"LSApplicationWorkspace") defaultWorkspace];
+            if (workspace && [workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
+                opened = ((BOOL (*)(id, SEL, id))objc_msgSend)(workspace,
+                                                               @selector(openApplicationWithBundleID:),
+                                                               bundleID);
+            }
+        } @catch (NSException *e) {
+            CV3LogToFile(@"[FullscreenLaunch] phase=request.primaryException bundle=%@ exception=%@",
+                         bundleID, e);
+        }
+
+        CV3LogToFile(@"[FullscreenLaunch] phase=request.primaryResult bundle=%@ accepted=%d",
+                     bundleID, opened);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (opened && !self.isClosing) {
+                CV3LogToFile(@"[FullscreenLaunch] phase=request.accepted bundle=%@", bundleID);
+                CV3StashPeerWindowsForFullscreen(self);
+                self.preserveSceneForegroundOnClose = YES;
+                [self closeWindow];
+                CV3LogToFile(@"[FullscreenLaunch] phase=teardown.completed bundle=%@", bundleID);
+            } else {
+                self.fullscreenLaunchPending = NO;
+                CV3LogToFile(@"[FullscreenLaunch] phase=request.failed bundle=%@ closing=%d",
+                             bundleID, self.isClosing);
+            }
+            CV3EndFullscreenLaunchBypass(bundleID);
+        });
+    });
+}
+
+static NSString *CV3DirectionTraceTransform3D(CATransform3D t) {
+    return [NSString stringWithFormat:
+        @"[%.4f %.4f %.4f %.4f; %.4f %.4f %.4f %.4f; %.4f %.4f %.4f %.4f; %.4f %.4f %.4f %.4f]",
+        t.m11, t.m12, t.m13, t.m14,
+        t.m21, t.m22, t.m23, t.m24,
+        t.m31, t.m32, t.m33, t.m34,
+        t.m41, t.m42, t.m43, t.m44];
+}
+
+static NSString *CV3DirectionTraceView(UIView *view) {
+    if (!view) return @"nil";
+    CALayer *layer = view.layer;
+    CALayer *presentation = layer.presentationLayer;
+    return [NSString stringWithFormat:
+        @"%@ frame=%@ bounds=%@ center=%@ viewT=%@ hidden=%d alpha=%.3f "
+         "layerFrame=%@ layerBounds=%@ layerT=%@ presentationFrame=%@ presentationBounds=%@ presentationT=%@",
+        NSStringFromClass(view.class), NSStringFromCGRect(view.frame), NSStringFromCGRect(view.bounds),
+        NSStringFromCGPoint(view.center), NSStringFromCGAffineTransform(view.transform), view.hidden, view.alpha,
+        NSStringFromCGRect(layer.frame), NSStringFromCGRect(layer.bounds), CV3DirectionTraceTransform3D(layer.transform),
+        presentation ? NSStringFromCGRect(presentation.frame) : @"nil",
+        presentation ? NSStringFromCGRect(presentation.bounds) : @"nil",
+        presentation ? CV3DirectionTraceTransform3D(presentation.transform) : @"nil"];
+}
+
+static NSString *CV3ReceptionKVCValue(id object, NSString *key) {
+    if (!object || key.length == 0) return @"nil";
+    @try {
+        id value = [object valueForKey:key];
+        return value ? [value description] : @"nil";
+    } @catch (__unused NSException *exception) {
+        return @"n/a";
+    }
+}
+
+static void CV3CollectReceptionLayers(CALayer *layer,
+                                      NSString *path,
+                                      NSUInteger depth,
+                                      NSMutableArray<NSString *> *entries) {
+    if (!layer || depth > 10 || entries.count >= 48) return;
+    CALayer *presentation = layer.presentationLayer;
+    id contents = nil;
+    @try { contents = layer.contents; } @catch (__unused NSException *exception) {}
+    NSString *contextID = CV3ReceptionKVCValue(layer, @"contextId");
+    BOOL interesting = depth == 0 || contents != nil ||
+        (![contextID isEqualToString:@"nil"] && ![contextID isEqualToString:@"n/a"] && ![contextID isEqualToString:@"0"]);
+    if (interesting) {
+        [entries addObject:[NSString stringWithFormat:
+            @"%@:%@ frame=%@ hidden=%d opacity=%.2f context=%@ contents=%@:%p pres=%@",
+            path, NSStringFromClass(layer.class), NSStringFromCGRect(layer.frame), layer.hidden,
+            layer.opacity, contextID, contents ? NSStringFromClass([contents class]) : @"nil", contents,
+            presentation ? NSStringFromCGRect(presentation.frame) : @"nil"]];
+    }
+    NSUInteger index = 0;
+    for (CALayer *child in layer.sublayers ?: @[]) {
+        CV3CollectReceptionLayers(child, [path stringByAppendingFormat:@".%lu", (unsigned long)index++],
+                                  depth + 1, entries);
+    }
+}
+
+- (void)recordReceptionTrace:(NSString *)phase force:(BOOL)force {
+    if (self.isClosing) return;
+    NSMutableArray<NSString *> *layers = [NSMutableArray array];
+    CV3CollectReceptionLayers(self.hostView.layer, @"host", 0, layers);
+    id settings = CV3InvokeObject(self.targetScene, @selector(settings));
+    NSInteger contentState = CV3InvokeInteger(self.targetScene, NSSelectorFromString(@"contentState"), NSIntegerMin);
+    if (contentState == NSIntegerMin) {
+        contentState = CV3InvokeInteger(self.targetScene, NSSelectorFromString(@"_contentState"), NSIntegerMin);
+    }
+    BOOL sceneValid = self.targetScene ? CV3InvokeBool(self.targetScene, @selector(isValid), YES) : NO;
+    BOOL hostAttached = self.hostView && self.hostView.superview == self.hostContainerProxy;
+    BOOL hostHasTree = self.hostView && (self.hostView.subviews.count > 0 || self.hostView.layer.sublayers.count > 0);
+    NSString *signature = [NSString stringWithFormat:
+        @"bundle=%@ appState=%ld workspace=%d switcher=%d/%d lifecycle=%@ generation=%lu "
+         "stashed=%d focused=%d windowHidden=%d windowAlpha=%.2f sceneValid=%d contentState=%ld "
+         "foreground=%@ backgrounded=%@ deactivation=%@ hostAttached=%d hostWindow=%d hostHidden=%d "
+         "hostAlpha=%.2f hostTree=%d hostFrame=%@ proxyBounds=%@ presentationContext=%d rbs=%d layers=%@",
+        self.bundleID ?: @"nil", (long)UIApplication.sharedApplication.applicationState,
+        CV3WorkspaceTransitionActive, CV3SwitcherWindowVisible, CV3MainSwitcherVisible,
+        CV3HostLifecycleStateName(self.hostLifecycleState), (unsigned long)self.sceneHostGeneration,
+        self.isStashed, self.isFocused, self.hidden, self.alpha, sceneValid, (long)contentState,
+        CV3ReceptionKVCValue(settings, @"foreground"), CV3ReceptionKVCValue(settings, @"backgrounded"),
+        CV3ReceptionKVCValue(settings, @"deactivationReasons"), hostAttached, self.hostView.window != nil,
+        self.hostView.hidden, self.hostView.alpha, hostHasTree, NSStringFromCGRect(self.hostView.frame),
+        NSStringFromCGRect(self.hostContainerProxy.bounds),
+        CV3InvokeObject(self.hostView, @selector(presentationContext)) != nil, self.rbsAssertion != nil,
+        [layers componentsJoinedByString:@" | "]];
+    NSTimeInterval now = CACurrentMediaTime();
+    BOOL changed = ![signature isEqualToString:self.lastReceptionTraceSignature];
+    BOOL heartbeatDue = now - self.lastReceptionTraceHeartbeatTime >= 2.0;
+    if (!force && !changed && !heartbeatDue) return;
+    self.lastReceptionTraceSignature = signature;
+    self.lastReceptionTraceHeartbeatTime = now;
+    CV3LogToFile(@"[ReceptionTrace][Host] event=%@ phase=%@ %@",
+                 changed ? @"change" : @"heartbeat", phase ?: @"unknown", signature);
+}
+
+- (void)receptionTraceTimerFired:(NSTimer *)timer {
+    (void)timer;
+    [self refreshContentVisibilityGate];
+    [self recordReceptionTrace:@"timer" force:NO];
+    [self recordSurfaceOrientationAudit:@"timer" force:NO];
+
+}
+
++ (CGRect)initialFrameForBundleID:(NSString *)bundleID
+                           center:(CGPoint)center
+                      windowScene:(UIWindowScene *)windowScene {
+    CGRect sceneBounds = CV3SceneBoundsForScene(windowScene);
+    UIEdgeInsets safeArea = CV3InitialFloatingSafeAreaInsets(windowScene);
+    CGSize visibleSize = CV3SceneVisibleSizeForScene(windowScene);
+
+    UIInterfaceOrientation displayOrientation = CV3TrustedInterfaceOrientation(windowScene);
+    CV3InitialPresentation presentation =
+        CV3ResolveInitialPresentation(bundleID, displayOrientation);
+
+    // Default logical canvas, used only when no user size has been stored yet.
+    CGFloat shortSide = MIN(sceneBounds.size.width, sceneBounds.size.height);
+    CGFloat longSide = MAX(sceneBounds.size.width, sceneBounds.size.height);
+    CGFloat logicalWidth = shortSide * kCV3FloatingDefaultWidthRatio;
+    CGSize defaultLogicalSize = CGSizeMake(logicalWidth, logicalWidth * (longSide / MAX(shortSide, 1.0)));
+
+    BOOL sceneAxesDiffer = CV3SceneAndDisplayAxesDifferForScene(windowScene);
+    // The shell axis follows the CONTENT this App will actually draw — the same
+    // value the created window seeds itself with — never the display's current
+    // rotation, which a fullscreen video can flip while the Scene stays portrait.
+    BOOL shellLandscape = CV3ShellLandscapeForContent(
+        UIInterfaceOrientationIsLandscape(presentation.contentOrientation),
+        sceneAxesDiffer);
+
+    // One call now decides the size: stored user size (or the default), laid out
+    // on the shell's axis, then fitted to the visible area. Axis rule, stored
+    // size lookup and fit living in a single place is the point — the drop
+    // preview and the window it creates can no longer disagree, and there are no
+    // per-path variants left to drift.
+    CGSize size = CV3ResolvedFloatingSizeForBundle(bundleID,
+                                                   shellLandscape,
+                                                   defaultLogicalSize,
+                                                   visibleSize);
+    CGRect frame = CGRectMake(center.x - size.width * 0.5,
+                              center.y - size.height * 0.5,
+                              size.width, size.height);
+    CGRect clampedFrame = CV3ClampInitialFloatingFrame(frame, sceneBounds, safeArea);
+    CV3LogToFile(@"[SplitPreviewTrace] phase=initialFrame bundle=%@ displayOrientation=%ld resolvedOrientation=%ld contentOrientation=%ld prefersLandscape=%d real=%ld/%d live=%ld/%d requiresLandscape=%d shellLandscape=%d sceneAxesDiffer=%d sceneBounds=%@ visible=%.1fx%.1f size=%.1fx%.1f final=%@",
+                 bundleID ?: @"nil",
+                 (long)displayOrientation,
+                 (long)presentation.resolvedOrientation,
+                 (long)presentation.contentOrientation,
+                 presentation.prefersLandscape,
+                 (long)presentation.realContentOrientation, presentation.hasRealContent,
+                 (long)presentation.liveSceneOrientation, presentation.hasLiveScene,
+                 presentation.requiresLandscape,
+                 shellLandscape,
+                 sceneAxesDiffer,
+                 NSStringFromCGRect(sceneBounds),
+                 visibleSize.width, visibleSize.height,
+                 size.width, size.height,
+                 NSStringFromCGRect(clampedFrame));
+    return clampedFrame;
+}
+
+- (void)recordOrientationTrace:(NSString *)phase force:(BOOL)force {
+    UIWindowScene *scene = self.windowScene;
+    CGRect sceneBounds = scene ? scene.coordinateSpace.bounds : CGRectZero;
+    UIInterfaceOrientation sceneOrientation = scene ? scene.interfaceOrientation : UIInterfaceOrientationUnknown;
+    CGRect screenBounds = scene.screen ? scene.screen.bounds : UIScreen.mainScreen.bounds;
+    UIInterfaceOrientation presentationOrientation = CV3HostedPresentationOrientation(self);
+    NSString *signature = [NSString stringWithFormat:
+        @"scene=%ld/%@ screen=%@ target=%ld hosted=%ld presentation=%ld landscape=%d/%d "
+         "window={%@} root={%@} wrapper={%@} clip={%@} proxy={%@} host={%@}",
+        (long)sceneOrientation, NSStringFromCGRect(sceneBounds), NSStringFromCGRect(screenBounds),
+        (long)self.targetOrientation, (long)self.hostedContentOrientation, (long)presentationOrientation,
+        self.prefersLandscapePresentation, self.requiresLandscapeContent,
+        CV3DirectionTraceView(self), CV3DirectionTraceView(self.rootTransformContainer),
+        CV3DirectionTraceView(self.appContentWrapper), CV3DirectionTraceView(self.clippingContainer),
+        CV3DirectionTraceView(self.hostContainerProxy), CV3DirectionTraceView(self.hostView)];
+    if (!force && [signature isEqualToString:self.lastOrientationTraceSignature]) return;
+    self.lastOrientationTraceSignature = signature;
+    CV3LogToFile(@"[DirectionTrace][Host] phase=%@ bundle=%@ %@",
+                 phase ?: @"unknown", self.bundleID ?: @"nil", signature);
+}
+
+// 219：启动占位视图（像主屏启动 App 的 Launch Screen）——图标铺满背景（暗化）+ 大图标 + 深色蒙层。
+// 挂载完成后窗口即可带此占位显示，真实画面在其后渲染，就绪后占位淡出——彻底消除“空玻璃板”阶段。
+- (void)installLaunchPlaceholderIfNeeded {
+    if (self.launchPlaceholderView) return;
+
+    UIView *placeholder = [[UIView alloc] initWithFrame:self.clippingContainer.bounds];
+    placeholder.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    placeholder.backgroundColor = [UIColor blackColor];
+    placeholder.userInteractionEnabled = NO;
+
+    UIImage *icon = self.bundleID ? [cv3IconCache objectForKey:self.bundleID] : nil;
+    if (icon) {
+        UIImageView *cover = [[UIImageView alloc] initWithImage:icon];
+        cover.contentMode = UIViewContentModeScaleAspectFill;
+        cover.clipsToBounds = YES;
+        cover.frame = placeholder.bounds;
+        cover.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        cover.alpha = 0.35;
+        [placeholder addSubview:cover];
+
+        UIView *veil = [[UIView alloc] initWithFrame:placeholder.bounds];
+        veil.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        veil.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.45];
+        [placeholder addSubview:veil];
+
+        CGFloat side = MIN(CGRectGetWidth(placeholder.bounds), CGRectGetHeight(placeholder.bounds)) * 0.28;
+        side = MAX(72.0, MIN(120.0, side));
+        UIImageView *bigIcon = [[UIImageView alloc] initWithImage:icon];
+        bigIcon.contentMode = UIViewContentModeScaleAspectFit;
+        bigIcon.bounds = CGRectMake(0, 0, side, side);
+        bigIcon.center = CGPointMake(CGRectGetMidX(placeholder.bounds), CGRectGetMidY(placeholder.bounds));
+        bigIcon.layer.cornerRadius = side * 0.22;
+        bigIcon.clipsToBounds = YES;
+        if (@available(iOS 13.0, *)) {
+            bigIcon.layer.cornerCurve = kCACornerCurveContinuous;
+        }
+        [placeholder addSubview:bigIcon];
+    } else {
+        UILabel *nameLabel = [[UILabel alloc] initWithFrame:placeholder.bounds];
+        nameLabel.text = self.bundleID;
+        nameLabel.textAlignment = NSTextAlignmentCenter;
+        nameLabel.textColor = [UIColor labelColor];
+        nameLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
+        nameLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [placeholder addSubview:nameLabel];
+    }
+
+    self.launchPlaceholderView = placeholder;
+    [self.clippingContainer addSubview:placeholder];
+}
+
+- (instancetype)initWithBundleID:(NSString *)bundleID center:(CGPoint)center windowScene:(UIWindowScene *)windowScene {
+    if (windowScene) {
+        self = [super initWithWindowScene:windowScene];
+    } else {
+        self = [super initWithFrame:CGRectMake(0, 0, 300, 500)];
+    }
+    
+    if (self) {
+        self.bundleID = bundleID;
+        CV3SetCameraForegroundGrant(bundleID, YES);
+        self.coldLaunchStartTime = CACurrentMediaTime();
+        self.coldLaunchTraceID = [NSString stringWithFormat:@"%@-%.0f",
+                                  bundleID ?: @"unknown",
+                                  [[NSDate date] timeIntervalSince1970] * 1000.0];
+        [self recordColdLaunchMilestone:@"WINDOW_INIT_BEGIN" details:nil];
+
+        UIInterfaceOrientation currentOrientation = CV3TrustedInterfaceOrientation(windowScene);
+        // One decision for both the dashed drop preview and this window: the
+        // frame below is built by initialFrameForBundleID through this very
+        // presentation, so the box the user released can no longer promise an
+        // axis that this window then refuses to become.
+        CV3InitialPresentation presentation =
+            CV3ResolveInitialPresentation(bundleID, currentOrientation);
+        self.frame = [[self class] initialFrameForBundleID:bundleID center:center windowScene:windowScene];
+        self.lastLayoutOrientation = presentation.resolvedOrientation;
+        self.targetOrientation = presentation.resolvedOrientation;
+        
+        self.hostedSession = [[CV3HostedSceneSession alloc] initWithWindow:self];
+        self.requiresLandscapeContent = presentation.requiresLandscape;
+        self.prefersLandscapePresentation = presentation.prefersLandscape;
+        self.hostedContentOrientation = presentation.contentOrientation;
+        CV3LogToFile(@"[OrientationShellPolicy] phase=initial bundle=%@ source=%@ real=%ld live=%ld display=%ld selected=%ld prefersLandscape=%d requiresLandscape=%d",
+                     bundleID ?: @"nil",
+                     presentation.hasRealContent ? @"realContent" : (presentation.hasLiveScene ? @"liveClientScene" : @"fallback"),
+                     (long)presentation.realContentOrientation, (long)presentation.liveSceneOrientation,
+                     (long)currentOrientation,
+                     (long)presentation.resolvedOrientation, presentation.prefersLandscape,
+                     presentation.requiresLandscape);
+        self.allowProcessTerminationOnClose = NO;
+        [self enforcePortraitWindowGeometry];
+        self.windowLevel = CV3Style.floatingApp; // 高于普通 App，但低于通知栏/控制中心
+        self.backgroundColor = [UIColor clearColor];
+        self.alpha = 1.0;
+        
+        [self visualShadowLayer].shadowColor = [UIColor blackColor].CGColor;
+        [self visualShadowLayer].shadowOffset = CGSizeMake(0, 10);
+        [self visualShadowLayer].shadowOpacity = 0.16;
+        [self visualShadowLayer].shadowRadius = 24.0;
+        self.layer.cornerRadius = CV3Style.floatingChromeCornerRadius;
+        if (@available(iOS 13.0, *)) {
+            self.layer.cornerCurve = kCACornerCurveContinuous;
+        }
+        
+        // 核心修复：引入旋转根容器 (Root Transform Container)
+        // 该容器用于隔离系统 UIWindow 的 Transform 问题，承载全方位的视觉旋转
+        self.rootTransformContainer = [[UIView alloc] initWithFrame:self.bounds];
+        self.rootTransformContainer.backgroundColor = [UIColor clearColor];
+        // Do not expose an empty floating shell while FrontBoard is still
+        // attaching the remote canvas. The container is revealed atomically
+        // by finishHostingWhenRenderableWithRetries: once the real first frame
+        // and its final geometry are both available.
+        self.rootTransformContainer.hidden = YES;
+        [self addSubview:self.rootTransformContainer];
+
+        // 核心修复：引入内容包装层 (App Content Wrapper)
+        // 该层用于统一缩放动画，确保主内容与把手 (Home Bar) 同步缩放至图标
+        self.appContentWrapper = [[UIView alloc] initWithFrame:self.rootTransformContainer.bounds];
+        self.appContentWrapper.backgroundColor = [UIColor clearColor];
+        [self.rootTransformContainer addSubview:self.appContentWrapper];
+        // Keep polling the client's first landscape canvas so layout is
+        // refreshed as soon as its Scene transaction lands. The container must
+        // remain visible because some clients publish no canvas notification.
+        self.awaitingInitialRenderableContent = YES;
+        self.initialCanvasSoftGateStartedAt = 0;
+        // UIWindow starts life hidden before makeKeyAndVisible. That UIKit
+        // construction state is not a user/system request to keep it hidden.
+        self.requestedWindowHidden = NO;
+        self.contentVisibilityGateEnabled = YES;
+        [self refreshContentVisibilityGate];
+        [self clearOuterWindowShadow];
+        [self syncWindowShadowForCurrentState];
+
+        [self createFloatingHomeBarIfNeeded];
+
+        // 核心修复：引入非缩放裁剪层 (Clipping Container)
+        // 该层的大小始终等于窗口大小，负责强制执行圆角裁剪，不受内部缩放影响
+        self.clippingContainer = [[UIView alloc] initWithFrame:self.bounds];
+        self.clippingContainer.layer.cornerRadius = CV3Style.floatingChromeCornerRadius;
+        if (@available(iOS 13.0, *)) {
+            self.clippingContainer.layer.cornerCurve = kCACornerCurveContinuous;
+        }
+        self.clippingContainer.layer.masksToBounds = YES;
+        // 222：去除 1px 外框（深色模式下为白 18%——用户反馈“画面周边白色细线”的另一来源）
+        self.clippingContainer.layer.borderWidth = 0.0;
+        self.clippingContainer.backgroundColor = [UIColor clearColor];
+        [self.appContentWrapper addSubview:self.clippingContainer];
+
+        // The hosted scene must be the first visible content. A material effect
+        // here becomes a bright veil while the remote canvas is still making
+        // its first commit, so keep the fallback completely transparent.
+        self.glassBackdrop = [[UIVisualEffectView alloc] initWithEffect:nil];
+        self.glassBackdrop.backgroundColor = [UIColor clearColor];
+        self.glassBackdrop.frame = self.clippingContainer.bounds;
+        self.glassBackdrop.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [self.clippingContainer insertSubview:self.glassBackdrop atIndex:0];
+
+        // Liquid Glass 外壳（2026-10-16）：自建 CABackdropLayer 玻璃底（公用实现，CV3LiquidGlassSupport.h）。
+        // 与系统材质的区别：首帧窗口服务器捕捉的结果是一片模糊背景（非白色 veil），hosted 内容就绪后自然覆盖其上。
+        BOOL shellGlassCreated = NO;
+        CV3LiquidGlassEnsureBackdrop(self.clippingContainer,
+                                     @"CV3FloatingShellLiquidGlassBackdrop",
+                                     CV3LiquidGlassRecipeWindow(),
+                                     CV3Style.floatingChromeCornerRadius,
+                                     &shellGlassCreated);
+        if (shellGlassCreated) {
+            CV3LogToFile(@"[LiquidGlass] installed surface=floating-shell bundle=%@ size=%.0fx%.0f",
+                         self.bundleID, self.clippingContainer.bounds.size.width, self.clippingContainer.bounds.size.height);
+        }
+
+        CGFloat initialRadius = CV3Style.floatingChromeCornerRadius;
+        
+        self.cyanLayer = [CALayer layer];
+        self.cyanLayer.frame = self.clippingContainer.bounds;
+        self.cyanLayer.borderColor = [[UIColor cyanColor] colorWithAlphaComponent:0.12].CGColor;
+        self.cyanLayer.borderWidth = 0.0; // 221：去除历史“液态分光”彩框（用户反馈画面周边白线/亮边）
+        self.cyanLayer.cornerRadius = initialRadius;
+        [self.clippingContainer.layer addSublayer:self.cyanLayer];
+
+        self.magentaLayer = [CALayer layer];
+        self.magentaLayer.frame = self.clippingContainer.bounds;
+        self.magentaLayer.borderColor = [[UIColor magentaColor] colorWithAlphaComponent:0.12].CGColor;
+        self.magentaLayer.borderWidth = 0.0; // 221：同上（去彩框）
+        self.magentaLayer.cornerRadius = initialRadius;
+        [self.clippingContainer.layer addSublayer:self.magentaLayer];
+
+        self.innerGlowLayer = [CALayer layer];
+        self.innerGlowLayer.frame = self.clippingContainer.bounds;
+        self.innerGlowLayer.borderColor = [[UIColor labelColor] colorWithAlphaComponent:0.45].CGColor;
+        self.innerGlowLayer.borderWidth = 0.0; // 221：白色细线元凶（内发光边框 45% 白 0.3pt），去除
+        self.innerGlowLayer.cornerRadius = initialRadius;
+        [self.clippingContainer.layer addSublayer:self.innerGlowLayer];
+
+        self.specularHighlight = [CAGradientLayer layer];
+        self.specularHighlight.frame = self.clippingContainer.bounds;
+        self.specularHighlight.colors = @[
+            (id)[[UIColor whiteColor] colorWithAlphaComponent:0.0].CGColor,
+            (id)[[UIColor whiteColor] colorWithAlphaComponent:0.15].CGColor,
+            (id)[[UIColor whiteColor] colorWithAlphaComponent:0.0].CGColor
+        ];
+        self.specularHighlight.startPoint = CGPointMake(0.0, 0.0);
+        self.specularHighlight.endPoint = CGPointMake(1.0, 1.0);
+        self.specularHighlight.cornerRadius = initialRadius;
+        [self.clippingContainer.layer addSublayer:self.specularHighlight];
+
+        // 代理容器：用来隔离系统的布局覆盖，承载真实的缩放和裁剪
+        self.hostContainerProxy = [[UIView alloc] initWithFrame:self.bounds];
+        self.hostContainerProxy.backgroundColor = [UIColor clearColor];
+        // 核心修复：应用三线性过滤 (Trilinear Filtering)
+        // 在非整数缩放比下，三线性过滤能显著减少文本和细线的锯齿，提升渲染清晰度
+        self.hostContainerProxy.layer.magnificationFilter = kCAFilterTrilinear;
+        self.hostContainerProxy.layer.minificationFilter = kCAFilterTrilinear;
+        
+        [self.clippingContainer addSubview:self.hostContainerProxy];
+
+        // 219：启动占位（像主屏启动 App 的 Launch Screen）——挂载完成即显示窗口（带占位），
+        // 真实画面在占位后渲染，就绪后淡出——消除“先玻璃板、后画面”的两段感。
+        [self installLaunchPlaceholderIfNeeded];
+
+        [self ensureLaunchSplashVisible];
+        
+        // 侧边隐藏拉手 (Grabber -> Prism Switcher)
+        self.stashGrabber = [[CV3StashGrabberView alloc] initWithFrame:CGRectMake(0, 0, kCV3StashIconSize, kCV3StashIconSize)];
+        self.stashGrabber.backgroundColor = [UIColor clearColor];
+        self.stashGrabber.layer.cornerRadius = 0;
+        self.stashGrabber.layer.borderWidth = 0;
+        self.stashGrabber.layer.shadowColor = [UIColor blackColor].CGColor;
+        self.stashGrabber.layer.shadowOffset = CGSizeMake(0, 10);
+        self.stashGrabber.layer.shadowOpacity = 0.26;
+        self.stashGrabber.layer.shadowRadius = 18.0;
+        self.stashGrabber.alpha = 0; // 初始隐藏
+        [self addSubview:self.stashGrabber];
+
+        self.stashIconBackdropView = [[UIVisualEffectView alloc] initWithEffect:nil]; // Liquid Glass：ChromeMaterial 退役，玻璃底由 updateStashIconAppearance 安装
+        self.stashIconBackdropView.userInteractionEnabled = NO;
+        self.stashIconBackdropView.clipsToBounds = YES;
+        [self.stashGrabber addSubview:self.stashIconBackdropView];
+
+        self.stashIconHighlightLayer = [CAGradientLayer layer];
+        self.stashIconHighlightLayer.startPoint = CGPointMake(0.0, 0.0);
+        self.stashIconHighlightLayer.endPoint = CGPointMake(1.0, 1.0);
+        [self.stashIconBackdropView.contentView.layer addSublayer:self.stashIconHighlightLayer];
+
+        self.appIconMiniView = [[UIImageView alloc] initWithFrame:CGRectMake(kCV3StashIconInset, kCV3StashIconInset, kCV3StashIconSize - kCV3StashIconInset * 2.0, kCV3StashIconSize - kCV3StashIconInset * 2.0)];
+        self.appIconMiniView.layer.cornerRadius = 10;
+        self.appIconMiniView.clipsToBounds = YES;
+        self.appIconMiniView.contentMode = UIViewContentModeScaleAspectFill;
+        self.appIconMiniView.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.30].CGColor;
+        self.appIconMiniView.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;
+        [self.stashGrabber addSubview:self.appIconMiniView];
+        [self updateStashIconAppearance];
+
+        UITapGestureRecognizer *restoreTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleRestoreTap:)];
+        [self.stashGrabber addGestureRecognizer:restoreTap];
+
+        UIPanGestureRecognizer *restorePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleStashPan:)];
+        [self.stashGrabber addGestureRecognizer:restorePan];
+
+        UILongPressGestureRecognizer *stashClose = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleStashLongPress:)];
+        stashClose.minimumPressDuration = 0.8;
+        stashClose.allowableMovement = 12.0;
+        [self.stashGrabber addGestureRecognizer:stashClose];
+
+        self.stashGrabber.userInteractionEnabled = YES;
+
+        [self clampToScreenBounds];
+        [self layoutFloatingHomeBarForBounds:self.appContentWrapper.bounds];
+        [self updateAdaptiveColor];
+
+        [self loadAppScene];
+        
+        // 核心修复：监听 Scene 变更与系统通知，确保窗口持久存在
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(attachToCurrentActiveScene) name:UISceneDidActivateNotification object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(enforceSceneForegroundState) name:UISceneDidEnterBackgroundNotification object:nil];
+        [[UIDevice currentDevice] beginGeneratingDeviceOrientationNotifications];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(physicalDeviceOrientationDidChange:)
+                                                     name:UIDeviceOrientationDidChangeNotification
+                                                   object:[UIDevice currentDevice]];
+
+        // Assertions are refreshed by state changes; this slower watchdog only retries failures.
+        self.assertionWatchdogTimer = [NSTimer scheduledTimerWithTimeInterval:15.0 target:self selector:@selector(assertionWatchdogTick:) userInfo:nil repeats:YES];
+        
+        // Each window owns exactly one registry reference. The ownership bit
+        // makes closeWindow and dealloc safe to call in either order.
+        self.sharedGeometryRetained = CV3RetainSharedGeometry(self.bundleID);
+        CV3LogToFile(@"[ChevronProbe][SharedGeometry] phase=retain bundle=%@ retained=%d",
+                     self.bundleID ?: @"<nil>", self.sharedGeometryRetained);
+        [self.hostedSession setActive:YES];
+        self.receptionTraceTimer = [NSTimer timerWithTimeInterval:0.25
+                                                           target:self
+                                                         selector:@selector(receptionTraceTimerFired:)
+                                                         userInfo:nil
+                                                          repeats:YES];
+        [[NSRunLoop mainRunLoop] addTimer:self.receptionTraceTimer forMode:NSRunLoopCommonModes];
+        [self recordReceptionTrace:@"window.init" force:YES];
+        [self recordOrientationTrace:@"init.complete" force:YES];
+        // 220：创建完成即允许“启动占位”显示——创建链随后的 setWindowFocused/promote（makeKeyAndVisible）
+        // 会立即把窗口显示出来（带 App 启动图），不再等挂载/画面就绪。
+        self.placeholderRevealAllowed = YES;
+    }
+    return self;
+}
+
+- (void)setHidden:(BOOL)hidden {
+    self.requestedWindowHidden = hidden;
+    if (self.isSuppressedByLockScreen) {
+        [super setHidden:YES];
+        [self refreshContentVisibilityGate];
+        return;
+    }
+
+    // Keep a visible hosted window attached during ordinary workspace transitions.
+    if (hidden && !self.isStashed && !self.isClosing) {
+        self.requestedWindowHidden = NO;
+        CV3LogToFile(@"[Visibility] 拦截系统隐藏请求: %@", self.bundleID);
+        // 217：首帧流程完成前，拦截后的“显示”也交给内容门控统一裁决——
+        // 否则系统在构造/清理序列里的一次隐藏请求会反过来把空玻璃窗口显示出来。
+        // 219：占位可显示后（挂载完成）不再拦截——由占位路径放行。
+        if (!self.initialRevealBufferDone && !self.placeholderRevealAllowed) {
+            [self refreshContentVisibilityGate];
+            return;
+        }
+        [super setHidden:NO];
+        [self attachToCurrentActiveScene];
+        [self refreshContentVisibilityGate];
+        return;
+    }
+    // 217：首帧流程完成前，一切“显示”请求统一交内容门控裁决（setHidden:NO / makeKeyAndVisible
+    // 都经此路径），防止绕过预渲染缓冲提前露出空玻璃窗口。
+    if (!hidden && !self.initialRevealBufferDone && !self.isStashed && !self.isClosing && !self.placeholderRevealAllowed) {
+        [self refreshContentVisibilityGate];
+        return;
+    }
+    CV3LogToFile(@"[Visibility] 窗口 Hidden 状态变更 -> %d: %@", hidden, self.bundleID);
+    [super setHidden:hidden];
+    [self refreshContentVisibilityGate];
+    [self recordReceptionTrace:hidden ? @"window.hidden" : @"window.visible" force:YES];
+}
+
+- (void)attachToCurrentActiveScene {
+    CV3LogToFile(@"[Scene] 开始尝试同步挂载场景: %@", self.bundleID);
+    @try {
+        UIWindowScene *targetScene = nil;
+        
+        // 1. 终极优先：获取 SpringBoard 核心主场景 (SBWindowSceneSessionRoleMain)
+        targetScene = CV3InvokeObject(CV3ClassNamed(@"SBWindowScene"), @selector(mainDisplayWindowScene));
+        
+        // 2. 备选方案：遍历场景并严格过滤非显示角色
+        if (!targetScene) {
+            for (UIScene *scene in [[UIApplication sharedApplication].connectedScenes allObjects]) {
+                if ([scene isKindOfClass:[UIWindowScene class]]) {
+                    UIWindowScene *ws = (UIWindowScene *)scene;
+                    NSString *role = ws.session.role;
+                    
+                    // 核心修正：严格排除灵动岛相关的幕帘场景
+                    // 这些场景在上滑 Home 条时会活跃，但会导致我们的窗口被系统优化掉
+                    if ([role containsString:@"Aperture"] || [role containsString:@"Curtain"]) {
+                        continue;
+                    }
+                    
+                    if (ws.activationState == UISceneActivationStateForegroundActive) {
+                        targetScene = ws;
+                        break;
+                    }
+                }
+            }
+        }
+        
+        // 3. 强制同步场景挂载。
+        if (targetScene && (self.windowScene != targetScene || !self.windowScene)) {
+            NSString *role = targetScene.session.role ?: @"Unknown";
+            CV3LogToFile(@"[Scene] 成功将窗口 (%@) 挂载至主场景: %@ (Role: %@)", self.bundleID, targetScene, role);
+            self.windowScene = targetScene;
+            CV3SceneRotationContext context = CV3MakeSceneRotationContext(targetScene);
+            [self applySceneRotationContext:context force:NO];
+            [self setHidden:NO];
+            [self setNeedsLayout];
+            [self layoutIfNeeded];
+        } else if (!targetScene) {
+            CV3LogToFile(@"[Scene] 警告：未能找到可用的显示级 targetScene: %@", self.bundleID);
+        }
+        
+        // 4. 无论如何，强制维持内部 App 场景的活跃状态
+        [self enforceSceneForegroundState];
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Error] attachToCurrentActiveScene 异常: %@", e);
+    }
+}
+
+- (void)refreshHostViewPresentation {
+    if (!self.targetScene || !self.hostView) {
+        return;
+    }
+
+    @try {
+        // _setPresentationContext: is not an ordinary property setter. Each new
+        // context asks FrontBoard to publish another set of CALayerHost surfaces.
+        // Rebinding it during every portrait/landscape video transition leaves
+        // the previous surface alive, so a stale portrait layer can cover the
+        // correctly resized landscape host. Treat an existing context as the
+        // live hosting session and only restore the view's visibility here.
+        id existingContext = CV3TargetRespondsToSelector(self.hostView, @selector(presentationContext))
+            ? CV3InvokeObject(self.hostView, @selector(presentationContext))
+            : nil;
+        if (existingContext) {
+            NSMutableArray<NSString *> *contextValues = [NSMutableArray array];
+            for (NSString *key in @[@"interfaceOrientation", @"orientation", @"bounds", @"frame",
+                                    @"presentedLayerTypes", @"appearanceStyle", @"clipsToBounds"]) {
+                id value = nil;
+                @try { value = [existingContext valueForKey:key]; } @catch (__unused NSException *exception) {}
+                if (value) [contextValues addObject:[NSString stringWithFormat:@"%@=%@", key, value]];
+            }
+            CV3LogToFile(@"[KeyboardDebug] presentationContext.reused class=%@ ptr=%p values={%@} hostBounds=%@ hostLayer=%@ sceneOrientation=%ld hostedOrientation=%ld",
+                         NSStringFromClass([existingContext class]), existingContext,
+                         [contextValues componentsJoinedByString:@";"],
+                         NSStringFromCGRect(self.hostView.bounds),
+                         NSStringFromCGRect(self.hostView.layer.bounds),
+                         (long)self.windowScene.interfaceOrientation,
+                         (long)self.hostedContentOrientation);
+        } else {
+            CV3LogToFile(@"[KeyboardDebug] presentationContext.missing hostBounds=%@ hostLayer=%@ sceneOrientation=%ld hostedOrientation=%ld",
+                         NSStringFromCGRect(self.hostView.bounds),
+                         NSStringFromCGRect(self.hostView.layer.bounds),
+                         (long)self.windowScene.interfaceOrientation,
+                         (long)self.hostedContentOrientation);
+        }
+        if (existingContext) {
+            self.hostView.alpha = 1.0;
+            self.hostView.hidden = NO;
+            return;
+        }
+
+        // [Safety Restore] 恢复至 7 (1|2|4)，确保键盘可弹出。
+        // 由于已解决布局死锁，恢复 2(Keyboard) 和 4(KeyboardBg) 是安全的。
+        UIScenePresentationContext *context = [[CV3ClassNamed(@"UIScenePresentationContext") alloc] _initWithDefaultValues];
+        if ([context respondsToSelector:@selector(setPresentedLayerTypes:)]) {
+            [context setPresentedLayerTypes:7];
+        }
+        if ([context respondsToSelector:@selector(setAppearanceStyle:)]) {
+            BOOL previousSuppress = CV3SuppressPresentationContextFanout;
+            CV3SuppressPresentationContextFanout = YES;
+            @try {
+                [context setAppearanceStyle:2];
+            } @finally {
+                CV3SuppressPresentationContextFanout = previousSuppress;
+            }
+        }
+        if ([context respondsToSelector:@selector(setClipsToBounds:)]) {
+            [context setClipsToBounds:YES];
+        }
+        
+        CV3InvokeObject1(self.hostView, @selector(_setPresentationContext:), context);
+        
+        self.hostView.alpha = 1.0;
+        self.hostView.hidden = NO;
+        
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Error] 热刷新渲染失败: %@", e);
+    }
+}
+
+- (void)beginHostPresentationRepublishIfNeeded:(NSString *)reason {
+    if (!self.hostPresentationRepublishPending || self.pendingRepublishedHostView ||
+        !self.targetScene || !self.hostView || self.isClosing || self.isStashed) return;
+
+    self.hostPresentationRepublishPending = NO;
+    UIView *oldHost = self.hostView;
+    NSString *oldContextID = CV3HostedLayerContextID(oldHost.layer);
+    NSUInteger generation = ++self.hostPresentationRepublishGeneration;
+
+    @try {
+        id hostManager = CV3InvokeObject(self.targetScene, @selector(hostManager));
+        NSString *requester = [NSString stringWithFormat:@"com.xu.chevronv3.host.%@.orientation.%lu",
+                               self.bundleID, (unsigned long)generation];
+        SEL enableSelector = @selector(enableHostingForRequester:orderFront:);
+        if (!hostManager || !CV3TargetRespondsToSelector(hostManager, enableSelector)) {
+            CV3LogToFile(@"[HostRepublish] trace=%@ phase=manager.unavailable generation=%lu manager=%@ requester=%@",
+                         self.coldLaunchTraceID, (unsigned long)generation, hostManager, requester);
+            return;
+        }
+        ((void (*)(id, SEL, id, BOOL))objc_msgSend)(hostManager, enableSelector, requester, YES);
+        self.pendingRepublishedRequester = requester;
+        self.pendingRepublishedContextID = nil;
+        self.pendingRepublishedStableCount = 0;
+        CV3LogToFile(@"[HostRepublish] trace=%@ phase=manager.enabled generation=%lu reason=%@ requester=%@ oldHost=%p oldContextId=%@ resolver={%@}",
+                     self.coldLaunchTraceID, (unsigned long)generation, reason ?: @"unknown",
+                     requester, oldHost, oldContextID ?: @"nil",
+                     CV3OrientationResolverTrace(CV3InvokeObject(self.targetScene, @selector(settings))));
+        [self acquireRepublishedHostViewForGeneration:generation oldHost:oldHost
+                                         oldContextID:oldContextID retries:40];
+    } @catch (NSException *exception) {
+        CV3LogToFile(@"[HostRepublish] trace=%@ phase=manager.exception generation=%lu exception=%@",
+                     self.coldLaunchTraceID, (unsigned long)generation, exception);
+    }
+}
+
+- (void)acquireRepublishedHostViewForGeneration:(NSUInteger)generation
+                                        oldHost:(UIView *)oldHost
+                                   oldContextID:(NSString *)oldContextID
+                                        retries:(NSInteger)retries {
+    if (generation != self.hostPresentationRepublishGeneration || self.isClosing ||
+        self.pendingRepublishedRequester.length == 0) return;
+
+    UIView *newHost = nil;
+    id hostManager = CV3InvokeObject(self.targetScene, @selector(hostManager));
+    SEL selector = @selector(hostViewForRequester:enableAndOrderFront:);
+    @try {
+        if (CV3TargetRespondsToSelector(hostManager, selector)) {
+            newHost = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
+                hostManager, selector, self.pendingRepublishedRequester, YES);
+        }
+    } @catch (NSException *exception) {
+        CV3LogToFile(@"[HostRepublish] trace=%@ phase=manager.acquire.exception generation=%lu requester=%@ exception=%@",
+                     self.coldLaunchTraceID, (unsigned long)generation,
+                     self.pendingRepublishedRequester, exception);
+    }
+
+    if (newHost && newHost != oldHost) {
+        newHost.backgroundColor = UIColor.clearColor;
+        newHost.layer.cornerRadius = 0;
+        newHost.layer.masksToBounds = YES;
+        newHost.transform = CGAffineTransformIdentity;
+        newHost.frame = [self currentHostedSceneBounds];
+        newHost.accessibilityIdentifier = @"ChevronV3PendingHost";
+        [self.hostContainerProxy insertSubview:newHost belowSubview:oldHost];
+        [newHost setNeedsLayout];
+        [newHost layoutIfNeeded];
+        self.pendingRepublishedHostView = newHost;
+        CV3LogToFile(@"[HostRepublish] trace=%@ phase=manager.acquired generation=%lu requester=%@ oldHost=%p newHost=%p oldContextId=%@ newContextId=%@ frame=%@",
+                     self.coldLaunchTraceID, (unsigned long)generation,
+                     self.pendingRepublishedRequester, oldHost, newHost,
+                     oldContextID ?: @"nil", CV3HostedLayerContextID(newHost.layer) ?: @"nil",
+                     NSStringFromCGRect(newHost.frame));
+        [self pollRepublishedHostViewForGeneration:generation oldHost:oldHost
+                                      oldContextID:oldContextID retries:80];
+        return;
+    }
+
+    CV3LogToFile(@"[HostRepublish] trace=%@ phase=manager.acquire.wait generation=%lu requester=%@ retries=%ld result=%p sameAsOld=%d",
+                 self.coldLaunchTraceID, (unsigned long)generation,
+                 self.pendingRepublishedRequester, (long)retries, newHost, newHost == oldHost);
+    if (retries <= 0) {
+        SEL disableSelector = @selector(disableHostingForRequester:);
+        if (CV3TargetRespondsToSelector(hostManager, disableSelector)) {
+            ((void (*)(id, SEL, id))objc_msgSend)(hostManager, disableSelector,
+                                                  self.pendingRepublishedRequester);
+        }
+        self.pendingRepublishedRequester = nil;
+        CV3LogToFile(@"[HostRepublish] trace=%@ phase=manager.acquire.timeout generation=%lu keptOldHost=%p oldContextId=%@",
+                     self.coldLaunchTraceID, (unsigned long)generation, oldHost,
+                     oldContextID ?: @"nil");
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self acquireRepublishedHostViewForGeneration:generation oldHost:oldHost
+                                         oldContextID:oldContextID retries:retries - 1];
+    });
+}
+
+- (void)pollRepublishedHostViewForGeneration:(NSUInteger)generation
+                                     oldHost:(UIView *)oldHost
+                                oldContextID:(NSString *)oldContextID
+                                     retries:(NSInteger)retries {
+    UIView *newHost = self.pendingRepublishedHostView;
+    if (!newHost || generation != self.hostPresentationRepublishGeneration || self.isClosing) return;
+
+    NSString *newContextID = CV3HostedLayerContextID(newHost.layer);
+    BOOL hasRemoteContext = newContextID.length > 0;
+    BOOL sameProducerContext = oldContextID.length > 0 &&
+        [newContextID isEqualToString:oldContextID];
+    BOOL hasTree = newHost.layer.sublayers.count > 0 || newHost.subviews.count > 0;
+    BOOL mainLayer = CV3SceneHasRenderableMainLayer(self.targetScene);
+    CGRect expectedBounds = [self currentHostedSceneBounds];
+    CGRect presentedBounds = newHost.layer.presentationLayer
+        ? newHost.layer.presentationLayer.bounds : CGRectZero;
+    BOOL geometryReady = fabs(CGRectGetWidth(newHost.bounds) - CGRectGetWidth(expectedBounds)) <= 1.0 &&
+        fabs(CGRectGetHeight(newHost.bounds) - CGRectGetHeight(expectedBounds)) <= 1.0 &&
+        fabs(CGRectGetWidth(presentedBounds) - CGRectGetWidth(expectedBounds)) <= 1.0 &&
+        fabs(CGRectGetHeight(presentedBounds) - CGRectGetHeight(expectedBounds)) <= 1.0;
+
+    if (hasRemoteContext && hasTree && mainLayer && geometryReady) {
+        if ([self.pendingRepublishedContextID isEqualToString:newContextID]) {
+            self.pendingRepublishedStableCount += 1;
+        } else {
+            self.pendingRepublishedContextID = newContextID;
+            self.pendingRepublishedStableCount = 1;
+        }
+    } else {
+        self.pendingRepublishedStableCount = 0;
+    }
+
+    CV3LogToFile(@"[HostRepublish] trace=%@ phase=poll generation=%lu requester=%@ retries=%ld oldContextId=%@ newContextId=%@ sameProducerContext=%d tree=%d mainLayer=%d geometryReady=%d bounds=%@ presentedBounds=%@ expected=%@ stable=%lu",
+                 self.coldLaunchTraceID, (unsigned long)generation,
+                 self.pendingRepublishedRequester, (long)retries, oldContextID ?: @"nil",
+                 newContextID ?: @"nil", sameProducerContext, hasTree, mainLayer,
+                 geometryReady, NSStringFromCGRect(newHost.bounds),
+                 NSStringFromCGRect(presentedBounds), NSStringFromCGRect(expectedBounds),
+                 (unsigned long)self.pendingRepublishedStableCount);
+
+    if (self.pendingRepublishedStableCount >= 2) {
+        [UIView performWithoutAnimation:^{
+            newHost.accessibilityIdentifier = @"ChevronV3Host";
+            [self.hostContainerProxy bringSubviewToFront:newHost];
+            self.hostView = newHost;
+            self.pendingRepublishedHostView = nil;
+            [self setNeedsLayout];
+            [self layoutIfNeeded];
+            [oldHost removeFromSuperview];
+            if ([oldHost respondsToSelector:@selector(invalidate)]) {
+                CV3InvokeObject(oldHost, @selector(invalidate));
+            }
+        }];
+        NSString *oldRequester = self.sceneHostingRequester;
+        self.sceneHostingRequester = self.pendingRepublishedRequester;
+        self.pendingRepublishedRequester = nil;
+        if (oldRequester.length > 0 && ![oldRequester isEqualToString:self.sceneHostingRequester]) {
+            id hostManager = CV3InvokeObject(self.targetScene, @selector(hostManager));
+            SEL disableSelector = @selector(disableHostingForRequester:);
+            if (CV3TargetRespondsToSelector(hostManager, disableSelector)) {
+                ((void (*)(id, SEL, id))objc_msgSend)(hostManager, disableSelector, oldRequester);
+            }
+        }
+        CV3LogToFile(@"[HostRepublish] trace=%@ phase=swapped generation=%lu requester=%@ oldHost=%p newHost=%p oldContextId=%@ newContextId=%@ sameProducerContext=%d",
+                     self.coldLaunchTraceID, (unsigned long)generation,
+                     self.sceneHostingRequester, oldHost, newHost, oldContextID ?: @"nil",
+                     newContextID ?: @"nil", sameProducerContext);
+        [self recordStrictSplitTrace:@"hostRepublish.swapped"
+                             details:[NSString stringWithFormat:@"generation=%lu old=%@ new=%@",
+                                      (unsigned long)generation, oldContextID ?: @"nil",
+                                      newContextID ?: @"nil"]];
+        return;
+    }
+
+    if (retries <= 0) {
+        [newHost removeFromSuperview];
+        if ([newHost respondsToSelector:@selector(invalidate)]) CV3InvokeObject(newHost, @selector(invalidate));
+        self.pendingRepublishedHostView = nil;
+        self.pendingRepublishedContextID = nil;
+        self.pendingRepublishedStableCount = 0;
+        id hostManager = CV3InvokeObject(self.targetScene, @selector(hostManager));
+        SEL disableSelector = @selector(disableHostingForRequester:);
+        if (self.pendingRepublishedRequester.length > 0 &&
+            CV3TargetRespondsToSelector(hostManager, disableSelector)) {
+            ((void (*)(id, SEL, id))objc_msgSend)(hostManager, disableSelector,
+                                                  self.pendingRepublishedRequester);
+        }
+        self.pendingRepublishedRequester = nil;
+        CV3LogToFile(@"[HostRepublish] trace=%@ phase=timeout generation=%lu keptOldHost=%p oldContextId=%@",
+                     self.coldLaunchTraceID, (unsigned long)generation,
+                     oldHost, oldContextID ?: @"nil");
+        return;
+    }
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self pollRepublishedHostViewForGeneration:generation oldHost:oldHost
+                                      oldContextID:oldContextID retries:retries - 1];
+    });
+}
+
+- (UIView *)hostViewForScene:(FBScene *)scene {
+    if (!scene) return nil;
+
+    @try {
+        id hostManager = CV3InvokeObject(scene, @selector(hostManager));
+        if (!hostManager) return nil;
+
+        NSString *requester = [NSString stringWithFormat:@"com.xu.chevronv3.host.%@", self.bundleID];
+        SEL hostViewSelector = @selector(hostViewForRequester:enableAndOrderFront:);
+        if (CV3TargetRespondsToSelector(hostManager, hostViewSelector)) {
+            UIView *hostView = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(hostManager,
+                                                                        hostViewSelector,
+                                                                        requester,
+                                                                        YES);
+            if (hostView) {
+                self.sceneHostingRequester = requester;
+                CV3LogToFile(@"[SceneHost] 已通过 FrontBoard 获取渲染视图: %@", self.bundleID);
+                return hostView;
+            }
+        }
+
+        SEL enableSelector = @selector(enableHostingForRequester:orderFront:);
+        if (CV3TargetRespondsToSelector(hostManager, enableSelector)) {
+            ((void (*)(id, SEL, id, BOOL))objc_msgSend)(hostManager, enableSelector, requester, YES);
+            self.sceneHostingRequester = requester;
+            CV3LogToFile(@"[SceneHost] 已启用 FrontBoard 托管，使用容器回退: %@", self.bundleID);
+        }
+    } @catch (NSException *exception) {
+        CV3LogToFile(@"[Error] 启用 Scene 托管失败 %@: %@", self.bundleID, exception);
+    }
+    return nil;
+}
+
+- (void)disableHostingForCurrentScene {
+    NSString *requester = self.sceneHostingRequester;
+    if (!requester) return;
+
+    FBScene *scene = self.targetScene;
+    if (scene) {
+        @try {
+            id hostManager = CV3InvokeObject(scene, @selector(hostManager));
+            SEL selector = @selector(disableHostingForRequester:);
+            if (CV3TargetRespondsToSelector(hostManager, selector)) {
+                ((void (*)(id, SEL, id))objc_msgSend)(hostManager, selector, requester);
+            }
+        } @catch (NSException *exception) {
+            CV3LogToFile(@"[Error] 关闭 Scene 托管失败 %@: %@", self.bundleID, exception);
+        }
+    }
+    self.sceneHostingRequester = nil;
+}
+
+- (void)setHostLifecycleState:(CV3HostLifecycleState)state reason:(NSString *)reason {
+    if (self.hostLifecycleState == state) return;
+    CV3HostLifecycleState previous = self.hostLifecycleState;
+    self.hostLifecycleState = state;
+    CV3LogToFile(@"[HostState] %@ %@ -> %@ generation=%lu reason=%@",
+                 self.bundleID,
+                 CV3HostLifecycleStateName(previous),
+                 CV3HostLifecycleStateName(state),
+                 (unsigned long)self.sceneHostGeneration,
+                 reason ?: @"Unknown");
+}
+
+- (void)refreshContentVisibilityGate {
+    if (!self.contentVisibilityGateEnabled) return;
+    // The requested visibility is independent of the effective hidden state.
+    // Reading self.hidden here would feed our previous gate result back into it.
+    // 219/220：占位路径——只要占位在且已允许，窗口可立即显示（不依赖挂载/场景/画面）。
+    BOOL placeholderPath = self.placeholderRevealAllowed && self.launchPlaceholderView != nil;
+    BOOL blocked;
+    if (placeholderPath) {
+        blocked = !self.isStashed && self.isClosing;
+    } else {
+        blocked = !self.isStashed && (self.isClosing ||
+            self.awaitingInitialRenderableContent ||
+            self.hostLifecycleState != CV3HostLifecycleStateLive ||
+            !CV3InvokeBool(self.targetScene, @selector(isValid), NO) ||
+            ![self hostViewHasRenderableContent]);
+    }
+    BOOL effectiveHidden = self.requestedWindowHidden || self.isSuppressedByLockScreen ||
+        self.isClosing || blocked;
+    BOOL wasBlocked = self.windowPresentationBlocked;
+    BOOL changed = wasBlocked != blocked || self.hidden != effectiveHidden;
+    // 215/216：首次放行前的预渲染缓冲——挂载→跨进程合成通常还需几帧~百 ms，让窗口带着已出图的
+    // 画面一次性出现，消除“先玻璃板、后画面”的两段感。缓冲期间屏蔽一切提前显示（216 修补绕过）。
+    if (self.initialRevealBufferInFlight) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        if (!self.hidden) [super setHidden:YES];
+        [CATransaction commit];
+        return;
+    }
+    if (wasBlocked && !blocked && !self.initialRevealBufferDone && !self.placeholderRevealAllowed) {
+        self.initialRevealBufferInFlight = YES;
+        CV3LogToFile(@"[Recovery] phase=revealBuffer bundle=%@ delay=%.3fs generation=%lu",
+                     self.bundleID, kCV3InitialRevealBuffer, (unsigned long)self.sceneHostGeneration);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kCV3InitialRevealBuffer * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            self.initialRevealBufferInFlight = NO;
+            self.initialRevealBufferDone = YES;
+            [self refreshContentVisibilityGate];
+        });
+        return;
+    }
+    self.windowPresentationBlocked = blocked;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    if (self.hidden != effectiveHidden) [super setHidden:effectiveHidden];
+    [CATransaction commit];
+    if (changed) {
+        CV3LogToFile(@"[Recovery] phase=contentVisibility bundle=%@ blocked=%d generation=%lu stashed=%d context=%@ requestedHidden=%d effectiveHidden=%d windowHidden=%d layerHidden=%d",
+            self.bundleID, blocked, (unsigned long)self.sceneHostGeneration,
+            self.isStashed, CV3HostedLayerContextID(self.hostView.layer) ?: @"nil",
+            self.requestedWindowHidden, effectiveHidden, self.hidden, self.layer.hidden);
+    }
+}
+
+- (void)detachHostedSceneForReason:(NSString *)reason clearScene:(BOOL)clearScene {
+    [self setHostLifecycleState:CV3HostLifecycleStateReleasing reason:reason];
+    [self refreshContentVisibilityGate];
+    CV3ReleaseKeyboardHostingForWindow(self);
+    [self disableHostingForCurrentScene];
+    UIView *hostView = self.hostView;
+    self.hostView = nil;
+    if ([hostView respondsToSelector:@selector(invalidate)]) {
+        @try {
+            CV3InvokeObject(hostView, @selector(invalidate));
+        } @catch (NSException *exception) {
+            CV3LogToFile(@"[Error] HostView invalidate 失败 %@ reason=%@: %@", self.bundleID, reason, exception);
+        }
+    }
+    [hostView removeFromSuperview];
+    if (clearScene) self.targetScene = nil;
+    [self setHostLifecycleState:clearScene ? CV3HostLifecycleStateIdle : CV3HostLifecycleStateWaitingForScene
+                         reason:clearScene ? @"Detached" : @"DetachedForRetry"];
+    CV3LogToFile(@"[SceneHost] 已同步解绑托管场景 %@ reason=%@ clearScene=%d",
+                 self.bundleID, reason ?: @"Unknown", clearScene);
+}
+
+// 竖屏首帧软门控上限（秒）：等待客户端“app 激活”信号的最长时间；超时放行（绝不卡死揭幕）。
+static const NSTimeInterval kCV3InitialCanvasSoftGateMaxWait = 0.8;
+
+// 首帧门控的“激活维度”（212 竖屏 / 213 全量）：桥三态——2=已 Arm（托管开始，等激活）、
+// 1=已激活（≈启动完成、画面即将出图）、0=老桥/未托管。返回 YES=放行揭幕；NO=继续等待
+// （上限 kCV3InitialCanvasSoftGateMaxWait，超时放行——绝不卡死）。
+- (BOOL)initialActivationGateAllowsReveal {
+    NSString *activatedName = [NSString stringWithFormat:@"com.xu.chevronv3.appactivated.%@", self.bundleID];
+    int activatedToken = -1;
+    uint64_t activatedState = 0;
+    if (notify_register_check(activatedName.UTF8String, &activatedToken) == NOTIFY_STATUS_OK) {
+        notify_get_state(activatedToken, &activatedState);
+        notify_cancel(activatedToken);
+    }
+    BOOL appActivated = (activatedState == 1);
+    BOOL appArmed = (activatedState == 2);
+    if (appActivated || !appArmed) return YES; // 已激活 / 老桥或未托管 → 放行（旧行为）
+
+    NSTimeInterval now = CACurrentMediaTime();
+    if (self.initialCanvasSoftGateStartedAt <= 0) self.initialCanvasSoftGateStartedAt = now;
+    NSTimeInterval waited = now - self.initialCanvasSoftGateStartedAt;
+    if (waited < kCV3InitialCanvasSoftGateMaxWait) {
+        if (now - self.lastCanvasMismatchLoggedAt > 1.0) {
+            self.lastCanvasMismatchLoggedAt = now;
+            CV3LogToFile(@"[CanvasGate] %@ soft-wait(activated) waited=%.0fms waiting…",
+                         self.bundleID, waited * 1000.0);
+        }
+        return NO;
+    }
+    CV3LogToFile(@"[CanvasGate] %@ soft-gate release(reason=timeout) waited=%.0fms",
+                 self.bundleID, waited * 1000.0);
+    return YES;
+}
+
+- (BOOL)hostViewHasRenderableContent {
+    if (!self.hostView || !self.hostView.superview || self.hostView.hidden || self.hostView.alpha < 0.01) return NO;
+
+    id presentationContext = CV3InvokeObject(self.hostView, @selector(presentationContext));
+    if (CV3TargetRespondsToSelector(self.hostView, @selector(presentationContext)) && !presentationContext) return NO;
+    if (!CV3SceneHasRenderableMainLayer(self.targetScene)) return NO;
+    if (self.awaitingInitialRenderableContent) {
+        NSString *name = [NSString stringWithFormat:@"com.xu.chevronv3.canvas.%@", self.bundleID];
+        int token = -1;
+        uint64_t geometry = 0;
+        if (notify_register_check(name.UTF8String, &token) == NOTIFY_STATUS_OK) {
+            notify_get_state(token, &geometry);
+            notify_cancel(token);
+        }
+        CGSize expected = [self currentHostedSceneBounds].size;
+        CGFloat width = (geometry >> 16) & 0xFFFF;
+        CGFloat height = geometry & 0xFFFF;
+        BOOL canvasMatches = fabs(width - expected.width) <= 1.0 &&
+            fabs(height - expected.height) <= 1.0;
+        BOOL canvasLayerCommitReady = (geometry & CV3CanvasReadyFlag) != 0;
+
+        if (self.requiresLandscapeContent) {
+            // 硬门控（横屏）：必须等客户端画布就绪才揭幕
+            if (!canvasMatches || !canvasLayerCommitReady) {
+                NSTimeInterval now = CACurrentMediaTime();
+                if (now - self.lastCanvasMismatchLoggedAt > 1.0) {
+                    self.lastCanvasMismatchLoggedAt = now;
+                    CV3LogToFile(@"[CanvasGate] %@ client=%.0fx%.0f expected=%.0fx%.0f layerCommitReady=%d proxy=%@ host=%@ children=%@ settings=%@ initial=1 waiting…",
+                                 self.bundleID, width, height, expected.width, expected.height,
+                                 canvasLayerCommitReady,
+                                 NSStringFromCGRect(self.hostContainerProxy.bounds),
+                                 NSStringFromCGRect(self.hostView.frame), self.hostView.subviews,
+                                 CV3InvokeObject(self.targetScene, @selector(settings)));
+                }
+                return NO;
+            }
+            if (!self.coldLaunchCanvasMatchedRecorded) {
+                self.coldLaunchCanvasMatchedRecorded = YES;
+                [self recordColdLaunchMilestone:@"CANVAS_GEOMETRY_AND_LAYER_COMMIT_READY"
+                                        details:[NSString stringWithFormat:@"client=%.0fx%.0f expected=%.0fx%.0f",
+                                                 width, height, expected.width, expected.height]];
+            }
+            // The client reports this flag only after its Core Animation repair
+            // transaction has committed, so no fixed post-geometry delay is needed.
+            CV3LogToFile(@"[CanvasGate] %@ client=%.0fx%.0f geometry and layer commit ready",
+                         self.bundleID, width, height);
+            // 213：画布几何就绪 ≠ 画面出图——再等 app 激活信号（老桥/已激活直接放行）
+            if (![self initialActivationGateAllowsReveal]) return NO;
+        } else {
+            // 竖屏：激活维度门控（212 起）——等 app 激活（≈启动完成、画面即将出图）；
+            // 老桥/未托管直接放行；上限超时放行。详见 initialActivationGateAllowsReveal。
+            if (![self initialActivationGateAllowsReveal]) return NO;
+        }
+    }
+    return self.hostView.layer.sublayers.count > 0 || self.hostView.subviews.count > 0;
+}
+
+- (void)recoverHostedPresentationIfNeeded:(NSString *)reason {
+    if (self.isClosing || self.isStashed || self.isMovingWindow || !self.targetScene ||
+        self.hostLifecycleState != CV3HostLifecycleStateLive) return;
+
+    NSTimeInterval now = CACurrentMediaTime();
+    if (self.hostContentRecoveryInFlight && now - self.lastHostContentRecoveryAt < 3.0) return;
+    self.hostContentRecoveryInFlight = NO;
+
+    BOOL hostAttached = self.hostView && self.hostView.superview &&
+        !self.hostView.hidden && self.hostView.alpha > 0.01;
+    BOOL hasPresentationContext = !CV3TargetRespondsToSelector(self.hostView, @selector(presentationContext)) ||
+        CV3InvokeObject(self.hostView, @selector(presentationContext)) != nil;
+    BOOL hasMainLayer = CV3SceneHasRenderableMainLayer(self.targetScene);
+
+    if (hostAttached && hasPresentationContext && hasMainLayer) {
+        self.hostContentFailureCount = 0;
+        return;
+    }
+
+    if (!CV3InvokeBool(self.targetScene, @selector(isValid), YES)) {
+        CV3LogToFile(@"[Recovery] phase=closeInvalidScene bundle=%@ reason=%@ mainLayer=%d",
+                     self.bundleID, reason ?: @"Heartbeat", hasMainLayer);
+        [self closeWindow];
+        return;
+    }
+
+    self.hostContentFailureCount += 1;
+    if (self.hostContentFailureCount < 2) return;
+
+    if (now - self.lastHostContentRecoveryAt < 3.0) return;
+    self.lastHostContentRecoveryAt = now;
+    self.hostContentRecoveryInFlight = YES;
+
+    CV3LogToFile(@"[Recovery] 托管内容层丢失，保留音频与浮窗几何并重建显示层: %@ reason=%@ host=%d context=%d mainLayer=%d",
+                 self.bundleID, reason ?: @"Heartbeat", hostAttached, hasPresentationContext, hasMainLayer);
+    [self ensureLaunchSplashVisible];
+    // Invalidate all delayed attach/retry callbacks from the old host before
+    // detaching. Reusing the same generation allows stale callbacks to race
+    // the recovery mount and create duplicate host views.
+    self.sceneHostGeneration += 1;
+    [self detachHostedSceneForReason:@"HostedContentUnavailable" clearScene:NO];
+    [self attemptToHostSceneWithRetries:6 delay:0.05 generation:self.sceneHostGeneration];
+}
+
+- (void)finishHostingWhenRenderableWithRetries:(NSInteger)retries {
+    [self finishHostingWhenRenderableWithRetries:retries generation:self.sceneHostGeneration];
+}
+
+- (void)finishHostingWhenRenderableWithRetries:(NSInteger)retries generation:(NSUInteger)generation {
+    if (self.isClosing || !self.hostView || generation != self.sceneHostGeneration) return;
+    // Remote content children can arrive after the host wrapper is attached.
+    // Give them the final canvas before declaring the loading surface ready.
+    [self setNeedsLayout];
+    [self layoutIfNeeded];
+    if ([self hostViewHasRenderableContent]) {
+        [self recordColdLaunchMilestone:@"RENDERABLE_CONFIRMED"
+                                details:[NSString stringWithFormat:@"host=%@ canvas=%@",
+                                         NSStringFromCGRect(self.hostView.frame),
+                                         NSStringFromCGRect(self.hostContainerProxy.bounds)]];
+        self.hostContentFailureCount = 0;
+        self.hostContentRecoveryInFlight = NO;
+        [self setHostLifecycleState:CV3HostLifecycleStateLive reason:@"Renderable"];
+        [self syncWindowBoundsToClient];
+        [self dismissLaunchSplashAnimated];
+        if (self.awaitingInitialRenderableContent) {
+            self.awaitingInitialRenderableContent = NO;
+            [self recordReceptionTrace:@"firstFrame.beforeReveal" force:YES];
+            [self recordOrientationTrace:@"firstFrame.beforeReveal" force:YES];
+            [UIView performWithoutAnimation:^{
+                // BounceIt 风格入场初态：内容先缩到 88%（此刻容器仍 hidden，
+                // 用户看到的第一帧就是这个缩小态，随后弹性归位）。
+                self.appContentWrapper.transform = CGAffineTransformMakeScale(0.88, 0.88);
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                [CATransaction setCompletionBlock:^{
+                    [self recordReceptionTrace:@"firstFrame.transactionCommitted" force:YES];
+                    [self recordOrientationTrace:@"firstFrame.transactionCommitted" force:YES];
+                    if (!self.coldLaunchCompletedRecorded) {
+                        self.coldLaunchCompletedRecorded = YES;
+                        [self recordColdLaunchMilestone:@"FIRST_FRAME_COMMITTED" details:nil];
+                    }
+                }];
+                self.rootTransformContainer.hidden = NO;
+                [self setNeedsLayout];
+                [self layoutIfNeeded];
+                [CATransaction commit];
+            }];
+            // BounceIt 风格果冻弹跳：窗口以 88% 尺寸“啵”到 100%。
+            // 缩放只作用在 appContentWrapper（设计上专用于统一缩放动画的包装层）：
+            // rootTransformContainer 的旋转、窗口自身 frame 几何都不受影响，
+            // 且该包装层的布局只写 bounds/center，动画期间不会被 frame 写入打断。
+            [UIView animateWithDuration:0.5
+                                  delay:0
+                 usingSpringWithDamping:kCV3BounceDamping
+                  initialSpringVelocity:0.5
+                                options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                             animations:^{
+                self.appContentWrapper.transform = CGAffineTransformIdentity;
+            } completion:nil];
+            // 219：启动占位淡出——真实画面从下方浮现（像 App 启动完成的过渡）
+            UIView *launchPlaceholder = self.launchPlaceholderView;
+            if (launchPlaceholder) {
+                self.launchPlaceholderView = nil;
+                // 220：延迟 0.15s + 0.5s 慢淡出——给“画面出图慢”的 App 留足接续时间，
+                // 让过渡呈现为“启动图渐变为画面”，而不是中间闪一段空玻璃。
+                [UIView animateWithDuration:0.5 delay:0.15 options:UIViewAnimationOptionCurveEaseOut animations:^{
+                    launchPlaceholder.alpha = 0.0;
+                } completion:^(BOOL finished) {
+                    [launchPlaceholder removeFromSuperview];
+                }];
+            }
+            [self recordOrientationTrace:@"firstFrame.afterRevealRequest" force:YES];
+            [self recordColdLaunchMilestone:@"FIRST_FRAME_REVEAL_REQUESTED" details:nil];
+        }
+        [self refreshContentVisibilityGate];
+        CV3LogToFile(@"[SceneHost] 渲染层已就绪: %@", self.bundleID);
+        CV3LogToFile(@"[HostGeometry] bundle=%@ shell=%@ canvas=%@ host=%@ children=%@ displayOrientation=%ld contentOrientation=%ld mapped=%d",
+                     self.bundleID, NSStringFromCGRect(self.bounds),
+                     NSStringFromCGRect(self.hostContainerProxy.bounds), self.hostView,
+                     self.hostView.subviews, (long)CV3HostedPresentationOrientation(self),
+                     (long)self.hostedContentOrientation, self.crossOrientationMapApplied);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (self.isClosing || generation != self.sceneHostGeneration) return;
+            CV3LogToFile(@"[HostGeometryDetail] bundle=%@ settings=%@ client=%@ hierarchy=%@",
+                         self.bundleID, CV3InvokeObject(self.targetScene, @selector(settings)),
+                         CV3InvokeObject(self.targetScene, NSSelectorFromString(@"clientSettings")),
+                         CV3InvokeObject(self.hostView, NSSelectorFromString(@"recursiveDescription")));
+        });
+        return;
+    }
+
+    if (retries <= 0) {
+        if (self.awaitingInitialRenderableContent && self.requiresLandscapeContent && !self.isClosing &&
+            self.hostLifecycleState != CV3HostLifecycleStateReleasing) {
+            // The hosted game may take several seconds to publish and commit a
+            // landscape canvas. Keep polling and relayouting without hiding the
+            // actual hosted surface or placing a launch overlay above it.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (self.isClosing || self.hostLifecycleState == CV3HostLifecycleStateReleasing ||
+                    generation != self.sceneHostGeneration) return;
+                [self finishHostingWhenRenderableWithRetries:1 generation:generation];
+            });
+            return;
+        }
+        self.hostContentRecoveryInFlight = NO;
+        CV3LogToFile(@"[Error] Scene 容器存在但渲染层未就绪，保留加载界面: %@", self.bundleID);
+        return;
+    }
+
+    CFTimeInterval now = CACurrentMediaTime();
+    if (!self.awaitingInitialRenderableContent ||
+        now - self.lastInitialHostPresentationRefreshTime >= 0.15) {
+        self.lastInitialHostPresentationRefreshTime = now;
+        [self refreshHostViewPresentation];
+    }
+    // While waiting for the first frame, check the client's transaction-ready
+    // flag once per display frame. Presentation-context refresh remains
+    // throttled above so this faster readiness polling does not churn hosting.
+    NSTimeInterval nextCheckDelay = self.awaitingInitialRenderableContent ? (1.0 / 60.0) : 0.15;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(nextCheckDelay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (self.isClosing || self.hostLifecycleState == CV3HostLifecycleStateReleasing ||
+            generation != self.sceneHostGeneration) return;
+        [self finishHostingWhenRenderableWithRetries:retries - 1 generation:generation];
+    });
+}
+
+- (void)ensureLaunchSplashVisible {
+    // Never obscure the hosted app with a synthetic blur/tint launch layer.
+    // Initial presentation is gated separately until the complete remote canvas
+    // has committed its final geometry.
+    [self.splashView removeFromSuperview];
+    self.splashView = nil;
+    self.largeSplashIcon = nil;
+}
+
+- (void)recordColdLaunchMilestone:(NSString *)milestone details:(NSString *)details {
+    [self recordStrictSplitTrace:[@"coldLaunch." stringByAppendingString:milestone ?: @"unknown"]
+                         details:[NSString stringWithFormat:@"elapsedMs=%.1f %@",
+                                  (CACurrentMediaTime() - self.coldLaunchStartTime) * 1000.0,
+                                  details ?: @""]];
+}
+
+- (void)dismissLaunchSplashAnimated {
+    UIView *splash = self.splashView;
+    self.splashView = nil;
+    self.largeSplashIcon = nil;
+    [splash removeFromSuperview];
+}
+
+- (void)enforceSceneForegroundState {
+    if (self.isMovingWindow || CACurrentMediaTime() < self.moveSceneSyncSuppressedUntil) return;
+
+    if (!self.targetScene) {
+        CV3LogToFile(@"[Recovery] enforceSceneForegroundState 缺失 targetScene，触发冷启动: %@", self.bundleID);
+        [self ensureLaunchSplashVisible];
+        [self loadAppScene];
+        return;
+    }
+    
+    @try {
+        // 核心增强：除了检查 isValid，还检查是否还在连接状态
+        BOOL sceneValid = CV3InvokeBool(self.targetScene, @selector(isValid), YES);
+        
+        if (!sceneValid) {
+            CV3LogToFile(@"[Recovery] 场景失效，停止自动重连并关闭分屏: %@", self.bundleID);
+            [self closeWindow];
+            return;
+        }
+
+        // 预防性重置：如果检测到 HostView 存在但可能已“冻结”，强制触发层级重新同步
+        if (self.hostView && self.hostView.superview) {
+            // 通过检查渲染层级是否还具备 Presentation Context 来判断冻结
+            if (CV3TargetRespondsToSelector(self.hostView, @selector(presentationContext)) &&
+                !CV3InvokeObject(self.hostView, @selector(presentationContext))) {
+                CV3LogToFile(@"[Recovery] 检测到 HostView 渲染层断连，强制修复: %@", self.bundleID);
+                [self ensureLaunchSplashVisible];
+                [self detachHostedSceneForReason:@"PresentationContextDisconnected" clearScene:NO];
+                [self attemptToHostSceneWithRetries:1 delay:0]; // 快速尝试重建
+                return;
+            }
+        }
+
+        FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
+        BOOL needsUpdate = [self applyForegroundSovereigntyToSettings:settings clearDeactivation:YES forceLayout:NO];
+        
+        if (needsUpdate) {
+            [self.targetScene updateSettings:settings withTransitionContext:nil];
+            [self beginHostPresentationRepublishIfNeeded:@"foreground.commit"];
+            
+            // 确保内容状态强制为前台
+            if ([self.targetScene respondsToSelector:@selector(_setContentState:)]) {
+                [self.targetScene _setContentState:2]; 
+            }
+            
+            // 立即实施层级重刷，而非等待主循环
+            [self refreshHostViewPresentation];
+            CV3LogToFile(@"[Lifecycle] 已强制更新 %@ 场景设置与渲染上下文", self.bundleID);
+        }
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Error] enforceSceneForegroundState 异常: %@", e);
+    }
+}
+
+- (void)updateSovereigntyAssertion {
+    if (!self.bundleID || self.isClosing || self.rbsAssertionUnsupported) return;
+
+    // iOS 16 rejects the BKSProcessAssertion initializer for this hosted-scene
+    // use case. Acquire the equivalent RunningBoard legacy assertion by PID.
+    NSUInteger assertionFlags = self.isStashed ? 1 : (1 | 2 | 8 | 32);
+    NSUInteger assertionReason = 7;
+    NSString *attributeName = self.isStashed ? @"BKS.BackgroundUI.Stashed" : @"BKS.BackgroundUI.Foreground";
+    if (self.rbsAssertion && [self.rbsAssertionAttributeName isEqualToString:attributeName]) return;
+
+    if (![self.rbsAssertionLastAttemptedAttributeName isEqualToString:attributeName]) {
+        self.rbsAssertionLastAttemptedAttributeName = attributeName;
+        self.rbsAssertionFailureCount = 0;
+        self.rbsAssertionRetryAfter = 0;
+    }
+    if (self.rbsAssertionFailureCount >= 5) return;
+
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (now < self.rbsAssertionRetryAfter) return;
+
+    @try {
+        SBApplication *application = [[CV3ClassNamed(@"SBApplicationController") sharedInstance]
+            applicationWithBundleIdentifier:self.bundleID];
+        int pid = (int)CV3InvokeInteger(application, @selector(pid), 0);
+        if (pid <= 0) {
+            id processState = CV3InvokeObject(application, @selector(processState));
+            pid = (int)CV3InvokeInteger(processState, @selector(pid), 0);
+        }
+
+        Class targetClass = CV3ClassNamed(@"RBSTarget");
+        Class attributeClass = CV3ClassNamed(@"RBSLegacyAttribute");
+        Class assertionClass = CV3ClassNamed(@"RBSAssertion");
+        if (pid <= 0 || !targetClass || !attributeClass || !assertionClass) {
+            @throw [NSException exceptionWithName:@"CV3RBSConfigurationException"
+                                           reason:[NSString stringWithFormat:
+                                               @"RBS assertion dependencies unavailable pid=%d", pid]
+                                         userInfo:nil];
+        }
+
+        id target = [targetClass targetWithPid:pid];
+        id attribute = [attributeClass attributeWithReason:assertionReason flags:assertionFlags];
+        RBSAssertion *replacement = [[assertionClass alloc]
+            initWithExplanation:[NSString stringWithFormat:@"ChevronV3 hosted scene (%@)", self.bundleID]
+            target:target
+            attributes:attribute ? @[attribute] : @[]];
+        NSError *acquisitionError = nil;
+        if (!replacement || ![replacement acquireWithError:&acquisitionError]) {
+            [replacement invalidate];
+            @throw [NSException exceptionWithName:@"CV3RBSConfigurationException"
+                                           reason:[NSString stringWithFormat:
+                                               @"RBS BackgroundUI assertion acquisition failed pid=%d flags=%lu error=%@",
+                                               pid, (unsigned long)assertionFlags, acquisitionError]
+                                         userInfo:nil];
+        }
+
+        id previous = self.rbsAssertion;
+        self.rbsAssertion = replacement;
+        self.rbsAssertionAttributeName = attributeName;
+        self.rbsAssertionFailureCount = 0;
+        self.rbsAssertionRetryAfter = 0;
+        [previous invalidate];
+        CV3LogToFile(@"[Immortality] 已更新 %@ 后台 UI 断言 -> %@ pid=%d flags=%lu",
+                     self.bundleID, attributeName, pid, (unsigned long)assertionFlags);
+        CV3LogToFile(@"[Warning][PlaybackTrace] source=SpringBoard event=BKSAssertionAcquired bundle=%@ attribute=%@ flags=%lu",
+                     self.bundleID, attributeName, (unsigned long)assertionFlags);
+    } @catch (NSException *e) {
+        self.rbsAssertionFailureCount++;
+        NSUInteger exponent = MIN(self.rbsAssertionFailureCount, (NSUInteger)5);
+        self.rbsAssertionRetryAfter = self.rbsAssertionFailureCount >= 5
+            ? DBL_MAX
+            : now + MIN(60.0, (NSTimeInterval)(1ULL << exponent));
+        CV3LogToFile(@"[Error] BKS BackgroundUI assertion 异常: %@", e);
+        if (self.rbsAssertionFailureCount >= 5) {
+            self.rbsAssertionUnsupported = YES;
+            CV3LogToFile(@"[Warning] BKS assertion (%@) 连续异常，已停止定时重试: %@", attributeName, self.bundleID);
+        }
+    }
+}
+
+- (void)animateFocusShadow:(BOOL)focused {
+    if (self.isStashed) {
+        [self syncWindowShadowForCurrentState];
+        return;
+    }
+
+    CALayer *shadowLayer = [self visualShadowLayer];
+    [self clearOuterWindowShadow];
+    shadowLayer.shadowColor = [UIColor blackColor].CGColor;
+    [shadowLayer removeAnimationForKey:@"shadowRadius"];
+    [shadowLayer removeAnimationForKey:@"shadowOpacity"];
+    [shadowLayer removeAnimationForKey:@"shadowOffset"];
+    
+    CGFloat startRadius = focused ? CV3Style.shadowRadiusUnfocused : CV3Style.shadowRadiusFocused;
+    CGFloat peakRadius = focused ? CV3Style.shadowRadiusPeak : (CV3Style.shadowRadiusUnfocused - 4.0);
+    CGFloat endRadius = focused ? CV3Style.shadowRadiusFocused : CV3Style.shadowRadiusUnfocused;
+    
+    CGFloat startOpacity = focused ? CV3Style.shadowOpacityUnfocused : CV3Style.shadowOpacityFocused;
+    CGFloat peakOpacity = focused ? CV3Style.shadowOpacityPeak : (CV3Style.shadowOpacityUnfocused - 0.04);
+    CGFloat endOpacity = focused ? CV3Style.shadowOpacityFocused : CV3Style.shadowOpacityUnfocused;
+    
+    CGFloat startOffsetY = focused ? CV3Style.shadowOffsetUnfocusedY : CV3Style.shadowOffsetFocusedY;
+    CGFloat peakOffsetY = focused ? CV3Style.shadowOffsetPeakY : (CV3Style.shadowOffsetUnfocusedY - 2.0);
+    CGFloat endOffsetY = focused ? CV3Style.shadowOffsetFocusedY : CV3Style.shadowOffsetUnfocusedY;
+    
+    CAKeyframeAnimation *radiusAnim = [CAKeyframeAnimation animationWithKeyPath:@"shadowRadius"];
+    radiusAnim.values = @[@(startRadius), @(peakRadius), @(endRadius)];
+    radiusAnim.keyTimes = @[@0.0, @0.4, @1.0];
+    radiusAnim.duration = CV3Style.durationMedium;
+    radiusAnim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [shadowLayer addAnimation:radiusAnim forKey:@"shadowRadius"];
+    shadowLayer.shadowRadius = endRadius;
+    
+    CAKeyframeAnimation *opacityAnim = [CAKeyframeAnimation animationWithKeyPath:@"shadowOpacity"];
+    opacityAnim.values = @[@(startOpacity), @(peakOpacity), @(endOpacity)];
+    opacityAnim.keyTimes = @[@0.0, @0.4, @1.0];
+    opacityAnim.duration = CV3Style.durationMedium;
+    opacityAnim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [shadowLayer addAnimation:opacityAnim forKey:@"shadowOpacity"];
+    shadowLayer.shadowOpacity = endOpacity;
+    
+    CAKeyframeAnimation *offsetAnim = [CAKeyframeAnimation animationWithKeyPath:@"shadowOffset"];
+    offsetAnim.values = @[
+        [NSValue valueWithCGSize:CGSizeMake(0, startOffsetY)],
+        [NSValue valueWithCGSize:CGSizeMake(0, peakOffsetY)],
+        [NSValue valueWithCGSize:CGSizeMake(0, endOffsetY)]
+    ];
+    offsetAnim.keyTimes = @[@0.0, @0.4, @1.0];
+    offsetAnim.duration = CV3Style.durationMedium;
+    offsetAnim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [shadowLayer addAnimation:offsetAnim forKey:@"shadowOffset"];
+    shadowLayer.shadowOffset = CGSizeMake(0, endOffsetY);
+}
+
+- (void)setWindowFocused:(BOOL)focused {
+    [self recordOrientationTrace:focused ? @"setWindowFocused.begin.focus" : @"setWindowFocused.begin.blur" force:YES];
+    BOOL focusChanged = (self.isFocused != focused);
+    if (!focusChanged && !focused) return;
+
+    // Screen Time 兜底闸门：限额中的 App 不允许再把分屏拉到前台
+    //（覆盖「限额在窗口存续期间生效后再次聚焦」的场景：快捷切换/收起还原等）
+    if (focused && !CV3ScreenTimeGateBundleID(self.bundleID, @"FocusWindow", YES, self.windowScene)) {
+        [self recordOrientationTrace:@"setWindowFocused.blockedByScreenTime" force:YES];
+        return;
+    }
+
+    self.isFocused = focused;
+    
+    [self updateSovereigntyAssertion]; // 同步更新优先级
+    [self applyCurrentTransformWithScale:1.0];
+    
+    [self animateFocusShadow:focused]; // 触发三维物理回弹阴影
+    
+    self.hostContainerProxy.alpha = 1.0;
+    
+    [self updateFloatingHomeBarAppearance];
+
+    if (focused) {
+        [self promoteFloatingWindowInZOrder];
+        
+        // Dim other windows
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if (win != self && [win isKindOfClass:[CV3FloatingAppWindow class]]) [win setWindowFocused:NO];
+        }
+
+        // Z-Order 发生变化，级联刷新所有窗口前台优先级断言
+        CV3CascadeUpdateSovereigntyAssertions();
+    }
+    [self recordOrientationTrace:focused ? @"setWindowFocused.end.focus" : @"setWindowFocused.end.blur" force:YES];
+}
+
+- (void)promoteFloatingWindowInZOrder {
+    if (self.isClosing) return;
+
+    // Keep the model order and UIWindowServer order in sync. Reordering only
+    // floatingWindows is insufficient when every UIWindow has the same level.
+    if (floatingWindows && [floatingWindows containsObject:self]) {
+        [floatingWindows removeObject:self];
+        [floatingWindows addObject:self];
+    }
+
+    NSMutableArray<CV3FloatingAppWindow *> *orderedWindows = [NSMutableArray array];
+    for (id object in [floatingWindows copy]) {
+        if (![object isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+        CV3FloatingAppWindow *window = (CV3FloatingAppWindow *)object;
+        if (window.isClosing) continue;
+        [orderedWindows addObject:window];
+    }
+
+    NSMutableArray<NSString *> *order = [NSMutableArray array];
+    NSUInteger windowCount = orderedWindows.count;
+    [orderedWindows enumerateObjectsUsingBlock:^(CV3FloatingAppWindow *window,
+                                                  NSUInteger index,
+                                                  BOOL *stop) {
+        // Use whole-number levels because the rotated SpringBoard compositor
+        // can collapse tiny fractional differences. The top window remains at
+        // 999 and every peer is strictly lower, preserving the system UI band.
+        NSUInteger distanceFromTop = windowCount - index - 1;
+        CGFloat levelOffset = MIN((CGFloat)distanceFromTop, 90.0);
+        window.windowLevel = CV3Style.floatingApp - levelOffset;
+        [order addObject:[NSString stringWithFormat:@"%@=%.2f%@",
+                          window.bundleID ?: @"nil",
+                          window.windowLevel,
+                          window == self ? @"*" : @""]];
+    }];
+
+    [self makeKeyAndVisible];
+    CV3LogToFile(@"[ZOrder] phase=promote target=%@ focused=%d order=[%@]",
+                 self.bundleID ?: @"nil",
+                 self.isFocused,
+                 [order componentsJoinedByString:@", "]);
+}
+
+- (void)updateResizeHandleAppearance {
+    BOOL darkStyle = NO;
+    if (@available(iOS 12.0, *)) {
+        darkStyle = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
+    }
+    
+    UIColor *borderColor = darkStyle ? [[UIColor whiteColor] colorWithAlphaComponent:0.18] : [[UIColor blackColor] colorWithAlphaComponent:0.16];
+    
+    UIColor *baseColor = self.adaptiveAppColor ?: (darkStyle ? [UIColor systemGrayColor] : [UIColor whiteColor]);
+    CGFloat hue = 0, saturation = 0, brightness = 0, alpha = 0;
+    if ([baseColor getHue:&hue saturation:&saturation brightness:&brightness alpha:&alpha]) {
+        saturation = MIN(0.55, MAX(0.18, saturation));
+        brightness = darkStyle ? MIN(0.82, MAX(0.36, brightness)) : MIN(0.98, MAX(0.72, brightness));
+        baseColor = [UIColor colorWithHue:hue saturation:saturation brightness:brightness alpha:1.0];
+    }
+
+    self.resizeHandle.backgroundColor = [UIColor clearColor];
+    self.resizeHandle.layer.borderWidth = 0;
+    self.resizeHandle.layer.shadowOpacity = 0;
+
+    CGSize visualSize = self.resizeHandleVisualSize;
+    if (visualSize.width <= 0 || visualSize.height <= 0) {
+        visualSize = CGSizeMake(MIN(26.0, CGRectGetWidth(self.resizeHandle.bounds)),
+                                MIN(26.0, CGRectGetHeight(self.resizeHandle.bounds)));
+    }
+    CGRect b = CGRectMake(CGRectGetWidth(self.resizeHandle.bounds) - visualSize.width,
+                          CGRectGetHeight(self.resizeHandle.bounds) - visualSize.height,
+                          visualSize.width,
+                          visualSize.height);
+    if (!CGRectIsEmpty(b)) {
+        self.resizeHandleLayer.frame = b;
+        UIBezierPath *path = [UIBezierPath bezierPath];
+
+        CGRect localBounds = self.resizeHandleLayer.bounds;
+        CGPoint cornerCenter = CGPointMake(CGRectGetMinX(localBounds), CGRectGetMinY(localBounds));
+        CGFloat windowScale = MIN(1.35, MAX(0.78, MIN(self.bounds.size.width, self.bounds.size.height) / 390.0));
+        CGFloat arcRadius = MAX(10.0, MIN(localBounds.size.width - 4.0, (CV3Style.floatingChromeCornerRadius + 4.0) * windowScale));
+        CGFloat startAngle = (CGFloat)(M_PI_4 * 0.18);
+        CGFloat endAngle = (CGFloat)(M_PI_4 * 1.52);
+        [path addArcWithCenter:cornerCenter radius:arcRadius startAngle:startAngle endAngle:endAngle clockwise:YES];
+
+        UIColor *strokeColor = baseColor;
+        CGFloat strokeHue = 0, strokeSaturation = 0, strokeBrightness = 0, strokeAlpha = 0;
+        if ([strokeColor getHue:&strokeHue saturation:&strokeSaturation brightness:&strokeBrightness alpha:&strokeAlpha]) {
+            BOOL sourceIsBright = strokeBrightness > 0.62;
+            strokeSaturation = sourceIsBright ? MIN(0.42, MAX(0.10, strokeSaturation * 0.65)) : MIN(0.62, MAX(0.20, strokeSaturation + 0.10));
+            strokeBrightness = darkStyle ? MIN(0.92, MAX(0.68, strokeBrightness + 0.22)) : (sourceIsBright ? 0.30 : 0.78);
+            strokeColor = [UIColor colorWithHue:strokeHue saturation:strokeSaturation brightness:strokeBrightness alpha:1.0];
+        }
+        self.resizeHandleLayer.path = path.CGPath;
+        self.resizeHandleLayer.strokeColor = [strokeColor colorWithAlphaComponent:(darkStyle ? 0.72 : 0.58)].CGColor;
+        self.resizeHandleLayer.fillColor = [UIColor clearColor].CGColor;
+        self.resizeHandleLayer.lineWidth = MAX(2.0, MIN(3.0, 2.35 * windowScale));
+        self.resizeHandleLayer.lineCap = kCALineCapRound;
+    }
+
+    self.clippingContainer.layer.borderColor = borderColor.CGColor;
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    [self updateResizeHandleAppearance];
+}
+
+- (void)handleHideAction {
+    CV3ExitExposeModeIfNeeded(self, NO);
+
+    CGRect screen = CV3DisplayBoundsForWindow(self);
+    BOOL isNearLeft = (self.center.x < screen.size.width / 2.0);
+    CGRect initialFrame = self.frame;
+    UIEdgeInsets safeArea = [self currentSafeAreaInsets];
+    CGFloat breath = CV3Style.safeAreaBreath;
+    CGFloat stashHalf = kCV3StashIconSize * 0.5;
+    CGPoint stashCenter = CGPointMake(CGRectGetMidX(initialFrame), CGRectGetMidY(initialFrame));
+    CGFloat minCenterX = safeArea.left + breath + stashHalf;
+    CGFloat maxCenterX = screen.size.width - safeArea.right - breath - stashHalf;
+    CGFloat minCenterY = safeArea.top + breath + stashHalf;
+    CGFloat maxCenterY = screen.size.height - safeArea.bottom - breath - stashHalf;
+    if (maxCenterX < minCenterX) maxCenterX = minCenterX;
+    if (maxCenterY < minCenterY) maxCenterY = minCenterY;
+    stashCenter.x = MIN(MAX(stashCenter.x, minCenterX), maxCenterX);
+    stashCenter.y = MIN(MAX(stashCenter.y, minCenterY), maxCenterY);
+    CGRect proposedTargetFrame = CGRectMake(stashCenter.x - stashHalf, stashCenter.y - stashHalf, kCV3StashIconSize, kCV3StashIconSize);
+    UIView *snapshotSourceView = [self stashAnimationSnapshotSourceView];
+    CGRect snapshotStartFrame = [self convertRect:snapshotSourceView.bounds fromView:snapshotSourceView];
+    self.stashAnimationTraceID = NSUUID.UUID.UUIDString;
+    self.stashAnimationTraceStartTime = CACurrentMediaTime();
+    self.stashedRestoreSnapshotImage = [self snapshotImageForRestoreAnimation];
+    self.stashedRestoreSnapshotOrientation = self.targetOrientation;
+    // Record the rotation the snapshot was actually rendered with, so a later
+    // shell-axis flip can correct it (see updateStashedRestoreSnapshot...).
+    // Must be the effective VISIBLE rotation, not baseRotationTransform.
+    self.stashedRestoreSnapshotVisualRotation = [self cv3EffectiveVisibleRotation];
+    UIImage *genieImage = self.stashedRestoreSnapshotImage;
+    CV3LogToFile(@"[StashIconTrace] phase=minimizeSnapshot bundle=%@ snapshotSize=%@ snapshotOrientation=%ld targetOrientation=%ld deviceOrientation=%ld baseRotation=%@",
+                 self.bundleID ?: @"nil",
+                 NSStringFromCGSize(genieImage.size),
+                 (long)self.stashedRestoreSnapshotOrientation,
+                 (long)self.targetOrientation,
+                 (long)CV3TrustedInterfaceOrientation(self.windowScene),
+                 NSStringFromCGAffineTransform(self.baseRotationTransform));
+
+    CGRect preStashBeforeMinimize = self.preStashFrame;
+    self.preStashFrame = initialFrame;
+    self.isStashed = YES;
+    CV3TracePreStashFrameWrite(self, @"handleHideAction.minimize", preStashBeforeMinimize);
+    CV3SetCameraForegroundGrant(self.bundleID, NO);
+    self.stashedSide = isNearLeft ? 1 : 2;
+    CGRect targetFrame = CV3StackedStashFrameForWindow(self, proposedTargetFrame);
+    CGRect targetFrameInWindow = CGRectOffset(targetFrame, -initialFrame.origin.x, -initialFrame.origin.y);
+
+    CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=minimize phase=begin bundle=%@ source=%@ proposed=%@ target=%@ device_orientation=%ld content_orientation=%ld snapshot=%d",
+                 self.stashAnimationTraceID,
+                 self.bundleID ?: @"unknown",
+                 NSStringFromCGRect(initialFrame),
+                 NSStringFromCGRect(proposedTargetFrame),
+                 NSStringFromCGRect(targetFrame),
+                 (long)CV3TrustedInterfaceOrientation(self.windowScene),
+                 (long)self.targetOrientation,
+                 genieImage != nil);
+
+    [self refreshContentVisibilityGate];
+    [self.hostedSession setActive:NO];
+    CV3ReleaseKeyboardHostingForWindow(self);
+    [self promoteFloatingWindowInZOrder];
+    CV3CascadeUpdateSovereigntyAssertions(); // 级联刷新所有窗口前台优先级断言
+
+    if (!genieImage) {
+        self.frame = targetFrame;
+        self.appContentWrapper.alpha = 0.0;
+        self.resizeHandle.alpha = 0.0;
+        self.homeBarView.alpha = 0.0;
+        [self normalizeStashedGrabberLayout];
+        for (CV3FloatingAppWindow *win in [floatingWindows copy]) {
+            if ([win isKindOfClass:[CV3FloatingAppWindow class]] && win.isStashed) [win updateGrabberStack];
+        }
+        CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=minimize phase=completion mode=fallback final=%@ elapsed_ms=%.1f",
+                     self.stashAnimationTraceID,
+                     NSStringFromCGRect(self.frame),
+                     (CACurrentMediaTime() - self.stashAnimationTraceStartTime) * 1000.0);
+        self.stashAnimationTraceID = nil;
+        self.stashAnimationTraceStartTime = 0;
+        return;
+    }
+
+    self.stashGrabber.alpha = 0.0;
+    self.stashGrabber.bounds = CGRectMake(0, 0, kCV3StashIconSize, kCV3StashIconSize);
+    self.stashGrabber.center = CGPointMake(CGRectGetMidX(targetFrameInWindow), CGRectGetMidY(targetFrameInWindow));
+    [self updateStashIconAppearance];
+    [self applyStashedGrabberOrientation];
+    self.appIconMiniView.transform = CGAffineTransformScale(self.appIconMiniView.transform, 0.82, 0.82);
+    self.appContentWrapper.alpha = 0.0;
+    self.resizeHandle.alpha = 0.0;
+    self.homeBarView.alpha = 0.0;
+    [self syncWindowShadowForCurrentState];
+
+    CGRect targetIconFrameInWindow = CGRectInset(targetFrameInWindow, kCV3StashIconInset, kCV3StashIconInset);
+    [self animateGenieSurfaceImage:genieImage sourceFrame:snapshotStartFrame iconFrame:targetIconFrameInWindow presenting:NO completion:^{
+        // The icon fade used to outlive the genie animation by about 120 ms.
+        // At this point the UIWindow changes from its full frame to 54x54, so an
+        // outstanding center animation would continue in the old coordinate
+        // space and visibly push the icon downward before the stack pass fixed it.
+        [self.stashGrabber.layer removeAllAnimations];
+        [self.appIconMiniView.layer removeAllAnimations];
+        self.frame = targetFrame;
+        [self visualShadowLayer].shadowOpacity = 0.0;
+        [self visualShadowLayer].shadowRadius = 0.0;
+        [self visualShadowLayer].shadowOffset = CGSizeZero;
+        [self visualShadowLayer].shadowPath = nil;
+        self.appContentWrapper.transform = CGAffineTransformIdentity;
+        self.appContentWrapper.alpha = 0.0;
+        [self.hostView removeFromSuperview];
+        [self normalizeStashedGrabberLayout];
+        for (CV3FloatingAppWindow *win in [floatingWindows copy]) {
+            if ([win isKindOfClass:[CV3FloatingAppWindow class]] && win.isStashed) [win updateGrabberStack];
+        }
+        CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=minimize phase=completion mode=genie final=%@ icon_alpha=%.2f elapsed_ms=%.1f",
+                     self.stashAnimationTraceID,
+                     NSStringFromCGRect(self.frame),
+                     self.stashGrabber.alpha,
+                     (CACurrentMediaTime() - self.stashAnimationTraceStartTime) * 1000.0);
+        self.stashAnimationTraceID = nil;
+        self.stashAnimationTraceStartTime = 0;
+    }];
+
+    // Keep this animation inside the genie's 0.34 s lifetime and animate only
+    // visual properties. Geometry was established above and must not continue
+    // animating after the window switches coordinate spaces in the completion.
+    [UIView animateWithDuration:0.16
+                          delay:0.18
+                        options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{
+        self.stashGrabber.alpha = 1.0;
+        [self applyStashedGrabberOrientation];
+    } completion:nil];
+}
+
+- (void)applyStashedGrabberOrientation {
+    // A minimized icon is device UI, not hosted-app content. Its only rotation
+    // input is the physical device orientation relative to the SpringBoard
+    // Scene that contains this window.
+    self.stashGrabber.transform = CGAffineTransformIdentity;
+
+    UIInterfaceOrientation deviceOrientation = CV3InterfaceOrientationFromDevice();
+    CGSize screenSize = self.windowScene.screen.bounds.size;
+    BOOL screenLandscape = screenSize.width > screenSize.height;
+    if (CV3IsValidInterfaceOrientation(deviceOrientation) &&
+        UIInterfaceOrientationIsLandscape(deviceOrientation) == screenLandscape) {
+        CV3LastPhysicalDeviceInterfaceOrientation = deviceOrientation;
+    } else if (CV3IsValidInterfaceOrientation(CV3LastPhysicalDeviceInterfaceOrientation) &&
+               UIInterfaceOrientationIsLandscape(CV3LastPhysicalDeviceInterfaceOrientation) == screenLandscape) {
+        deviceOrientation = CV3LastPhysicalDeviceInterfaceOrientation;
+    } else {
+        UIInterfaceOrientation sceneCandidate = self.windowScene.interfaceOrientation;
+        if (CV3IsValidInterfaceOrientation(sceneCandidate) &&
+            UIInterfaceOrientationIsLandscape(sceneCandidate) == screenLandscape) {
+            deviceOrientation = sceneCandidate;
+        } else {
+            deviceOrientation = screenLandscape
+                ? UIInterfaceOrientationLandscapeRight
+                : UIInterfaceOrientationPortrait;
+        }
+        CV3LastPhysicalDeviceInterfaceOrientation = deviceOrientation;
+    }
+
+    UIInterfaceOrientation sceneOrientation = self.windowScene.interfaceOrientation;
+    if (!CV3IsValidInterfaceOrientation(sceneOrientation)) {
+        sceneOrientation = deviceOrientation;
+    }
+    CGAffineTransform deviceTransform = CV3RotationTransformForInterfaceOrientation(deviceOrientation);
+    CGAffineTransform sceneTransform = CV3RotationTransformForInterfaceOrientation(sceneOrientation);
+    self.appIconMiniView.transform = CGAffineTransformConcat(deviceTransform,
+                                                              CGAffineTransformInvert(sceneTransform));
+}
+
+- (void)cv3ScheduleSettledStashIconOrientation {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                             selector:@selector(cv3ApplySettledStashIconOrientation)
+                                               object:nil];
+    [self performSelector:@selector(cv3ApplySettledStashIconOrientation)
+               withObject:nil
+               afterDelay:0.20];
+}
+
+- (void)cv3ApplySettledStashIconOrientation {
+    if (self.isClosing || !self.isStashed) return;
+    // A direction only counts as settled when the gyroscope agrees with the
+    // screen's actual axis. Intermediate states (screen still mid-turn) are
+    // dropped rather than painted — that is what removed the double flip.
+    UIInterfaceOrientation settled = CV3InterfaceOrientationFromDevice();
+    CGSize screenSize = self.windowScene.screen.bounds.size;
+    BOOL screenLandscape = screenSize.width > screenSize.height;
+    if (!CV3IsValidInterfaceOrientation(settled) ||
+        UIInterfaceOrientationIsLandscape(settled) != screenLandscape) {
+        return;
+    }
+    [UIView performWithoutAnimation:^{
+        [self updateStashIconAppearance];
+        [self applyStashedGrabberOrientation];
+    }];
+}
+
+- (void)physicalDeviceOrientationDidChange:(NSNotification *)notification {
+    (void)notification;
+    UIInterfaceOrientation current = CV3InterfaceOrientationFromDevice();
+    if (CV3IsValidInterfaceOrientation(current)) {
+        CV3LastPhysicalDeviceInterfaceOrientation = current;
+    }
+    if (self.isClosing || !CV3IsValidInterfaceOrientation(current)) return;
+
+    if (self.isStashed) {
+        // The gyroscope reports several intermediate orientations during a single
+        // physical turn (portrait → landscape → portrait → landscape). Applying
+        // each one immediately made the icon flip two or three times per turn.
+        // Debounce instead: wait for the direction to settle, then apply once.
+        [self cv3ScheduleSettledStashIconOrientation];
+        return;
+    }
+
+    // Whenever the hosted content is landscape, comparing orientation values
+    // alone reports "no change" as the display rotates: SpringBoard can keep a
+    // portrait Scene on a landscape display (a fullscreen video is enough to
+    // reach that state), so nothing in the Scene moves while the Scene/display
+    // axes have in fact changed and the shell must be transposed. This used to
+    // be limited to landscape-only games, which left video apps frozen in their
+    // old orientation until the icon was stashed and restored again. Ordinary
+    // portrait floating apps still go through the shared Scene path.
+    BOOL hostedContentIsLandscape = self.prefersLandscapePresentation &&
+        UIInterfaceOrientationIsLandscape(self.hostedContentOrientation);
+    if (hostedContentIsLandscape) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self.isClosing || self.isStashed) return;
+            [self applyInterfaceOrientation:current force:YES];
+        });
+
+    }
+}
+
+- (void)normalizeStashedGrabberLayout {
+    if (!self.isStashed) return;
+    self.rootTransformContainer.transform = CGAffineTransformIdentity;
+    self.rootTransformContainer.frame = self.bounds;
+    self.stashGrabber.bounds = CGRectMake(0, 0, kCV3StashIconSize, kCV3StashIconSize);
+    self.stashGrabber.center = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
+    self.stashGrabber.alpha = 1.0;
+    self.stashGrabber.userInteractionEnabled = YES;
+    [self updateStashIconAppearance];
+    [self applyStashedGrabberOrientation];
+    [self bringSubviewToFront:self.stashGrabber];
+    [self syncWindowShadowForCurrentState];
+}
+
+- (void)updateStashIconAppearance {
+    if (!self.stashGrabber || !self.stashIconBackdropView || !self.appIconMiniView) return;
+
+    CGRect bounds = self.stashGrabber.bounds;
+    if (CGRectIsEmpty(bounds)) {
+        bounds = CGRectMake(0, 0, kCV3StashIconSize, kCV3StashIconSize);
+    }
+
+    CGRect backdropFrame = CGRectInset(bounds, 1.0, 1.0);
+    CGFloat cornerRadius = 16.0;
+    self.stashIconBackdropView.frame = backdropFrame;
+    self.stashIconBackdropView.layer.cornerRadius = cornerRadius;
+    if (@available(iOS 13.0, *)) {
+        self.stashIconBackdropView.layer.cornerCurve = kCACornerCurveContinuous;
+    }
+    CV3ApplyGlassAccentStyle(self.stashIconBackdropView,
+                             self.stashIconBackdropView.contentView,
+                             self.stashIconHighlightLayer,
+                             nil,
+                             cornerRadius,
+                             0.88,
+                             YES);
+    // Liquid Glass：stash 图标玻璃底（公用配方，随图标圆角同步）
+    CV3LiquidGlassEnsureBackdrop(self.stashGrabber,
+                                 @"CV3StashIconLiquidGlassBackdrop",
+                                 CV3LiquidGlassRecipeControl(),
+                                 cornerRadius,
+                                 NULL);
+
+    CGRect iconFrame = CGRectInset(bounds, kCV3StashIconInset, kCV3StashIconInset);
+    self.appIconMiniView.bounds = CGRectMake(0, 0, iconFrame.size.width, iconFrame.size.height);
+    self.appIconMiniView.center = CGPointMake(CGRectGetMidX(iconFrame), CGRectGetMidY(iconFrame));
+    self.appIconMiniView.layer.cornerRadius = 10.0;
+    self.appIconMiniView.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.30].CGColor;
+    self.appIconMiniView.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;
+
+    self.stashGrabber.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:backdropFrame cornerRadius:cornerRadius].CGPath;
+    [self.stashGrabber bringSubviewToFront:self.appIconMiniView];
+}
+
+- (void)updateAdaptiveColor {
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        UIImage *icon = [UIImage _applicationIconImageForBundleIdentifier:self.bundleID format:10 scale:[UIScreen mainScreen].scale];
+        UIColor *avgColor = CV3AverageColorFromImage(icon);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.adaptiveAppColor = avgColor ?: [UIColor labelColor];
+            self.appIconMiniView.image = icon;
+            if (self.largeSplashIcon) {
+                self.largeSplashIcon.image = icon;
+            }
+            [self updateStashIconAppearance];
+            [self updateResizeHandleAppearance];
+            [self updateFloatingHomeBarAppearance];
+        });
+    });
+}
+
+- (void)applyCurrentTransformWithScale:(CGFloat)scale {
+    [self recordOrientationTrace:@"applyCurrentTransform.begin" force:YES];
+    // A landscape-only app already owns a landscape shell and landscape
+    // canvas. Reapplying the display's ±90° transform during focus changes
+    // recreates the legacy portrait-card presentation with sideways content.
+    BOOL hostedLandscapeOwnsPresentation = self.prefersLandscapePresentation &&
+        UIInterfaceOrientationIsLandscape(self.hostedContentOrientation);
+    CGAffineTransform transform = hostedLandscapeOwnsPresentation
+        ? CV3HostedContentRotationInScene(self)
+        : self.baseRotationTransform;
+    if (scale != 1.0) {
+        transform = CGAffineTransformScale(transform, scale, scale);
+    }
+    self.transform = CGAffineTransformIdentity; // Keep physical upright
+    self.rootTransformContainer.transform = transform;
+    [self recordOrientationTrace:@"applyCurrentTransform.end" force:YES];
+}
+
+- (CALayer *)visualShadowLayer {
+    return self.appContentWrapper ? self.appContentWrapper.layer : self.layer;
+}
+
+- (void)clearOuterWindowShadow {
+    self.layer.shadowPath = nil;
+    self.layer.shadowOpacity = 0.0;
+    self.layer.shadowRadius = 0.0;
+    self.layer.shadowOffset = CGSizeZero;
+}
+
+- (CGRect)currentVisualShadowFrame {
+    return self.appContentWrapper ? self.appContentWrapper.bounds : self.bounds;
+}
+
+- (void)syncWindowShadowForCurrentState {
+    CALayer *shadowLayer = [self visualShadowLayer];
+    [self clearOuterWindowShadow];
+    [shadowLayer removeAnimationForKey:@"shadowRadius"];
+    [shadowLayer removeAnimationForKey:@"shadowOpacity"];
+    [shadowLayer removeAnimationForKey:@"shadowOffset"];
+    shadowLayer.shadowColor = [UIColor blackColor].CGColor;
+
+    if (self.isStashed) {
+        shadowLayer.shadowPath = nil;
+        shadowLayer.shadowOpacity = 0.0;
+        shadowLayer.shadowRadius = 0.0;
+        shadowLayer.shadowOffset = CGSizeZero;
+        return;
+    }
+
+    CGFloat minEdge = MIN(self.bounds.size.width, self.bounds.size.height);
+    CGFloat adaptiveRadius = MAX(CV3Style.adaptiveCornerRadiusMin, MIN(CV3Style.adaptiveCornerRadiusMax, minEdge * CV3Style.adaptiveCornerRadiusRatio));
+    shadowLayer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:adaptiveRadius].CGPath;
+    shadowLayer.shadowOpacity = self.isFocused ? CV3Style.shadowOpacityFocused : CV3Style.shadowOpacityUnfocused;
+    shadowLayer.shadowRadius = self.isFocused ? CV3Style.shadowRadiusFocused : CV3Style.shadowRadiusUnfocused;
+    shadowLayer.shadowOffset = CGSizeMake(0, self.isFocused ? CV3Style.shadowOffsetFocusedY : CV3Style.shadowOffsetUnfocusedY);
+}
+
+- (void)layoutSubviews {
+    [self recordStrictSplitTrace:@"layout.entry" details:nil];
+    if (self.isStashed || self.isInLayout) {
+        [self recordStrictSplitTrace:@"layout.rejected"
+                             details:[NSString stringWithFormat:@"stashed=%d reentrant=%d", self.isStashed, self.isInLayout]];
+        return;
+    }
+    self.isInLayout = YES;
+
+    // Scene settings are asynchronous acknowledgements. They must not replace
+    // the requested orientation while a previous transaction is still settling.
+
+    UIInterfaceOrientation activeOrientation = self.prefersLandscapePresentation &&
+        UIInterfaceOrientationIsLandscape(self.hostedContentOrientation)
+        ? self.hostedContentOrientation
+        : CV3TrustedInterfaceOrientation(self.windowScene);
+    if (self.prefersLandscapePresentation &&
+        UIInterfaceOrientationIsLandscape(self.hostedContentOrientation) &&
+        (!CV3IsValidInterfaceOrientation(activeOrientation) ||
+         !UIInterfaceOrientationIsLandscape(activeOrientation))) {
+        activeOrientation = self.hostedContentOrientation;
+    }
+    if (!CV3IsValidInterfaceOrientation(activeOrientation)) {
+        activeOrientation = UIInterfaceOrientationPortrait;
+    }
+    self.targetOrientation = activeOrientation;
+
+    // Keep the UIWindow shell in the coordinate system supplied by the active
+    // display scene. Hosted content is rotated below, inside the logical root.
+    // Swapping bounds here is safe because the window transform itself remains
+    // identity, so frame/center calculations continue to use physical points.
+    BOOL wantsLandscape = CV3ShellShouldBeLandscape(self, activeOrientation);
+    BOOL shellIsLandscape = self.bounds.size.width > self.bounds.size.height;
+    if (wantsLandscape != shellIsLandscape &&
+        self.bounds.size.width > 0.0 && self.bounds.size.height > 0.0) {
+        CGSize shellSize = self.bounds.size;
+        CGRect requested = CGRectMake(0, 0, shellSize.height, shellSize.width);
+        CGRect fitted = [self safeAreaClampedFrame:requested
+                                  preferredCenter:self.center preserveSize:NO];
+        self.bounds = CGRectMake(0, 0, fitted.size.width, fitted.size.height);
+        self.center = CGPointMake(CGRectGetMidX(fitted), CGRectGetMidY(fitted));
+        UIWindowScene *swapScene = self.windowScene;
+        CV3LogToFile(@"[ViewportFit] phase=orientationSwap bundle=%@ requestedSize=%@ fitted=%@ wantsLandscape=%d shellWasLandscape=%d active=%ld hosted=%ld scenePtr=%p sceneBounds=%@ screenBounds=%@ axesDiffer=%d",
+                     self.bundleID, NSStringFromCGSize(requested.size), NSStringFromCGRect(fitted),
+                     wantsLandscape, shellIsLandscape, (long)activeOrientation,
+                     (long)self.hostedContentOrientation, swapScene,
+                     NSStringFromCGRect(swapScene ? swapScene.coordinateSpace.bounds : CGRectZero),
+                     NSStringFromCGRect(swapScene.screen ? swapScene.screen.bounds : CGRectZero),
+                     CV3SceneAndDisplayAxesDifferForScene(swapScene));
+    }
+
+    UIInterfaceOrientation sceneOrientation = self.windowScene
+        ? self.windowScene.interfaceOrientation
+        : UIInterfaceOrientationUnknown;
+    BOOL sceneOrientationValid = CV3IsValidInterfaceOrientation(sceneOrientation);
+    CGAffineTransform contentRotation = self.prefersLandscapePresentation
+        ? CV3HostedContentRotationInScene(self)
+        : CGAffineTransformIdentity;
+    if (!self.prefersLandscapePresentation &&
+        (!sceneOrientationValid || sceneOrientation != activeOrientation)) {
+        contentRotation = CV3RotationTransformForInterfaceOrientation(activeOrientation);
+    }
+    // baseRotationTransform is the device orientation state consumed by the
+    // global dispatcher. Keep it canonical even when the Scene already owns
+    // the physical rotation; contentRotation is the local compensation below.
+    self.baseRotationTransform = CV3RotationTransformForInterfaceOrientation(activeOrientation);
+    self.transform = CGAffineTransformIdentity;
+    [self recordStrictSplitTrace:@"layout.orientationDecision"
+                         details:[NSString stringWithFormat:@"active=%ld scene=%ld client=%ld acknowledged=%ld wantsLandscape=%d shellWasLandscape=%d rotation=%@",
+                                  (long)activeOrientation, (long)sceneOrientation,
+                                  (long)CV3HostedClientOrientation(self),
+                                  (long)self.clientAcknowledgedOrientation,
+                                  wantsLandscape, shellIsLandscape,
+                                  NSStringFromCGAffineTransform(contentRotation)]];
+    if (CV3LandscapeGameNeedsSceneCompensation(self)) {
+        CV3LogToFile(@"[GameSceneCompensation] bundle=%@ scene=%@ display=%@ rotation=%@ canvas=%@",
+            self.bundleID, NSStringFromCGRect(self.windowScene.coordinateSpace.bounds),
+            NSStringFromCGRect(self.windowScene.screen.coordinateSpace.bounds),
+            NSStringFromCGAffineTransform(contentRotation), NSStringFromCGRect([self currentHostedSceneBounds]));
+    }
+    
+    [super layoutSubviews];
+    
+    CGRect physicalFrame = self.bounds;
+    CGFloat fullW = physicalFrame.size.width;
+    CGFloat fullH = physicalFrame.size.height;
+    
+    CGFloat logicalW, logicalH;
+    BOOL needsManualRotation = !CGAffineTransformIsIdentity(contentRotation);
+    BOOL rotationSwapsAxes = fabs(contentRotation.b) > 0.5 || fabs(contentRotation.c) > 0.5;
+    if (needsManualRotation && rotationSwapsAxes) {
+        logicalW = fullH;
+        logicalH = fullW;
+    } else {
+        logicalW = fullW;
+        logicalH = fullH;
+    }
+
+    self.rootTransformContainer.bounds = CGRectMake(0, 0, logicalW, logicalH);
+    self.rootTransformContainer.center = CGPointMake(fullW / 2.0, fullH / 2.0);
+    self.rootTransformContainer.transform = contentRotation;
+    [self recordStrictSplitTrace:@"layout.rootGeometryApplied"
+                         details:[NSString stringWithFormat:@"logical=%.2fx%.2f physical=%.2fx%.2f swapsAxes=%d",
+                                  logicalW, logicalH, fullW, fullH, rotationSwapsAxes]];
+
+    self.appContentWrapper.bounds = CGRectMake(0, 0, logicalW, logicalH);
+    self.appContentWrapper.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
+
+    [self layoutFloatingHomeBarForBounds:self.appContentWrapper.bounds];
+
+    // 4. 更新子组件布局 (基于直立的逻辑坐标系)
+    self.clippingContainer.bounds = CGRectMake(0, 0, logicalW, logicalH);
+    self.clippingContainer.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
+    // Do not rely solely on autoresizing here: the outer blur is the visible
+    // shell of the split window and must track the same logical bounds as the
+    // clipping container after an orientation change.
+    self.glassBackdrop.bounds = self.clippingContainer.bounds;
+    self.glassBackdrop.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
+    
+    CGFloat minEdge = MIN(logicalW, logicalH);
+    CGFloat adaptiveRadius = MAX(CV3Style.adaptiveCornerRadiusMin, MIN(CV3Style.adaptiveCornerRadiusMax, minEdge * CV3Style.adaptiveCornerRadiusRatio));
+    self.layer.cornerRadius = adaptiveRadius;
+    self.clippingContainer.layer.cornerRadius = adaptiveRadius;
+    if (@available(iOS 13.0, *)) {
+        self.layer.cornerCurve = kCACornerCurveContinuous;
+        self.clippingContainer.layer.cornerCurve = kCACornerCurveContinuous;
+    }
+    self.clippingContainer.layer.borderWidth = 0.0; // 222：外框去除（白线来源）
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.cyanLayer.frame = self.clippingContainer.bounds;
+    self.cyanLayer.cornerRadius = adaptiveRadius;
+    
+    self.magentaLayer.frame = self.clippingContainer.bounds;
+    self.magentaLayer.cornerRadius = adaptiveRadius;
+    
+    self.innerGlowLayer.frame = self.clippingContainer.bounds;
+    self.innerGlowLayer.cornerRadius = adaptiveRadius;
+    
+    self.specularHighlight.frame = self.clippingContainer.bounds;
+    self.specularHighlight.cornerRadius = adaptiveRadius;
+    if (@available(iOS 13.0, *)) {
+        self.cyanLayer.cornerCurve = kCACornerCurveContinuous;
+        self.magentaLayer.cornerCurve = kCACornerCurveContinuous;
+        self.innerGlowLayer.cornerCurve = kCACornerCurveContinuous;
+        self.specularHighlight.cornerCurve = kCACornerCurveContinuous;
+    }
+    [CATransaction commit];
+
+    // Liquid Glass：外壳玻璃底同步（尺寸/圆角随逻辑 bounds + adaptiveRadius）
+    CV3LiquidGlassEnsureBackdrop(self.clippingContainer,
+                                 @"CV3FloatingShellLiquidGlassBackdrop",
+                                 CV3LiquidGlassRecipeWindow(),
+                                 adaptiveRadius,
+                                 NULL);
+
+    // 5. 更新内部 App 场景 (等比铺满算法：基于直立窗口比例动态映射虚拟画布)
+    if (self.hostContainerProxy) {
+        CGRect virtualBounds = [self currentHostedSceneBounds];
+        // Use exactly the same canvas as applyHostedSceneLayoutToSettings:.
+        CGFloat virtualW = MAX(CGRectGetWidth(virtualBounds), 1.0);
+        CGFloat virtualH = MAX(CGRectGetHeight(virtualBounds), 1.0);
+        // Preserve the Scene canvas. Enlarging only the host's bounds creates
+        // empty space: the remote application still renders its original size.
+        CGFloat uniformScale = MIN(logicalW / virtualW, logicalH / virtualH);
+        [self recordStrictSplitTrace:@"layout.hostDecision"
+                             details:[NSString stringWithFormat:@"virtual=%@ logical=%.2fx%.2f scale=%.6f",
+                                      NSStringFromCGRect(virtualBounds), logicalW, logicalH, uniformScale]];
+        
+        if (!self.liveResizeSnapshotView && !self.isMovingWindow) {
+            [self recordStrictSplitTrace:@"layout.sceneSync.begin" details:nil];
+            [self syncHostedSceneLayoutForce:NO];
+            [self recordStrictSplitTrace:@"layout.sceneSync.end" details:nil];
+        }
+
+        self.hostContainerProxy.transform = CGAffineTransformIdentity;
+        self.hostContainerProxy.bounds = virtualBounds;
+        if (self.hostView) {
+            self.hostView.transform = CGAffineTransformIdentity;
+            self.hostView.frame = virtualBounds;
+            [self.hostView layoutIfNeeded];
+            // FrontBoard can return a wrapper around the actual scene host.
+            // Match PullOver-X layoutContextView: resize the direct hosted
+            // children as well; changing just the wrapper leaves stale frames.
+            for (UIView *content in [self.hostView.subviews copy]) {
+                if (!CGRectEqualToRect(content.frame, self.hostView.bounds)) {
+                    CV3LogToFile(@"[HostGeometry] %@ child=%@ old=%@ canvas=%@",
+                                 self.bundleID, NSStringFromClass(content.class),
+                                 NSStringFromCGRect(content.frame), NSStringFromCGRect(self.hostView.bounds));
+                    content.frame = self.hostView.bounds;
+                }
+                content.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                [content layoutIfNeeded];
+            }
+            [self synchronizeHostedContextLayerGeometry];
+            [self recordStrictSplitTrace:@"layout.hostGeometryApplied" details:nil];
+        }
+        self.hostContainerProxy.layer.anchorPoint = CGPointMake(0.5, 0.5);
+        self.hostContainerProxy.center = CGPointMake(logicalW / 2.0, logicalH / 2.0);
+        self.hostContainerProxy.transform = CGAffineTransformMakeScale(uniformScale, uniformScale);
+    }
+    if (self.homeBarView && self.homeBarView.superview) {
+        [self.homeBarView.superview bringSubviewToFront:self.homeBarView];
+    }
+    if (!self.isLiveResizing) {
+        [self visualShadowLayer].shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:adaptiveRadius].CGPath;
+    }
+    
+    self.isInLayout = NO;
+    [self recordStrictSplitTrace:@"layout.exit" details:nil];
+    [self recordOrientationTrace:@"layoutSubviews.end" force:NO];
+}
+
+- (void)clampToScreenBounds {
+    if (self.isStashed) return; // 隐藏状态下跳过钳位，允许 origin.x 超出屏幕
+    
+    UIEdgeInsets safeArea = [self currentSafeAreaInsets];
+    CGRect screenBounds = CV3DisplayBoundsForWindow(self);
+    
+    CGRect frame = self.frame;
+    CGFloat breath = CV3Style.safeAreaBreath;
+    if (frame.origin.x < safeArea.left + breath) frame.origin.x = safeArea.left + breath;
+    if (frame.origin.y < safeArea.top + breath) frame.origin.y = safeArea.top + breath;
+    if (CGRectGetMaxX(frame) > screenBounds.size.width - safeArea.right - breath) frame.origin.x = screenBounds.size.width - safeArea.right - breath - frame.size.width;
+    if (CGRectGetMaxY(frame) > screenBounds.size.height - safeArea.bottom - breath) frame.origin.y = screenBounds.size.height - safeArea.bottom - breath - frame.size.height;
+    
+    // 核心修复：严禁在有 Transform (如缩放/旋转) 的情况下直接设置 frame。
+    // 使用 center 进行平移钳位，确保不会触发无限抖动。
+    self.center = CGPointMake(CGRectGetMidX(frame), CGRectGetMidY(frame));
+}
+
+- (FBScene *)getSceneForBundleID:(NSString *)bundleID {
+    @try {
+        SBApplication *app = [[CV3ClassNamed(@"SBApplicationController") sharedInstance] applicationWithBundleIdentifier:bundleID];
+        if ([app respondsToSelector:@selector(mainScene)]) {
+            FBScene *scene = [app mainScene];
+            // 核心修复：严禁返回已失效或正在销毁的场景，强制触发重试逻辑等待新场景创建
+            if (scene && !CV3InvokeBool(scene, @selector(isValid), YES)) {
+                CV3LogToFile(@"[Debug] 忽略无效的旧场景: %@", bundleID);
+            } else if (scene) {
+                return scene;
+            }
+        }
+        
+        FBSceneManager *manager = [CV3ClassNamed(@"FBSceneManager") sharedInstance];
+        
+        // iOS 16 fallback: check if 'scenes' property exists (returns NSSet)
+        if ([manager respondsToSelector:@selector(scenes)]) {
+            id scenesSet = [manager valueForKey:@"scenes"];
+            if ([scenesSet isKindOfClass:[NSSet class]]) {
+                for (FBScene *scene in scenesSet) {
+                    if (CV3IdentifierContainsExactBundleID(scene.identifier, bundleID)) {
+                        if (!CV3InvokeBool(scene, @selector(isValid), YES)) continue;
+                        return scene;
+                    }
+                }
+            }
+        }
+        
+        NSDictionary *scenes = nil;
+        
+        @try {
+            id workspace = [manager valueForKey:@"_workspace"];
+            scenes = [workspace valueForKey:@"_allScenesByID"];
+        } @catch (NSException *e) {
+            scenes = nil;
+        }
+        
+        if (!scenes) {
+            @try {
+                scenes = [manager valueForKey:@"_scenesByID"];
+            } @catch (NSException *e) {
+                scenes = nil;
+            }
+        }
+        
+        for (NSString *key in scenes.allKeys) {
+            if (CV3IdentifierContainsExactBundleID(key, bundleID)) {
+                FBScene *scene = scenes[key];
+                if (!CV3InvokeBool(scene, @selector(isValid), YES)) continue;
+                return scene;
+            }
+        }
+    } @catch (NSException *e) {
+        CV3LogToFile(@"[Error] getSceneForBundleID failed: %@", e);
+    }
+    return nil;
+}
+
+- (void)attemptToHostSceneWithRetries:(int)retries delay:(double)delay {
+    [self attemptToHostSceneWithRetries:retries delay:delay generation:self.sceneHostGeneration];
+}
+
+- (void)attemptToHostSceneWithRetries:(int)retries delay:(double)delay generation:(NSUInteger)generation {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (self.isClosing || generation != self.sceneHostGeneration) {
+            CV3LogToFile(@"[SceneHost] 忽略过期挂载任务 %@ generation=%lu current=%lu closing=%d",
+                         self.bundleID, (unsigned long)generation,
+                         (unsigned long)self.sceneHostGeneration, self.isClosing);
+            return;
+        }
+        [self setHostLifecycleState:CV3HostLifecycleStateWaitingForScene reason:@"RetryAttempt"];
+        @try {
+            FBScene *targetScene = [self getSceneForBundleID:self.bundleID];
+            
+            if (targetScene) {
+                self.targetScene = targetScene;
+                if (!self.coldLaunchSceneFoundRecorded) {
+                    self.coldLaunchSceneFoundRecorded = YES;
+                    [self recordColdLaunchMilestone:@"SCENE_FOUND" details:nil];
+                }
+                [self setHostLifecycleState:CV3HostLifecycleStatePrepared reason:@"SceneFound"];
+                CV3LogToFile(@"[Debug] 找到场景: %@ (retries left: %d)", self.bundleID, retries);
+
+                // The initial hosted-state post can precede a cold-launched
+                // client's Darwin registration. Re-post after its Scene exists
+                // so the client bridge starts orientation and canvas reporting
+                // before the first hosted surface settles.
+                CV3PostHostedState(self.bundleID, YES);
+                
+                // Step 1: 确保 Scene 已准备好被托管
+                FBSMutableSceneSettings *settings = [[targetScene settings] mutableCopy];
+                [self applyForegroundSovereigntyToSettings:settings clearDeactivation:YES forceLayout:YES];
+
+                [targetScene updateSettings:settings withTransitionContext:nil];
+                
+                if ([targetScene respondsToSelector:@selector(_setContentState:)]) {
+                    [targetScene _setContentState:2]; // Ready
+                }
+                
+                // Step 2: 优先重用已有的渲染视图，避免在 Scene 尚未完全就绪前重建引发死视图黑屏
+                @try {
+                    UIView *hostedView = self.hostView;
+                    BOOL isReused = (hostedView != nil);
+                    if (!hostedView) {
+                        hostedView = [self hostViewForScene:targetScene];
+                    }
+
+                    if (!hostedView) {
+                        hostedView = [[CV3ClassNamed(@"_UISceneLayerHostContainerView") alloc]
+                                      initWithScene:targetScene
+                                      debugDescription:@"ChevronV3Host"];
+                        UIScenePresentationContext *context = [[CV3ClassNamed(@"UIScenePresentationContext") alloc] _initWithDefaultValues];
+                        if ([context respondsToSelector:@selector(setPresentedLayerTypes:)]) [context setPresentedLayerTypes:7];
+                        if ([context respondsToSelector:@selector(setAppearanceStyle:)]) [context setAppearanceStyle:2];
+                        if ([context respondsToSelector:@selector(setClipsToBounds:)]) [context setClipsToBounds:YES];
+                        CV3InvokeObject1(hostedView, @selector(_setPresentationContext:), context);
+                    }
+                    
+                    if (hostedView) {
+                        hostedView.layer.cornerRadius = 0;
+                        hostedView.layer.masksToBounds = YES;
+                        
+                        self.hostView = hostedView;
+                        self.hostView.accessibilityIdentifier = @"ChevronV3Host";
+                        
+                        // 核心：将真实画面插入 Splash 之下，确保过渡动画淡出时能自然显露内容
+                        if (!hostedView.superview) {
+                            if (self.splashView) {
+                                [self.hostContainerProxy insertSubview:hostedView belowSubview:self.splashView];
+                            } else {
+                                [self.hostContainerProxy addSubview:hostedView];
+                            }
+                        }
+                        [self recordOrientationTrace:@"hostView.attached" force:YES];
+                        [self recordReceptionTrace:@"hostView.attached" force:YES];
+                        if (!self.coldLaunchHostAttachedRecorded) {
+                            self.coldLaunchHostAttachedRecorded = YES;
+                            [self recordColdLaunchMilestone:@"HOST_VIEW_ATTACHED"
+                                                    details:NSStringFromClass([hostedView class])];
+                        }
+                        
+                        CV3LogToFile(isReused ? @"[Debug] 成功重用已有的 _UISceneLayerHostContainerView" : @"[Debug] 成功通过 _UISceneLayerHostContainerView 创建渲染视图");
+
+                        // 219：挂载完成 → 允许窗口带“启动占位”显示（不再等画面就绪）
+                        self.placeholderRevealAllowed = YES;
+                        [self refreshContentVisibilityGate];
+
+                        [self finishHostingWhenRenderableWithRetries:200 generation:generation];
+                    } else {
+                        CV3LogToFile(@"[Error] _UISceneLayerHostContainerView 创建/重用失败");
+                    }
+                } @catch (NSException *e) {
+                    CV3LogToFile(@"[Error] 获取 SceneContainerView 失败: %@", e);
+                }
+            } else {
+                [self setHostLifecycleState:CV3HostLifecycleStateWaitingForScene reason:@"SceneUnavailable"];
+                CV3LogToFile(@"[Debug] 未找到场景: %@", self.bundleID);
+                if (retries > 0) {
+                    // The first lookup is immediate. Back off gently after a
+                    // miss so cold-launched apps are discovered quickly without
+                    // exhausting all retries in the same run-loop turn.
+                    double nextDelay = MIN(MAX(delay * 1.25, 0.025), 0.15);
+                    [self attemptToHostSceneWithRetries:retries - 1 delay:nextDelay generation:generation];
+                } else {
+                    CV3LogToFile(@"[Error] targetScene not found after launch for %@", self.bundleID);
+                    // A live window whose display recovery exhausted all probes
+                    // has no content to retain. Cold starts use their own policy.
+                    if (self.hostContentRecoveryInFlight && !self.hostView && !self.isStashed) {
+                        self.hostContentRecoveryInFlight = NO;
+                        CV3LogToFile(@"[Recovery] phase=closeEmptyRecovery bundle=%@ generation=%lu elapsedMs=%.1f",
+                                     self.bundleID, (unsigned long)generation,
+                                     (CACurrentMediaTime() - self.lastHostContentRecoveryAt) * 1000.0);
+                        [self closeWindow];
+                    }
+                }
+            }
+        } @catch (NSException *e) {
+            CV3LogToFile(@"[Error] Floating window load scene failed: %@", e);
+        }
+    });
+}
+
+- (void)loadAppScene {
+    NSUInteger generation = ++self.sceneHostGeneration;
+    [self setHostLifecycleState:CV3HostLifecycleStatePreparing reason:@"LoadAppScene"];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.isClosing || generation != self.sceneHostGeneration) return;
+        @try {
+            // Screen Time 兜底闸门：入口闸门全部命中正常流程时不该走到这里；
+            // 命中说明限额在窗口创建间隙生效（或存在未覆盖入口）→ 呈现拦截页并关窗
+            if (!CV3ScreenTimeGateBundleID(self.bundleID, @"LoadAppScene", YES, self.windowScene)) {
+                [self closeWindow];
+                return;
+            }
+            [self ensureLaunchSplashVisible];
+            [self recordColdLaunchMilestone:@"LAUNCH_APPLICATION_BEGIN" details:nil];
+            [[UIApplication sharedApplication] launchApplicationWithIdentifier:self.bundleID suspended:YES];
+            [self recordColdLaunchMilestone:@"LAUNCH_APPLICATION_RETURNED" details:nil];
+            
+            [self updateSovereigntyAssertion];
+
+            // Probe immediately, then use short bounded backoff for cold starts.
+            // This removes the unconditional 300 ms before Scene acquisition.
+            [self attemptToHostSceneWithRetries:40 delay:0.0 generation:generation];
+            
+            // Keep the loading surface visible until the hosted Scene supplies a render layer.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (!self.isClosing && generation == self.sceneHostGeneration && self.splashView) {
+                    CV3LogToFile(@"[Recovery] 启动超时，重新请求 Scene 渲染层: %@", self.bundleID);
+                    [self attemptToHostSceneWithRetries:3 delay:0.0 generation:generation];
+                }
+            });
+        } @catch (NSException *e) {
+            CV3LogToFile(@"[Error] Floating window launch failed: %@", e);
+        }
+    });
+}
+
+- (void)handleMoveLongPress:(UIGestureRecognizer *)gesture {
+    static CGPoint initialTouchOffset;
+    static CGPoint lastVelocity;
+    static NSTimeInterval lastTime;
+    
+    CGPoint currentPoint = [gesture locationInView:nil];
+    CGRect screen = CV3DisplayBoundsForWindow(self);
+    
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        self.isMovingWindow = YES;
+        self.moveSceneSyncSuppressedUntil = DBL_MAX;
+        CV3ExitExposeModeIfNeeded(self, YES);
+        if (!self.isStashed) {
+            self.stashGrabber.alpha = 0;
+            self.clippingContainer.alpha = 1.0;
+            self.appContentWrapper.alpha = 1.0;
+            self.appContentWrapper.transform = CGAffineTransformIdentity;
+            self.resizeHandle.alpha = 1.0;
+            self.homeBarView.alpha = 1.0;
+        }
+        self.isFullscreenMode = NO;
+        self.isCompactMode = NO;
+        [self setWindowFocused:YES];
+        CGPoint centerInWindow = self.center;
+        initialTouchOffset = CGPointMake(currentPoint.x - centerInWindow.x, currentPoint.y - centerInWindow.y);
+        
+        [self startLiquidMotion];
+        
+        CGFloat minEdge = MIN(self.bounds.size.width, self.bounds.size.height);
+        CGFloat adaptiveRadius = MAX(CV3Style.adaptiveCornerRadiusMin, MIN(CV3Style.adaptiveCornerRadiusMax, minEdge * CV3Style.adaptiveCornerRadiusRatio));
+        [self visualShadowLayer].shadowPath = [UIBezierPath bezierPathWithRoundedRect:[self currentVisualShadowFrame] cornerRadius:adaptiveRadius].CGPath;
+        [UIView animateWithDuration:0.3 animations:^{
+            [self visualShadowLayer].shadowOpacity = CV3Style.shadowOpacityPeak;
+            [self visualShadowLayer].shadowRadius = CV3Style.shadowRadiusPeak;
+        }];
+        
+        self.lastTargetSnapFrame = CGRectZero;
+        lastTime = CACurrentMediaTime();
+        lastVelocity = CGPointZero;
+        
+    }
+    
+    if (gesture.state == UIGestureRecognizerStateChanged) {
+        NSTimeInterval now = CACurrentMediaTime();
+        CGFloat dt = now - lastTime;
+        if (dt > 0) {
+            lastVelocity = CGPointMake((currentPoint.x - (self.center.x + initialTouchOffset.x)) / dt, (currentPoint.y - (self.center.y + initialTouchOffset.y)) / dt);
+        }
+        lastTime = now;
+
+        // 1. 更新位置
+        self.center = CGPointMake(currentPoint.x - initialTouchOffset.x, currentPoint.y - initialTouchOffset.y);
+        
+        // 2. 更新惯性拉伸阴影与高度抬起
+        CGFloat speed = sqrt(lastVelocity.x * lastVelocity.x + lastVelocity.y * lastVelocity.y);
+        CGFloat elevationBoost = MIN(CV3Style.dragLagShadowElevationMax, speed * CV3Style.dragLagShadowElevationFactor);
+        
+        CGFloat dx = -lastVelocity.x * CV3Style.dragLagShadowFactor;
+        CGFloat dy = -lastVelocity.y * CV3Style.dragLagShadowFactor + CV3Style.shadowOffsetPeakY + elevationBoost;
+        CGFloat maxOffset = CV3Style.dragLagShadowMaxOffset;
+        dx = MAX(-maxOffset, MIN(maxOffset, dx));
+        dy = MAX(-maxOffset + CV3Style.shadowOffsetPeakY + elevationBoost, MIN(maxOffset + CV3Style.shadowOffsetPeakY + elevationBoost, dy));
+        
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        [self visualShadowLayer].shadowRadius = CV3Style.shadowRadiusPeak + elevationBoost;
+        [self visualShadowLayer].shadowOpacity = CV3Style.shadowOpacityPeak - elevationBoost * 0.005;
+        [self visualShadowLayer].shadowOffset = CGSizeMake(dx, dy);
+        [CATransaction commit];
+        
+        // --- Magnetic Window Alignment ---
+        CGFloat magnetThreshold = 30.0;
+        for (CV3FloatingAppWindow *other in floatingWindows) {
+            if (other == self || other.isStashed || ![other isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+            CGRect otherFrame = other.frame;
+            if (fabs(CGRectGetMaxX(self.frame) - otherFrame.origin.x) < magnetThreshold) {
+                self.center = CGPointMake(otherFrame.origin.x - self.frame.size.width / 2.0 - 5.0, self.center.y);
+            } else if (fabs(self.frame.origin.x - CGRectGetMaxX(otherFrame)) < magnetThreshold) {
+                self.center = CGPointMake(CGRectGetMaxX(otherFrame) + self.frame.size.width / 2.0 + 5.0, self.center.y);
+            }
+        }
+
+        [self layoutFloatingHomeBarForBounds:self.appContentWrapper.bounds];
+    }
+    
+    if (gesture.state == UIGestureRecognizerStateEnded ||
+        gesture.state == UIGestureRecognizerStateCancelled ||
+        gesture.state == UIGestureRecognizerStateFailed) {
+        [self stopLiquidMotion];
+        CGFloat velMag = sqrt(lastVelocity.x * lastVelocity.x + lastVelocity.y * lastVelocity.y);
+        if (velMag > 2500.0) {
+            BOOL towardLeft = (lastVelocity.x < -1800 && self.center.x < 150);
+            BOOL towardRight = (lastVelocity.x > 1800 && self.center.x > screen.size.width - 150);
+            BOOL towardTop = (lastVelocity.y < -1800 && self.center.y < 150);
+            
+            if (towardLeft || towardRight || towardTop) {
+                [UIView animateWithDuration:0.45 delay:0 options:UIViewAnimationOptionCurveEaseIn animations:^{
+                    self.center = CGPointMake(self.center.x + lastVelocity.x * 0.15, self.center.y + lastVelocity.y * 0.15);
+                    self.transform = CGAffineTransformScale(self.transform, 0.01, 0.01);
+                    self.alpha = 0;
+                } completion:^(BOOL finished) {
+                    [self closeWindow];
+                }];
+                return;
+            }
+        }
+
+        [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:UIViewAnimationOptionCurveEaseInOut animations:^{
+            self.isStashed = NO;
+            [self refreshContentVisibilityGate];
+            self.stashedSide = 0;
+            self.stashGrabber.alpha = 0;
+            self.clippingContainer.alpha = 1.0;
+            self.appContentWrapper.alpha = 1.0;
+            self.appContentWrapper.transform = CGAffineTransformIdentity;
+            self.resizeHandle.alpha = 1.0;
+
+            CGRect targetFrame = self.frame;
+            UIEdgeInsets safeArea = [self currentSafeAreaInsets];
+            CGFloat breath = CV3Style.safeAreaBreath;
+            CGFloat minX = safeArea.left + breath;
+            CGFloat minY = safeArea.top + breath;
+            CGFloat maxX = screen.size.width - safeArea.right - breath - targetFrame.size.width;
+            CGFloat maxY = screen.size.height - safeArea.bottom - breath - targetFrame.size.height;
+
+            if (maxX < minX) maxX = minX;
+            if (maxY < minY) maxY = minY;
+
+            targetFrame.origin.x = MIN(MAX(targetFrame.origin.x, minX), maxX);
+            targetFrame.origin.y = MIN(MAX(targetFrame.origin.y, minY), maxY);
+            
+            if (!CGRectEqualToRect(targetFrame, self.frame)) {
+                self.center = CGPointMake(CGRectGetMidX(targetFrame), CGRectGetMidY(targetFrame));
+            }
+        } completion:^(BOOL finished) {
+            self.moveSceneSyncSuppressedUntil = CACurrentMediaTime() + 0.8;
+            self.isMovingWindow = NO;
+            [self setNeedsLayout];
+            [self layoutIfNeeded];
+            [self layoutFloatingHomeBarForBounds:self.appContentWrapper.bounds];
+            // The drag phase applies a velocity-dependent peak shadow. UIKit's
+            // position spring can interrupt the separate shadow animation, so
+            // normalize the model layer only after movement has fully settled.
+            [self syncWindowShadowForCurrentState];
+            CV3SaveWindowLayout(self);
+        }];
+        
+        // Settle directly from the velocity-dependent drag shadow to the
+        // steady focus shadow. animateFocusShadow: deliberately contains a
+        // dark peak keyframe, which reads as a black flash when the user lets
+        // go after moving the window.
+        CALayer *shadowLayer = [self visualShadowLayer];
+        [self clearOuterWindowShadow];
+        [shadowLayer removeAnimationForKey:@"shadowRadius"];
+        [shadowLayer removeAnimationForKey:@"shadowOpacity"];
+        [shadowLayer removeAnimationForKey:@"shadowOffset"];
+        CGFloat settledRadius = self.isFocused ? CV3Style.shadowRadiusFocused : CV3Style.shadowRadiusUnfocused;
+        CGFloat settledOpacity = self.isFocused ? CV3Style.shadowOpacityFocused : CV3Style.shadowOpacityUnfocused;
+        CGFloat settledOffsetY = self.isFocused ? CV3Style.shadowOffsetFocusedY : CV3Style.shadowOffsetUnfocusedY;
+        [UIView animateWithDuration:0.24
+                              delay:0
+                            options:UIViewAnimationOptionBeginFromCurrentState |
+                                    UIViewAnimationOptionCurveEaseOut |
+                                    UIViewAnimationOptionAllowUserInteraction
+                         animations:^{
+            shadowLayer.shadowRadius = settledRadius;
+            shadowLayer.shadowOpacity = settledOpacity;
+            shadowLayer.shadowOffset = CGSizeMake(0, settledOffsetY);
+        } completion:nil];
+    }
+}
+
+- (void)updateGrabberStack {
+    // 移除旧的堆叠视觉
+    for (UIView *sub in self.stashGrabber.subviews) {
+        if (sub.tag == 99) [sub removeFromSuperview];
+    }
+    
+    NSMutableArray *sameSideStashedWindows = [NSMutableArray array];
+    for (CV3FloatingAppWindow *win in floatingWindows) {
+        if ([win isKindOfClass:[CV3FloatingAppWindow class]] && win.isStashed && win.stashedSide == self.stashedSide) {
+            [sameSideStashedWindows addObject:win];
+        }
+    }
+
+    if (sameSideStashedWindows.count > 1) {
+        // 建议：Prism Stacking (棱镜堆叠视觉)
+        // ... (保持原有的图标堆叠视觉逻辑) ...
+    }
+
+    // A single icon has no stacking conflict. Its frame was already clamped
+    // using the same safe area when the hide transition began; recalculating it
+    // after an App Switcher -> Home transition can observe a different transient
+    // safe-area value and produces a second, visible position correction.
+    if (sameSideStashedWindows.count <= 1) {
+        [self normalizeStashedGrabberLayout];
+        return;
+    }
+
+    CGRect currentFrame = CV3StackedStashFrameForWindow(self, self.frame);
+    if (CGRectEqualToRect(currentFrame, self.frame)) {
+        [self normalizeStashedGrabberLayout];
+        return;
+    }
+
+    [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0 options:0 animations:^{
+        self.frame = currentFrame;
+        [self normalizeStashedGrabberLayout];
+    } completion:nil];
+}
+- (void)handleRestoreTap:(UITapGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateEnded) return;
+    CV3ExitExposeModeIfNeeded(self, YES);
+    [self restoreFromStash];
+}
+
+- (void)restoreFromStash {
+    CV3ExitExposeModeIfNeeded(self, YES);
+    // 恢复为普通 App 之上的浮窗层级，保留系统通知栏/控制中心在上方
+    self.windowLevel = CV3Style.floatingApp; 
+    [self makeKeyAndVisible];
+    self.windowLevel = CV3Style.floatingApp;
+    [self setWindowFocused:YES];
+
+    if (self.isStashed) {
+
+        CGRect iconFrame = self.frame;
+        UIView *iconProxy = [self.stashGrabber snapshotViewAfterScreenUpdates:NO];
+        CGPoint preferredCenter = CGRectIsEmpty(self.preStashFrame) ? self.center : CGPointMake(CGRectGetMidX(self.preStashFrame), CGRectGetMidY(self.preStashFrame));
+        CGRect targetFrame = [self restorableFramePreservingStashedSizeForOrientation:self.targetOrientation preferredCenter:preferredCenter];
+        self.stashAnimationTraceID = NSUUID.UUID.UUIDString;
+        self.stashAnimationTraceStartTime = CACurrentMediaTime();
+        CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=restore phase=begin bundle=%@ source=%@ target=%@ device_orientation=%ld content_orientation=%ld cached_snapshot=%d icon_proxy=%d",
+                     self.stashAnimationTraceID,
+                     self.bundleID ?: @"unknown",
+                     NSStringFromCGRect(iconFrame),
+                     NSStringFromCGRect(targetFrame),
+                     (long)CV3TrustedInterfaceOrientation(self.windowScene),
+                     (long)self.targetOrientation,
+                     self.stashedRestoreSnapshotImage != nil,
+                     iconProxy != nil);
+        self.stashGrabber.alpha = 0.0;
+
+        self.isStashed = NO; // 先解除 Stash 标志，以便下面 updateSettings 时能被识别为前台
+        CV3SetCameraForegroundGrant(self.bundleID, YES);
+        [self refreshContentVisibilityGate];
+        [self.hostedSession setActive:YES];
+        CV3CascadeUpdateSovereigntyAssertions(); // 级联刷新所有窗口前台优先级断言
+
+        // 核心修复：如果已有的 hostView 存在，立即加回层级中并设为可见，避免黑屏/渲染延迟
+        if (self.hostView && !self.hostView.superview) {
+            if (self.splashView) {
+                [self.hostContainerProxy insertSubview:self.hostView belowSubview:self.splashView];
+            } else {
+                [self.hostContainerProxy addSubview:self.hostView];
+            }
+            self.hostView.hidden = NO;
+            self.hostView.alpha = 1.0;
+        }
+
+        self.frame = targetFrame;
+        [self enforcePortraitWindowGeometry];
+        self.stashedSide = 0;
+        [self syncHostedSceneLayoutForce:YES];
+        [self setNeedsLayout];
+        [self layoutIfNeeded];
+
+        [self enforceSceneForegroundState]; // 立即通知 SpringBoard 将 FBScene 拉回前台
+        [self attemptToHostSceneWithRetries:10 delay:0.05]; // 异步拉回渲染视图，50ms 延迟足够让 Scene 状态生效并挂载
+
+        self.stashGrabber.alpha = 0.0;
+        self.appContentWrapper.transform = CGAffineTransformIdentity;
+        self.appContentWrapper.alpha = 1.0;
+        self.clippingContainer.alpha = 1.0;
+        self.clippingContainer.transform = CGAffineTransformIdentity;
+        self.resizeHandle.alpha = 1.0;
+        self.homeBarView.alpha = 1.0;
+
+        UIView *snapshotSourceView = [self stashAnimationSnapshotSourceView];
+        CGRect endFrameInWindow = [self convertRect:snapshotSourceView.bounds fromView:snapshotSourceView];
+        CGRect startFrameInWindow = CGRectOffset(iconFrame, -targetFrame.origin.x, -targetFrame.origin.y);
+        // Reconcile the snapshot with the rotation the window is about to
+        // present. This is the single place the restore animation reads its
+        // image, so correcting it here means the genie can never fly out upside
+        // down even if no orientation update reached us while stashed.
+        [self updateStashedRestoreSnapshotForOrientation:self.targetOrientation];
+        UIImage *genieImage = self.stashedRestoreSnapshotImage ?: [self snapshotImageForRestoreAnimation];
+
+        self.appContentWrapper.alpha = 0.0;
+        self.resizeHandle.alpha = 0.0;
+        self.homeBarView.alpha = 0.0;
+        [self syncWindowShadowForCurrentState];
+        [self visualShadowLayer].shadowOpacity = 0.0;
+        [self visualShadowLayer].shadowRadius = 0.0;
+        [self visualShadowLayer].shadowOffset = CGSizeZero;
+        [self visualShadowLayer].shadowPath = nil;
+
+        if (!genieImage) {
+            self.appContentWrapper.alpha = 1.0;
+            self.resizeHandle.alpha = 1.0;
+            self.homeBarView.alpha = 1.0;
+            [self syncWindowShadowForCurrentState];
+            [self animateFocusShadow:self.isFocused];
+            for (CV3FloatingAppWindow *win in floatingWindows) {
+                if (win.isStashed) [win updateGrabberStack];
+            }
+            CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=restore phase=completion mode=fallback final=%@ elapsed_ms=%.1f",
+                         self.stashAnimationTraceID,
+                         NSStringFromCGRect(self.frame),
+                         (CACurrentMediaTime() - self.stashAnimationTraceStartTime) * 1000.0);
+            self.stashAnimationTraceID = nil;
+            self.stashAnimationTraceStartTime = 0;
+            return;
+        }
+
+        // A stashed icon is DEVICE UI, not hosted-app content. Its visible
+        // rotation is already baked in by applyStashedGrabberOrientation
+        // (device x inverse(scene)), and the snapshot below faithfully carries
+        // that picture. Multiplying it by baseRotationTransform — the SHELL
+        // rotation of the window's content, ±90° whenever the display is
+        // landscape — rotated it a second time: the "icon spins 90° before the
+        // genie flies out" report. Shell rotation and icon-device compensation
+        // are different quantities; they must never be interchanged.
+        if (!iconProxy) {
+            UIImageView *fallbackIconProxy = [[UIImageView alloc] initWithFrame:CGRectInset(startFrameInWindow, 4, 4)];
+            fallbackIconProxy.image = self.appIconMiniView.image;
+            fallbackIconProxy.layer.cornerRadius = CV3Style.iconCornerRadius;
+            fallbackIconProxy.layer.masksToBounds = YES;
+            fallbackIconProxy.contentMode = UIViewContentModeScaleAspectFill;
+            // This proxy is a BARE icon image with no rotation of its own, so
+            // it takes the icon's own compensating transform — never the shell's.
+            fallbackIconProxy.transform = self.appIconMiniView.transform;
+            iconProxy = fallbackIconProxy;
+        } else {
+            iconProxy.frame = startFrameInWindow;
+            // snapshotViewAfterScreenUpdates already captured the icon at its
+            // final on-screen orientation; any rotation added here is a
+            // double-apply.
+            iconProxy.transform = CGAffineTransformIdentity;
+        }
+        // The proxy is the picture the user sees fly out of the icon. If it
+        // leaves at a different angle than the window it expands into, the
+        // culprit is this transform or the cached snapshot, not the geometry.
+        CV3LogToFile(@"[StashIconTrace] phase=restoreProxy bundle=%@ iconFrame=%@ startFrameInWindow=%@ targetFrame=%@ baseRotation=%@ iconMiniRotation=%@ proxyRotation=%@ contentOrientation=%ld targetOrientation=%ld snapshotOrientation=%ld snapshotSize=%@",
+                     self.bundleID ?: @"nil",
+                     NSStringFromCGRect(iconFrame),
+                     NSStringFromCGRect(startFrameInWindow),
+                     NSStringFromCGRect(targetFrame),
+                     NSStringFromCGAffineTransform(self.baseRotationTransform),
+                     NSStringFromCGAffineTransform(self.appIconMiniView.transform),
+                     NSStringFromCGAffineTransform(iconProxy.transform),
+                     (long)self.hostedContentOrientation,
+                     (long)self.targetOrientation,
+                     (long)self.stashedRestoreSnapshotOrientation,
+                     NSStringFromCGSize(self.stashedRestoreSnapshotImage.size));
+        [self addSubview:iconProxy];
+        // Single source for the fade animation below: scale whatever rotation
+        // the proxy actually carries. Re-deriving it here was the second half
+        // of the double-rotation bug.
+        CGAffineTransform iconBaseTransform = iconProxy.transform;
+
+        CGRect startIconFrameInWindow = CGRectInset(startFrameInWindow, kCV3StashIconInset, kCV3StashIconInset);
+        [self animateGenieSurfaceImage:genieImage sourceFrame:endFrameInWindow iconFrame:startIconFrameInWindow presenting:YES completion:^{
+            [iconProxy removeFromSuperview];
+            self.appContentWrapper.alpha = 1.0;
+            self.resizeHandle.alpha = 1.0;
+            self.homeBarView.alpha = 1.0;
+            [self syncWindowShadowForCurrentState];
+            [self animateFocusShadow:self.isFocused];
+            // 通知其他窗口更新堆叠状态
+            for (CV3FloatingAppWindow *win in floatingWindows) {
+                if (win.isStashed) [win updateGrabberStack];
+            }
+            CV3LogStashAnimation(@"[StashAnimation] id=%@ direction=restore phase=completion mode=genie final=%@ content_alpha=%.2f host_attached=%d elapsed_ms=%.1f",
+                         self.stashAnimationTraceID,
+                         NSStringFromCGRect(self.frame),
+                         self.appContentWrapper.alpha,
+                         self.hostView.superview != nil,
+                         (CACurrentMediaTime() - self.stashAnimationTraceStartTime) * 1000.0);
+            self.stashAnimationTraceID = nil;
+            self.stashAnimationTraceStartTime = 0;
+        }];
+
+        [UIView animateKeyframesWithDuration:0.18 delay:0 options:UIViewKeyframeAnimationOptionCalculationModeCubic | UIViewAnimationOptionBeginFromCurrentState animations:^{
+            [UIView addKeyframeWithRelativeStartTime:0.0 relativeDuration:0.22 animations:^{
+                iconProxy.alpha = 0.0;
+                iconProxy.transform = CGAffineTransformScale(iconBaseTransform, 0.86, 0.86);
+            }];
+        } completion:nil];
+    }
+}
+
+- (void)handleStashLongPress:(UILongPressGestureRecognizer *)gesture {
+    if (!self.isStashed || self.isClosing || gesture.state != UIGestureRecognizerStateBegan) return;
+    CV3ExitExposeModeIfNeeded(self, NO);
+    CV3LogStashAnimation(@"[StashAnimation] direction=close phase=longPressRecognized bundle=%@ duration=%.2f location=%@",
+                         self.bundleID ?: @"unknown",
+                         gesture.minimumPressDuration,
+                         NSStringFromCGPoint([gesture locationInView:self.stashGrabber]));
+
+    [UIView animateWithDuration:0.4
+                          delay:0
+         usingSpringWithDamping:0.8
+          initialSpringVelocity:0.5
+                        options:UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{
+        self.transform = CGAffineTransformMakeScale(0.01, 0.01);
+        self.alpha = 0;
+    } completion:^(BOOL finished) {
+        CV3LogStashAnimation(@"[StashAnimation] direction=close phase=completion bundle=%@ finished=%d",
+                             self.bundleID ?: @"unknown", finished);
+        [self closeWindow];
+    }];
+}
+
+- (void)handleStashPan:(UIPanGestureRecognizer *)gesture {
+    if (!self.isStashed) return;
+    
+    CGPoint translation = [gesture translationInView:nil];
+    CGRect screen = CV3DisplayBoundsForWindow(self);
+    
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        CV3ExitExposeModeIfNeeded(self, YES);
+        [UIView animateWithDuration:0.2 animations:^{
+            [self applyCurrentTransformWithScale:1.0];
+            [self visualShadowLayer].shadowOpacity = 0;
+            [self visualShadowLayer].shadowRadius = 0;
+        }];
+    } else if (gesture.state == UIGestureRecognizerStateChanged) {
+        // 核心修复：使用增量平移 (Incremental Translation) 替代绝对位置设置，解决“跳动”问题
+        self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
+        [gesture setTranslation:CGPointZero inView:nil];
+    } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
+            [self applyCurrentTransformWithScale:1.0];
+            [self visualShadowLayer].shadowOpacity = 0;
+            [self visualShadowLayer].shadowRadius = 0;
+            
+            // 自由拖动位置：保持在安全区域内，但不强制吸附至侧边
+            UIEdgeInsets safeArea = [self currentSafeAreaInsets];
+            
+            CGRect frame = self.frame;
+            if (frame.origin.x < safeArea.left) frame.origin.x = safeArea.left;
+            if (frame.origin.y < safeArea.top) frame.origin.y = safeArea.top;
+            if (CGRectGetMaxX(frame) > screen.size.width - safeArea.right) frame.origin.x = screen.size.width - safeArea.right - frame.size.width;
+            if (CGRectGetMaxY(frame) > screen.size.height - safeArea.bottom) frame.origin.y = screen.size.height - safeArea.bottom - frame.size.height;
+            self.frame = frame;
+            
+            // 重要：更新 preStashFrame，确保从当前图标位置还原
+            CGRect psf = self.preStashFrame;
+            psf.origin.x = self.frame.origin.x + (kCV3StashIconSize * 0.5) - psf.size.width / 2.0;
+            psf.origin.y = self.frame.origin.y + (kCV3StashIconSize * 0.5) - psf.size.height / 2.0;
+            CGRect preStashBeforePan = self.preStashFrame;
+            self.preStashFrame = psf;
+            CV3TracePreStashFrameWrite(self, @"handleStashPan.reanchorToIcon", preStashBeforePan);
+            
+            // 重新判定 stashedSide 以便堆叠逻辑参考 (以中线为界)
+            self.stashedSide = (self.center.x < screen.size.width / 2.0) ? 1 : 2;
+            [self updateSovereigntyAssertion]; // 确保 Stash 态优先级同步
+            
+        } completion:^(BOOL finished) {
+            for (CV3FloatingAppWindow *win in floatingWindows) {
+                if (win.isStashed) [win updateGrabberStack];
+            }
+        }];
+    }
+}
+
+- (void)syncWindowBoundsToClient {
+    [self syncWindowBoundsToClientAndNotify:YES];
+}
+
+- (void)syncWindowBoundsToClientAndNotify:(BOOL)notify {
+    if (self.bundleID) {
+        CGRect contentFrame = [self visiblePortraitContentFrame];
+        
+        CV3WriteSharedGeometryForBundleID(self.bundleID,
+                                          (float)contentFrame.size.width,
+                                          (float)contentFrame.size.height,
+                                          self.hidden ? 0 : 1);
+        
+        // 2. 仅在需要通知的静态时刻，才落盘 Plist 提供持久化记录和兼容性
+        if (notify) {
+            NSString *path = @"/var/mobile/Library/Preferences/com.xu.chevronv3.plist";
+            NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithContentsOfFile:path] ?: [NSMutableDictionary dictionary];
+            
+            dict[[NSString stringWithFormat:@"isHosted_%@", self.bundleID]] = @(!self.hidden);
+            dict[[NSString stringWithFormat:@"currentWidth_%@", self.bundleID]] = @(contentFrame.size.width);
+            dict[[NSString stringWithFormat:@"currentHeight_%@", self.bundleID]] = @(contentFrame.size.height);
+            
+            [dict writeToFile:path atomically:YES];
+            chmod([path UTF8String], 0644);
+            
+            CV3LogToFile(@"宿主窗口 (%@) 最终尺寸已同步并发送 Darwin 通知: 宽度=%.1f, 高度=%.1f", self.bundleID, contentFrame.size.width, contentFrame.size.height);
+            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (CFStringRef)@"com.xu.chevronv3/SizeChanged", NULL, NULL, YES);
+        } else {
+            // 节流状态下，由于共享内存已更新，在此处我们完全省去 Plist 磁盘操作
+            CV3LogToFile(@"[Throttled] 仅共享内存同步（零磁盘 IO）: %@ -> 宽度=%.1f, 高度=%.1f", self.bundleID, contentFrame.size.width, contentFrame.size.height);
+        }
+    }
+}
+
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    if (self.isClosing) return nil;
+
+    if (self.isStashed) {
+        CGPoint pInGrabber = [self convertPoint:point toView:self.stashGrabber];
+        if ([self.stashGrabber pointInside:pInGrabber withEvent:event]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self promoteFloatingWindowInZOrder];
+            });
+            UIView *grabberHit = [self.stashGrabber hitTest:pInGrabber withEvent:event];
+            return grabberHit ?: self.stashGrabber;
+        }
+        return nil;
+    }
+
+    if (self.homeBarView && !self.homeBarView.hidden && self.homeBarView.alpha > 0.01) {
+        CGRect homeBarFrame = CGRectInset([self convertRect:self.homeBarView.bounds fromView:self.homeBarView], -18.0, -18.0);
+        if (CGRectContainsPoint(homeBarFrame, point)) {
+            if (!self.isFocused) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self setWindowFocused:YES];
+                });
+            }
+            CGPoint pInHomeBar = [self convertPoint:point toView:self.homeBarView];
+            UIView *homeBarHit = [self.homeBarView hitTest:pInHomeBar withEvent:event];
+            return homeBarHit ?: self.homeBarView;
+        }
+    }
+
+    // 2. 检查侧边 Stash 区域 (仅在 Stashed 时，但此处主要处理 Active 状态)
+    if (self.stashGrabber.alpha > 0.5) {
+        CGPoint pInGrabber = [self convertPoint:point toView:self.stashGrabber];
+        if ([self.stashGrabber pointInside:pInGrabber withEvent:event]) {
+            if (!self.isFocused) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self setWindowFocused:YES];
+                });
+            }
+            return self.stashGrabber;
+        }
+    }
+
+    CGPoint pInRoot = [self convertPoint:point toView:self.rootTransformContainer];
+    UIView *rootHit = [self.rootTransformContainer hitTest:pInRoot withEvent:event];
+    if (!rootHit && ![self.rootTransformContainer pointInside:pInRoot withEvent:event]) return nil;
+
+    if (event.type == UIEventTypeTouches) {
+        // A hosted scene may consume the touch through its remote context
+        // without forwarding a stable Began phase to this UIWindow. The
+        // successful content hit itself is the reliable interaction signal.
+        CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=hitTest.content bundle=%@ hit=%@ point=%@ alpha=%.3f hidden=%d",
+                                self.bundleID, NSStringFromClass(rootHit.class),
+                                NSStringFromCGPoint(point), self.homeBarView.alpha,
+                                self.homeBarAutoHidden);
+        [self noteFloatingHomeBarInteraction];
+    }
+
+    if (!self.isFocused) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self setWindowFocused:YES];
+        });
+    }
+    if (rootHit) return rootHit;
+
+    UIView *hit = [super hitTest:point withEvent:event];
+    return hit ?: (self.clippingContainer ?: self.rootTransformContainer ?: self);
+}
+
+- (void)sendEvent:(UIEvent *)event {
+    if (event.type == UIEventTypeTouches && !self.isStashed && !self.isClosing) {
+        for (UITouch *touch in event.allTouches) {
+            if (touch.phase == UITouchPhaseBegan ||
+                touch.phase == UITouchPhaseMoved ||
+                touch.phase == UITouchPhaseStationary) {
+                if (touch.phase == UITouchPhaseBegan) {
+                    CV3LogHomeBarVisibility(@"[HomeBarTrace] phase=sendEvent.touchBegan bundle=%@ alpha=%.3f hidden=%d timer=%d",
+                                            self.bundleID, self.homeBarView.alpha,
+                                            self.homeBarAutoHidden,
+                                            self.homeBarAutoHideTimer.isValid);
+                    BOOL modelTopmost = floatingWindows.count > 0 && floatingWindows.lastObject == self;
+                    if (!self.isFocused || !modelTopmost) {
+                        CV3LogToFile(@"[ZOrder] phase=touch.promote bundle=%@ focused=%d modelTopmost=%d level=%.2f",
+                                     self.bundleID ?: @"nil",
+                                     self.isFocused,
+                                     modelTopmost,
+                                     self.windowLevel);
+                        [self setWindowFocused:YES];
+                    }
+                }
+                [self noteFloatingHomeBarInteraction];
+                break;
+            }
+        }
+    }
+    [super sendEvent:event];
+}
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
+    return YES;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    return YES;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    // 强制要求其他手势（即来自宿主 App 内部的手势）在我们自己的控制手势面前失败
+    // 这可以防止拖拽或缩放/位移窗口时，底下的 App 还在疯狂滚动
+    if (gestureRecognizer.view == self.homeBarView) {
+        return NO;
+    }
+    return NO;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    return NO;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    return NO;
+}
+
+- (void)handleTransitionGhosting {
+    if (self.isClosing || !self.hostView) return;
+    
+    UIView *ghostShield = [self.hostView snapshotViewAfterScreenUpdates:NO];
+    if (ghostShield) {
+        ghostShield.frame = self.hostContainerProxy.bounds;
+        [self.hostContainerProxy addSubview:ghostShield];
+        
+        self.hostView.alpha = 0;
+        [self refreshHostViewPresentation];
+        
+        [UIView animateWithDuration:0.25 delay:0.05 options:UIViewAnimationOptionCurveEaseOut animations:^{
+            ghostShield.alpha = 0;
+            self.hostView.alpha = 1.0;
+        } completion:^(BOOL finished) {
+            [ghostShield removeFromSuperview];
+        }];
+    }
+}
+
+- (void)releaseSharedGeometryIfNeeded:(NSString *)reason {
+    if (!self.sharedGeometryRetained) {
+        CV3LogToFile(@"[ChevronProbe][SharedGeometry] phase=release.skip bundle=%@ reason=%@ retained=0",
+                     self.bundleID ?: @"<nil>", reason ?: @"unknown");
+        return;
+    }
+    self.sharedGeometryRetained = NO;
+    BOOL released = CV3ReleaseSharedGeometry(self.bundleID);
+    CV3LogToFile(@"[ChevronProbe][SharedGeometry] phase=release bundle=%@ reason=%@ released=%d",
+                 self.bundleID ?: @"<nil>", reason ?: @"unknown", released);
+}
+
+- (void)closeWindow {
+    if (self.isClosing) return;
+    CV3ExitExposeModeIfNeeded(self, NO);
+    self.isClosing = YES;
+    CV3SetCameraForegroundGrant(self.bundleID, NO);
+    self.sceneHostGeneration += 1;
+    [self setHostLifecycleState:CV3HostLifecycleStateReleasing reason:@"WindowClosing"];
+    [self.hostedSession invalidate];
+    
+    if (self.assertionWatchdogTimer) {
+        [self.assertionWatchdogTimer invalidate];
+        self.assertionWatchdogTimer = nil;
+    }
+    [self.receptionTraceTimer invalidate];
+    self.receptionTraceTimer = nil;
+    [self.homeBarAutoHideTimer invalidate];
+    self.homeBarAutoHideTimer = nil;
+    [self.homeBarVisibilityAnimator stopAnimation:YES];
+    self.homeBarVisibilityAnimator = nil;
+    
+    CV3LogToFile(@"[Lifecycle] 正在关闭窗口(默认仅分离宿主，不强杀应用): %@", self.bundleID);
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    self.hidden = YES;
+    [self syncWindowBoundsToClient];
+    if (self.rbsAssertion) {
+        [self.rbsAssertion invalidate];
+        self.rbsAssertion = nil;
+        CV3LogToFile(@"[Immortality] 已释放 %@ 的前台优先级断连", self.bundleID);
+    }
+
+    if (self.hostView || self.crossOrientationMapApplied) {
+        // [New] Reset Scene Settings to Background before destroying
+        BOOL sceneValid = self.targetScene && CV3InvokeBool(self.targetScene, @selector(isValid), YES);
+        if (sceneValid) {
+            @try {
+                FBSMutableSceneSettings *settings = [[self.targetScene settings] mutableCopy];
+                BOOL preserveForeground = self.preserveSceneForegroundOnClose;
+                if ([settings respondsToSelector:@selector(setForeground:)]) {
+                    [settings setForeground:preserveForeground];
+                }
+                if ([settings respondsToSelector:@selector(setBackgrounded:)]) {
+                    [settings setBackgrounded:!preserveForeground];
+                }
+                if (self.crossOrientationMapApplied) {
+                    CV3RestoreCrossOrientationMapOnSettings(settings,
+                                                            self.originalOrientationMapResolver,
+                                                            self.originalInterfaceOrientationMode,
+                                                            self.hasOriginalInterfaceOrientationMode);
+                    self.originalOrientationMapResolver = nil;
+                    self.activeOrientationMapResolver = nil;
+                    self.hasOriginalInterfaceOrientationMode = NO;
+                    self.hasCapturedOrientationMapBaseline = NO;
+                    self.crossOrientationMapApplied = NO;
+                }
+                [self.targetScene updateSettings:settings withTransitionContext:nil];
+                if (preserveForeground) {
+                    CV3LogToFile(@"[FullscreenLaunch] phase=sceneHandoff.preserved bundle=%@", self.bundleID);
+                } else {
+                    CV3LogToFile(@"[Aggressive] 已将 Scene 设置为后台状态: %@", self.bundleID);
+                }
+            } @catch (NSException *e) {
+                CV3LogToFile(@"[Error] Reset scene settings failed: %@", e);
+            }
+        } else if (self.targetScene) {
+            CV3LogToFile(@"[Lifecycle] 跳过失效 Scene 的后台设置更新: %@", self.bundleID);
+        }
+    }
+    [self detachHostedSceneForReason:@"WindowClosing" clearScene:YES];
+    if (self.allowProcessTerminationOnClose) {
+        CV3LogToFile(@"[Warning] allowProcessTerminationOnClose 已启用，但当前默认关闭路径不执行 kill: %@", self.bundleID);
+    }
+    
+    self.windowScene = nil; // Clear scene attachment
+    [floatingWindows removeObject:self];
+    [[NSNotificationCenter defaultCenter] postNotificationName:CV3FloatingWindowsDidChangeNotification object:nil];
+
+    // 如果没有剩下活跃的分屏窗口，且 Expose 模式处于开启状态，自动退出 Expose 模式
+    if (isGlobalExposeActive) {
+        if (CV3ExpandedWindowsForExpose().count < 2) {
+            CV3ToggleExposeMode();
+        }
+    }
+
+    CV3CascadeUpdateSovereigntyAssertions(); // 级联刷新剩下的窗口前台优先级断言
+    
+    [self releaseSharedGeometryIfNeeded:@"closeWindow"];
+}
+
+- (void)assertionWatchdogTick:(NSTimer *)timer {
+    if (self.isClosing) return;
+    
+    // 低电量模式：放宽保活强度，节省后台唤醒开销
+    BOOL isLowPower = [NSProcessInfo processInfo].isLowPowerModeEnabled;
+
+    if (self.isStashed) {
+        // Stash + 低电量 -> 允许完全挂起，无需断言刷新
+        if (isLowPower) return;
+    }
+    if (self.hidden) return;
+    
+    // State changes perform immediate updates. Matching assertions return immediately;
+    // this call only fills a missing assertion or retries a failed priority change.
+    @try {
+        [self updateSovereigntyAssertion];
+    } @catch (NSException *e) {}
+
+    NSTimeInterval targetInterval = isLowPower ? 30.0 : 15.0;
+    if (fabs(timer.timeInterval - targetInterval) > 0.1) {
+        [self.assertionWatchdogTimer invalidate];
+        self.assertionWatchdogTimer = [NSTimer scheduledTimerWithTimeInterval:targetInterval
+                                                                       target:self
+                                                                     selector:@selector(assertionWatchdogTick:)
+                                                                     userInfo:nil
+                                                                      repeats:YES];
+    }
+}
+
+- (void)dealloc {
+    CV3LogToFile(@"[Lifecycle] CV3FloatingAppWindow Dealloc: %@", self.bundleID);
+    [self releaseSharedGeometryIfNeeded:@"dealloc"];
+    CV3SetCameraForegroundGrant(self.bundleID, NO);
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [[UIDevice currentDevice] endGeneratingDeviceOrientationNotifications];
+    [self.receptionTraceTimer invalidate];
+    self.receptionTraceTimer = nil;
+    [self.homeBarAutoHideTimer invalidate];
+    self.homeBarAutoHideTimer = nil;
+    [self.homeBarVisibilityAnimator stopAnimation:YES];
+    self.homeBarVisibilityAnimator = nil;
+    
+    [self stopLiquidMotion];
+    
+    if (self.assertionWatchdogTimer) {
+        [self.assertionWatchdogTimer invalidate];
+        self.assertionWatchdogTimer = nil;
+    }
+    
+    if (self.rbsAssertion) {
+        [self.rbsAssertion invalidate];
+        self.rbsAssertion = nil;
+    }
+    if ([self.hostView respondsToSelector:@selector(invalidate)]) {
+        CV3InvokeObject(self.hostView, @selector(invalidate));
+    }
+}
+
++ (CMMotionManager *)sharedMotionManager {
+    static CMMotionManager *sharedMotionManager = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        sharedMotionManager = [[CMMotionManager alloc] init];
+        sharedMotionManager.deviceMotionUpdateInterval = 1.0 / 120.0;
+    });
+    return sharedMotionManager;
+}
+
+- (void)startLiquidMotion {
+    CMMotionManager *mgr = [[self class] sharedMotionManager];
+    if (!mgr.isDeviceMotionAvailable) return;
+    
+    self.hasCapturedBaseline = NO;
+    [mgr startDeviceMotionUpdates];
+    if (self.liquidDisplayLink) {
+        [self.liquidDisplayLink invalidate];
+    }
+    self.liquidDisplayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(updateLiquidMotion:)];
+    [self.liquidDisplayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+}
+
+- (void)updateLiquidMotion:(CADisplayLink *)sender {
+    CMMotionManager *mgr = [[self class] sharedMotionManager];
+    CMDeviceMotion *m = mgr.deviceMotion;
+    if (!m) return;
+    
+    if (!self.hasCapturedBaseline) {
+        self.baseRoll = m.attitude.roll;
+        self.basePitch = m.attitude.pitch;
+        self.hasCapturedBaseline = YES;
+    }
+    
+    CGFloat deltaRoll = m.attitude.roll - self.baseRoll;
+    CGFloat deltaPitch = m.attitude.pitch - self.basePitch;
+    
+    CGFloat tilt = sqrt(deltaRoll * deltaRoll + deltaPitch * deltaPitch);
+    CGFloat dynamicBorderWidth = MIN(0.8, 0.3 + tilt * 0.5);
+    
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    // 1. 镜面高光流动
+    self.specularHighlight.startPoint = CGPointMake(0.0 - deltaRoll * 1.5, 0.0 - deltaPitch * 1.5);
+    self.specularHighlight.endPoint = CGPointMake(1.0 - deltaRoll * 1.5, 1.0 - deltaPitch * 1.5);
+    
+    // 2. 青红分光折射与厚度动态色散
+    CGFloat dx = deltaRoll * 1.2;
+    CGFloat dy = deltaPitch * 1.2;
+    self.cyanLayer.transform = CATransform3DMakeTranslation(-dx, -dy, 0);
+    self.magentaLayer.transform = CATransform3DMakeTranslation(dx, dy, 0);
+    
+    // 221：彩框去除后不再动态改边框宽度（保留结构，宽度恒 0）
+    self.cyanLayer.borderWidth = 0.0;
+    self.magentaLayer.borderWidth = 0.0;
+    (void)dynamicBorderWidth; // 显式消费（-Werror,-Wunused-variable）
+    [CATransaction commit];
+}
+
+- (void)stopLiquidMotion {
+    if (self.liquidDisplayLink) {
+        [self.liquidDisplayLink invalidate];
+        self.liquidDisplayLink = nil;
+    }
+    
+    BOOL anyActive = NO;
+    if (floatingWindows) {
+        for (CV3FloatingAppWindow *win in floatingWindows) {
+            if (win != self && [win isKindOfClass:[CV3FloatingAppWindow class]] && win.liquidDisplayLink) {
+                anyActive = YES;
+                break;
+            }
+        }
+    }
+    if (!anyActive) {
+        [[[self class] sharedMotionManager] stopDeviceMotionUpdates];
+    }
+}
+
+@end
