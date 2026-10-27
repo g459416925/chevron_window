@@ -973,6 +973,7 @@ static void CV3WriteFocusedDiagnostic(NSString *message) {
         [message hasPrefix:@"[HomeSearch]"] ||
         [message hasPrefix:@"[SplitTrace] [LaunchChain]"] ||
         [message hasPrefix:@"[SplitTrace] [LauncherTouch]"] ||
+        [message hasPrefix:@"[SplitTrace] [ScreenTimeGuard]"] ||
         [message hasPrefix:@"[SplitTrace] [Launcher]"] ||
         [message hasPrefix:@"[LauncherTouch]"] ||
         [message hasPrefix:@"[Launcher]"] ||
@@ -2381,12 +2382,10 @@ static BOOL CV3FocusHostedFloatingWindowForBundleID(NSString *bundleID, NSString
     CV3FloatingAppWindow *window = CV3HostedFloatingWindowForBundleID(bundleID);
     if (!window) return NO;
 
-    // Screen Time 限额闸门：被限额的 App 不聚焦分屏，改呈现系统拦截页
+    // Screen Time 限额闸门：被限额的 App 直接拒绝聚焦分屏
     if (!CV3ScreenTimeGateBundleID(bundleID,
-                                   [NSString stringWithFormat:@"FocusHosted:%@", source ?: @"Unknown"],
-                                   YES,
-                                   window.windowScene)) {
-        return YES;   // 已呈现拦截页，视为已处理（阻止后续全屏启动）
+                                   [NSString stringWithFormat:@"FocusHosted:%@", source ?: @"Unknown"])) {
+        return YES;   // 已拒绝，视为已处理（阻止后续全屏启动）
     }
 
     CV3ExitExposeModeIfNeeded(window, YES);
@@ -3975,8 +3974,8 @@ notificationRequest:(id)request
 %hook LSApplicationWorkspace
 - (BOOL)openApplicationWithBundleID:(NSString *)bundleID {
     // Screen Time 限额闸门：SB 进程内任何直连启动请求都不允许绕过限额
-    if (!CV3ScreenTimeGateBundleID(bundleID, @"LSApplicationWorkspace.openApplication", YES, nil)) {
-        return YES;   // 已呈现拦截页
+    if (!CV3ScreenTimeGateBundleID(bundleID, @"LSApplicationWorkspace.openApplication")) {
+        return YES;   // 已拒绝，谎报已处理以免调用方走其他路径
     }
     if (CV3FocusHostedFloatingWindowForBundleID(bundleID, @"LSApplicationWorkspace.openApplication")) return YES;
     return %orig(bundleID);
@@ -4925,8 +4924,8 @@ static void CV3HandleFloatingWindowGlobalTouch(UIEvent *event) {
 - (BOOL)launchApplicationWithIdentifier:(NSString *)identifier suspended:(BOOL)suspended {
     // Screen Time 限额闸门：非 suspended 启动 = 前台化，不允许绕过限额
     if (!suspended &&
-        !CV3ScreenTimeGateBundleID(identifier, @"SpringBoard.launchApplication", YES, nil)) {
-        return YES;   // 已呈现拦截页
+        !CV3ScreenTimeGateBundleID(identifier, @"SpringBoard.launchApplication")) {
+        return YES;   // 已拒绝
     }
     if (!suspended && CV3FocusHostedFloatingWindowForBundleID(identifier,
                                                                @"SpringBoard.launchApplication")) return YES;

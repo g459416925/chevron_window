@@ -1,0 +1,9 @@
+Package: com.xu.iconprobe
+Name: iconprobe
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: Read-only SpringBoard probe: dump icon-launch entrypoints (methods + type encodings).
+Maintainer: xu
+Author: xu
+Section: Tweaks
+Depends: mobilesubstrate

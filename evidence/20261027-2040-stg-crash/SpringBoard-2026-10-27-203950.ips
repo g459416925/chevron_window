@@ -1,0 +1,917 @@
+{"app_name":"SpringBoard","timestamp":"2026-10-27 20:39:50.00 +0800","app_version":"1.0","slice_uuid":"3ef69aca-1d05-380b-a35f-532c8dc50edb","build_version":"50","platform":2,"bundleID":"com.apple.springboard","share_with_app_devs":0,"is_first_party":1,"bug_type":"309","os_version":"iPhone OS 16.5.1 (20F75)","roots_installed":0,"name":"SpringBoard","incident_id":"F787DA65-13F5-4D95-B817-B3E41F799544"}
+{
+  "uptime" : 200000,
+  "procRole" : "Foreground",
+  "version" : 2,
+  "userID" : 501,
+  "deployVersion" : 210,
+  "modelCode" : "iPhone15,3",
+  "coalitionID" : 10974,
+  "osVersion" : {
+    "isEmbedded" : true,
+    "train" : "iPhone OS 16.5.1",
+    "releaseType" : "User",
+    "build" : "20F75"
+  },
+  "captureTime" : "2026-10-27 20:39:50.0210 +0800",
+  "incident" : "F787DA65-13F5-4D95-B817-B3E41F799544",
+  "pid" : 57258,
+  "cpuType" : "ARM-64",
+  "roots_installed" : 0,
+  "bug_type" : "309",
+  "procLaunch" : "2026-10-27 20:39:21.3113 +0800",
+  "procStartAbsTime" : 5011146880975,
+  "procExitAbsTime" : 5011835682485,
+  "procName" : "SpringBoard",
+  "procPath" : "\/System\/Library\/CoreServices\/SpringBoard.app\/SpringBoard",
+  "bundleInfo" : {"CFBundleShortVersionString":"1.0","CFBundleVersion":"50","CFBundleIdentifier":"com.apple.springboard"},
+  "storeInfo" : {"deviceIdentifierForVendor":"FCA4A3B6-20F7-4CDE-8ED6-815437241B70"},
+  "parentProc" : "launchd",
+  "parentPid" : 1,
+  "coalitionName" : "com.apple.springboard",
+  "crashReporterKey" : "a8c8a2763c0dfabb56687e7e9b5c314d6fea41d2",
+  "wasUnlockedSinceBoot" : 1,
+  "isLocked" : 0,
+  "consecutiveCrashCount" : 1,
+  "throttleTimeout" : 5,
+  "codeSigningID" : "com.apple.springboard",
+  "codeSigningTeamID" : "",
+  "codeSigningFlags" : 570434309,
+  "codeSigningValidationCategory" : 1,
+  "codeSigningTrustLevel" : 0,
+  "basebandVersion" : "1.70.02",
+  "vmRegionInfo" : "0x2 is not in any region.  Bytes before following region: 68719476734\n      REGION TYPE                 START - END      [ VSIZE] PRT\/MAX SHRMOD  REGION DETAIL\n      UNUSED SPACE AT START\n--->  \n      commpage (reserved)     1000000000-7000000000 [384.0G] ---\/--- SM=NUL  ...(unallocated)",
+  "exception" : {"codes":"0x0000000000000001, 0x0000000000000002","rawCodes":[1,2],"type":"EXC_BAD_ACCESS","signal":"SIGSEGV","subtype":"KERN_INVALID_ADDRESS at 0x0000000000000002"},
+  "vmregioninfo" : "0x2 is not in any region.  Bytes before following region: 68719476734\n      REGION TYPE                 START - END      [ VSIZE] PRT\/MAX SHRMOD  REGION DETAIL\n      UNUSED SPACE AT START\n--->  \n      commpage (reserved)     1000000000-7000000000 [384.0G] ---\/--- SM=NUL  ...(unallocated)",
+  "faultingThread" : 0,
+  "threads" : [{"triggered":true,"id":1776167,"threadState":{"x":[{"value":2},{"value":0},{"value":0},{"value":2},{"value":50},{"value":50},{"value":114},{"value":2720},{"value":4364607200,"symbolLocation":224,"symbol":"_main_thread"},{"value":7064838814,"objc-selector":"screenTimePolicy"},{"value":61780185526},{"value":17732982707811840},{"value":27},{"value":59175040928},{"value":251779375261136329,"symbolLocation":251779366667681793,"symbol":"OBJC_CLASS_$_SBApplicationInfo"},{"value":8593454536,"symbolLocation":0,"symbol":"OBJC_CLASS_$_SBApplicationInfo"},{"value":13107405392},{"value":4374987008},{"value":0},{"value":10739079984},{"value":10779079696},{"value":10791909680},{"value":59172241856},{"value":7064838814,"objc-selector":"screenTimePolicy"},{"value":10739079984},{"value":10739079984},{"value":59175354368},{"value":7066308608,"objc-selector":"actions"},{"value":1}],"flavor":"ARM_THREAD_STATE64","lr":{"value":4374732336},"cpsr":{"value":4096},"fp":{"value":6104027424},"sp":{"value":6104027360},"esr":{"value":1442840704,"description":" Address size fault"},"pc":{"value":7012956788,"matchesCrashFrame":1},"far":{"value":2}},"queue":"com.apple.main-thread","frames":[{"imageOffset":14964,"symbol":"objc_retain","symbolLocation":8,"imageIndex":79},{"imageOffset":384560,"imageIndex":22},{"imageOffset":113376,"imageIndex":22},{"imageOffset":256404,"imageIndex":22},{"imageOffset":768180,"symbol":"-[UIGestureRecognizerTarget _sendActionWithGestureRecognizer:]","symbolLocation":128,"imageIndex":80},{"imageOffset":4350632,"symbol":"_UIGestureRecognizerSendTargetActions","symbolLocation":92,"imageIndex":80},{"imageOffset":1713780,"symbol":"_UIGestureRecognizerSendActions","symbolLocation":272,"imageIndex":80},{"imageOffset":543308,"symbol":"-[UIGestureRecognizer _updateGestureForActiveEvents]","symbolLocation":528,"imageIndex":80},{"imageOffset":1243308,"symbol":"_UIGestureEnvironmentUpdate","symbolLocation":2476,"imageIndex":80},{"imageOffset":590388,"symbol":"__CFRUNLOOP_IS_CALLING_OUT_TO_AN_OBSERVER_CALLBACK_FUNCTION__","symbolLocation":36,"imageIndex":81},{"imageOffset":107536,"symbol":"__CFRunLoopDoObservers","symbolLocation":532,"imageIndex":81},{"imageOffset":500124,"symbol":"__CFRunLoopRun","symbolLocation":1028,"imageIndex":81},{"imageOffset":521196,"symbol":"CFRunLoopRunSpecific","symbolLocation":612,"imageIndex":81},{"imageOffset":4956,"symbol":"GSEventRunModal","symbolLocation":164,"imageIndex":82},{"imageOffset":3790568,"symbol":"-[UIApplication _run]","symbolLocation":888,"imageIndex":80},{"imageOffset":3789644,"symbol":"UIApplicationMain","symbolLocation":340,"imageIndex":80},{"imageOffset":675156,"symbol":"SBSystemAppMain","symbolLocation":5052,"imageIndex":83},{"imageOffset":89580,"symbol":"start","symbolLocation":2220,"imageIndex":0}]},{"id":1776184,"frames":[{"imageOffset":2932,"symbol":"start_wqthread","symbolLocation":0,"imageIndex":84}]},{"id":1776193,"frames":[{"imageOffset":2932,"symbol":"start_wqthread","symbolLocation":0,"imageIndex":84}]},{"id":1776196,"name":"com.apple.uikit.eventfetch-thread","frames":[{"imageOffset":3204,"symbol":"mach_msg2_trap","symbolLocation":8,"imageIndex":85},{"imageOffset":80724,"symbol":"mach_msg2_internal","symbolLocation":80,"imageIndex":85},{"imageOffset":81452,"symbol":"mach_msg_overwrite","symbolLocation":540,"imageIndex":85},{"imageOffset":4552,"symbol":"mach_msg","symbolLocation":24,"imageIndex":85},{"imageOffset":495652,"symbol":"__CFRunLoopServiceMachPort","symbolLocation":160,"imageIndex":81},{"imageOffset":500304,"symbol":"__CFRunLoopRun","symbolLocation":1208,"imageIndex":81},{"imageOffset":521196,"symbol":"CFRunLoopRunSpecific","symbolLocation":612,"imageIndex":81},{"imageOffset":270292,"symbol":"-[NSRunLoop(NSRunLoop) runMode:beforeDate:]","symbolLocation":212,"imageIndex":86},{"imageOffset":270012,"symbol":"-[NSRunLoop(NSRunLoop) runUntilDate:]","symbolLocation":64,"imageIndex":86},{"imageOffset":5047292,"symbol":"-[UIEventFetcher threadMain]","symbolLocation":416,"imageIndex":80},{"imageOffset":374084,"symbol":"__NSThread__start__","symbolLocation":716,"imageIndex":86},{"imageOffset":5816,"symbol":"_pthread_start","symbolLocation":148,"imageIndex":84},{"imageOffset":2952,"symbol":"thread_start","symbolLocation":8,"imageIndex":84}]},{"id":1776200,"name":"com.apple.CoreMotion.MotionThread","frames":[{"imageOffset":3204,"symbol":"mach_msg2_trap","symbolLocation":8,"imageIndex":85},{"imageOffset":80724,"symbol":"mach_msg2_internal","symbolLocation":80,"imageIndex":85},{"imageOffset":81452,"symbol":"mach_msg_overwrite","symbolLocation":540,"imageIndex":85},{"imageOffset":4552,"symbol":"mach_msg","symbolLocation":24,"imageIndex":85},{"imageOffset":495652,"symbol":"__CFRunLoopServiceMachPort","symbolLocation":160,"imageIndex":81},{"imageOffset":500304,"symbol":"__CFRunLoopRun","symbolLocation":1208,"imageIndex":81},{"imageOffset":521196,"symbol":"CFRunLoopRunSpecific","symbolLocation":612,"imageIndex":81},{"imageOffset":794276,"symbol":"CFRunLoopRun","symbolLocation":64,"imageIndex":81},{"imageOffset":78408,"imageIndex":87},{"imageOffset":5816,"symbol":"_pthread_start","symbolLocation":148,"imageIndex":84},{"imageOffset":2952,"symbol":"thread_start","symbolLocation":8,"imageIndex":84}]},{"id":1776223,"name":"SBWiFiManager callback thread","frames":[{"imageOffset":3204,"symbol":"mach_msg2_trap","symbolLocation":8,"imageIndex":85},{"imageOffset":80724,"symbol":"mach_msg2_internal","symbolLocation":80,"imageIndex":85},{"imageOffset":81452,"symbol":"mach_msg_overwrite","symbolLocation":540,"imageIndex":85},{"imageOffset":4552,"symbol":"mach_msg","symbolLocation":24,"imageIndex":85},{"imageOffset":495652,"symbol":"__CFRunLoopServiceMachPort","symbolLocation":160,"imageIndex":81},{"imageOffset":500304,"symbol":"__CFRunLoopRun","symbolLocation":1208,"imageIndex":81},{"imageOffset":521196,"symbol":"CFRunLoopRunSpecific","symbolLocation":612,"imageIndex":81},{"imageOffset":270292,"symbol":"-[NSRunLoop(NSRunLoop) runMode:beforeDate:]","symbolLocation":212,"imageIndex":86},{"imageOffset":269928,"symbol":"-[NSRunLoop(NSRunLoop) run]","symbolLocation":64,"imageIndex":86},{"imageOffset":1997616,"symbol":"-[SBWiFiManager _runManagerCallbackThread]","symbolLocation":184,"imageIndex":83},{"imageOffset":374084,"symbol":"__NSThread__start__","symbolLocation":716,"imageIndex":86},{"imageOffset":5816,"symbol":"_pthread_start","symbolLocation":148,"imageIndex":84},{"imageOffset":2952,"symbol":"thread_start","symbolLocation":8,"imageIndex":84}]},{"id":1776228,"name":"CommonUtilities-WiFi-Thread","frames":[{"imageOffset":3204,"symbol":"mach_msg2_trap","symbolLocation":8,"imageIndex":85},{"imageOffset":80724,"symbol":"mach_msg2_internal","symbolLocation":80,"imageIndex":85},{"imageOffset":81452,"symbol":"mach_msg_overwrite","symbolLocation":540,"imageIndex":85},{"imageOffset":4552,"symbol":"mach_msg","symbolLocation":24,"imageIndex":85},{"imageOffset":495652,"symbol":"__CFRunLoopServiceMachPort","symbolLocation":160,"imageIndex":81},{"imageOffset":500304,"symbol":"__CFRunLoopRun","symbolLocation":1208,"imageIndex":81},{"imageOffset":521196,"symbol":"CFRunLoopRunSpecific","symbolLocation":612,"imageIndex":81},{"imageOffset":794276,"symbol":"CFRunLoopRun","symbolLocation":64,"imageIndex":81},{"imageOffset":54560,"imageIndex":88},{"imageOffset":374084,"symbol":"__NSThread__start__","symbolLocation":716,"imageIndex":86},{"imageOffset":5816,"symbol":"_pthread_start","symbolLocation":148,"imageIndex":84},{"imageOffset":2952,"symbol":"thread_start","symbolLocation":8,"imageIndex":84}]},{"id":1776257,"frames":[{"imageOffset":2932,"symbol":"start_wqthread","symbolLocation":0,"imageIndex":84}]},{"id":1776290,"name":"com.apple.UIKit.inProcessAnimationManager","queue":"com.apple.UIKit.inProcessAnimationManagerTickQueue","frames":[{"imageOffset":3096,"symbol":"semaphore_timedwait_trap","symbolLocation":8,"imageIndex":85},{"imageOffset":17604,"symbol":"_dispatch_sema4_timedwait","symbolLocation":64,"imageIndex":89},{"imageOffset":19140,"symbol":"_dispatch_semaphore_wait_slow","symbolLocation":76,"imageIndex":89},{"imageOffset":4125124,"symbol":"-[UIViewInProcessAnimationManager _processPostTicksDelayIfNecessary:]","symbolLocation":132,"imageIndex":80},{"imageOffset":4124256,"symbol":"__82-[UIViewInProcessAnimationManager _performTick:cancel:force:eventName:entry:exit:]_block_invoke","symbolLocation":272,"imageIndex":80},{"imageOffset":16044,"symbol":"_dispatch_client_callout","symbolLocation":20,"imageIndex":89},{"imageOffset":78888,"symbol":"_dispatch_lane_barrier_sync_invoke_and_complete","symbolLocation":56,"imageIndex":89},{"imageOffset":4487364,"symbol":"-[UIViewInProcessAnimationManager _performTick:cancel:force:eventName:entry:exit:]","symbolLocation":224,"imageIndex":80},{"imageOffset":4485872,"symbol":"-[UIViewInProcessAnimationManager _displayLinkFire:]","symbolLocation":196,"imageIndex":80},{"imageOffset":169068,"symbol":"CA::Display::DisplayLink::dispatch_items(unsigned long long, unsigned long long, unsigned long long)","symbolLocation":820,"imageIndex":90},{"imageOffset":234516,"symbol":"display_timer_callback(__CFMachPort*, void*, long, void*)","symbolLocation":372,"imageIndex":90},{"imageOffset":499028,"symbol":"__CFMachPortPerform","symbolLocation":176,"imageIndex":81},{"imageOffset":618824,"symbol":"__CFRUNLOOP_IS_CALLING_OUT_TO_A_SOURCE1_PERFORM_FUNCTION__","symbolLocation":60,"imageIndex":81},{"imageOffset":626232,"symbol":"__CFRunLoopDoSource1","symbolLocation":520,"imageIndex":81},{"imageOffset":501336,"symbol":"__CFRunLoopRun","symbolLocation":2240,"imageIndex":81},{"imageOffset":521196,"symbol":"CFRunLoopRunSpecific","symbolLocation":612,"imageIndex":81},{"imageOffset":270292,"symbol":"-[NSRunLoop(NSRunLoop) runMode:beforeDate:]","symbolLocation":212,"imageIndex":86},{"imageOffset":269928,"symbol":"-[NSRunLoop(NSRunLoop) run]","symbolLocation":64,"imageIndex":86},{"imageOffset":4658632,"symbol":"__66-[UIViewInProcessAnimationManager startAdvancingAnimationManager:]_block_invoke_3","symbolLocation":120,"imageIndex":80},{"imageOffset":374084,"symbol":"__NSThread__start__","symbolLocation":716,"imageIndex":86},{"imageOffset":5816,"symbol":"_pthread_start","symbolLocation":148,"imageIndex":84},{"imageOffset":2952,"symbol":"thread_start","symbolLocation":8,"imageIndex":84}]},{"id":1776301,"name":"WFPersonalHotspotStateMonitor callback thread","frames":[{"imageOffset":3204,"symbol":"mach_msg2_trap","symbolLocation":8,"imageIndex":85},{"imageOffset":80724,"symbol":"mach_msg2_internal","symbolLocation":80,"imageIndex":85},{"imageOffset":81452,"symbol":"mach_msg_overwrite","symbolLocation":540,"imageIndex":85},{"imageOffset":4552,"symbol":"mach_msg","symbolLocation":24,"imageIndex":85},{"imageOffset":495652,"symbol":"__CFRunLoopServiceMachPort","symbolLocation":160,"imageIndex":81},{"imageOffset":500304,"symbol":"__CFRunLoopRun","symbolLocation":1208,"imageIndex":81},{"imageOffset":521196,"symbol":"CFRunLoopRunSpecific","symbolLocation":612,"imageIndex":81},{"imageOffset":270292,"symbol":"-[NSRunLoop(NSRunLoop) runMode:beforeDate:]","symbolLocation":212,"imageIndex":86},{"imageOffset":269928,"symbol":"-[NSRunLoop(NSRunLoop) run]","symbolLocation":64,"imageIndex":86},{"imageOffset":391772,"symbol":"-[WFPersonalHotspotStateMonitor _runManagerCallbackThread]","symbolLocation":352,"imageIndex":91},{"imageOffset":374084,"symbol":"__NSThread__start__","symbolLocation":716,"imageIndex":86},{"imageOffset":5816,"symbol":"_pthread_start","symbolLocation":148,"imageIndex":84},{"imageOffset":2952,"symbol":"thread_start","symbolLocation":8,"imageIndex":84}]},{"id":1776302,"name":"WFWiFiStateMonitor callback thread","frames":[{"imageOffset":3204,"symbol":"mach_msg2_trap","symbolLocation":8,"imageIndex":85},{"imageOffset":80724,"symbol":"mach_msg2_internal","symbolLocation":80,"imageIndex":85},{"imageOffset":81452,"symbol":"mach_msg_overwrite","symbolLocation":540,"imageIndex":85},{"imageOffset":4552,"symbol":"mach_msg","symbolLocation":24,"imageIndex":85},{"imageOffset":495652,"symbol":"__CFRunLoopServiceMachPort","symbolLocation":160,"imageIndex":81},{"imageOffset":500304,"symbol":"__CFRunLoopRun","symbolLocation":1208,"imageIndex":81},{"imageOffset":521196,"symbol":"CFRunLoopRunSpecific","symbolLocation":612,"imageIndex":81},{"imageOffset":270292,"symbol":"-[NSRunLoop(NSRunLoop) runMode:beforeDate:]","symbolLocation":212,"imageIndex":86},{"imageOffset":269928,"symbol":"-[NSRunLoop(NSRunLoop) run]","symbolLocation":64,"imageIndex":86},{"imageOffset":328344,"symbol":"-[WFWiFiStateMonitor _runManagerCallbackThread]","symbolLocation":192,"imageIndex":91},{"imageOffset":374084,"symbol":"__NSThread__start__","symbolLocation":716,"imageIndex":86},{"imageOffset":5816,"symbol":"_pthread_start","symbolLocation":148,"imageIndex":84},{"imageOffset":2952,"symbol":"thread_start","symbolLocation":8,"imageIndex":84}]},{"id":1776498,"frames":[{"imageOffset":2932,"symbol":"start_wqthread","symbolLocation":0,"imageIndex":84}]},{"id":1776499,"frames":[{"imageOffset":2932,"symbol":"start_wqthread","symbolLocation":0,"imageIndex":84}]},{"id":1776500,"frames":[{"imageOffset":2932,"symbol":"start_wqthread","symbolLocation":0,"imageIndex":84}]},{"id":1776502,"frames":[{"imageOffset":2932,"symbol":"start_wqthread","symbolLocation":0,"imageIndex":84}]},{"id":1776624,"frames":[{"imageOffset":2932,"symbol":"start_wqthread","symbolLocation":0,"imageIndex":84}]},{"id":1776665,"frames":[{"imageOffset":2932,"symbol":"start_wqthread","symbolLocation":0,"imageIndex":84}]},{"id":1776666,"frames":[{"imageOffset":2932,"symbol":"start_wqthread","symbolLocation":0,"imageIndex":84}]},{"id":1776667,"frames":[{"imageOffset":2932,"symbol":"start_wqthread","symbolLocation":0,"imageIndex":84}]},{"id":1776668,"frames":[{"imageOffset":2932,"symbol":"start_wqthread","symbolLocation":0,"imageIndex":84}]},{"id":1776669,"frames":[{"imageOffset":2932,"symbol":"start_wqthread","symbolLocation":0,"imageIndex":84}]},{"id":1776670,"frames":[{"imageOffset":2932,"symbol":"start_wqthread","symbolLocation":0,"imageIndex":84}]},{"id":1776671,"frames":[{"imageOffset":2932,"symbol":"start_wqthread","symbolLocation":0,"imageIndex":84}]},{"id":1776672,"frames":[{"imageOffset":2932,"symbol":"start_wqthread","symbolLocation":0,"imageIndex":84}]},{"id":1776673,"frames":[{"imageOffset":2932,"symbol":"start_wqthread","symbolLocation":0,"imageIndex":84}]},{"id":1776674,"frames":[{"imageOffset":2932,"symbol":"start_wqthread","symbolLocation":0,"imageIndex":84}]},{"id":1776675,"frames":[{"imageOffset":2932,"symbol":"start_wqthread","symbolLocation":0,"imageIndex":84}]},{"id":1776676,"frames":[{"imageOffset":2932,"symbol":"start_wqthread","symbolLocation":0,"imageIndex":84}]},{"id":1776677,"frames":[{"imageOffset":2932,"symbol":"start_wqthread","symbolLocation":0,"imageIndex":84}]}],
+  "usedImages" : [
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4363993088,
+    "size" : 557056,
+    "uuid" : "6987370a-c385-3135-a27f-6731706bcbd8",
+    "path" : "\/usr\/lib\/dyld",
+    "name" : "dyld"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4362846208,
+    "size" : 16384,
+    "uuid" : "3ef69aca-1d05-380b-a35f-532c8dc50edb",
+    "path" : "\/System\/Library\/CoreServices\/SpringBoard.app\/SpringBoard",
+    "name" : "SpringBoard"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4363239424,
+    "size" : 81920,
+    "uuid" : "0c8e430b-1826-3929-9906-68e85a79dbc6",
+    "path" : "\/usr\/lib\/systemhook-B9636BA7D932E518.dylib",
+    "name" : "systemhook-B9636BA7D932E518.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4363452416,
+    "size" : 32768,
+    "uuid" : "978ca172-8062-3c6b-8d1b-d77540e088ce",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/roothideinit.dylib",
+    "name" : "roothideinit.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4363534336,
+    "size" : 32768,
+    "uuid" : "1ba2f043-0c77-307d-b3ad-c221581e9d57",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/basebin\/forkfix.dylib",
+    "name" : "forkfix.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4363616256,
+    "size" : 49152,
+    "uuid" : "acb115fa-0c1b-3787-880e-67520f8cbc28",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/basebin\/roothidehooks.dylib",
+    "name" : "roothidehooks.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4364959744,
+    "size" : 294912,
+    "uuid" : "a0e4cb52-4c7d-38e2-a190-704f163d3fa9",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/basebin\/libjailbreak.dylib",
+    "name" : "libjailbreak.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4365418496,
+    "size" : 147456,
+    "uuid" : "7339385d-36e0-38ac-ba42-a735f5072657",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/libellekit.dylib",
+    "name" : "libellekit.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4363730944,
+    "size" : 32768,
+    "uuid" : "195a8791-b22d-38ad-b959-a54ab4adeaed",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/libroothide.dylib",
+    "name" : "libroothide.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4363812864,
+    "size" : 98304,
+    "uuid" : "2800514c-4a59-3d9a-9f1f-4c038238e908",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/basebin\/libchoma.dylib",
+    "name" : "libchoma.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4365811712,
+    "size" : 32768,
+    "uuid" : "499a528b-8c4f-33e7-98e7-e095619a3000",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/roothidepatch.dylib",
+    "name" : "roothidepatch.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4366319616,
+    "size" : 81920,
+    "uuid" : "3e9ddbe0-3d23-33ee-a4c0-a38a2df75da3",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/ellekit\/MobileSafety.dylib",
+    "name" : "MobileSafety.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4366499840,
+    "size" : 1589248,
+    "uuid" : "c12e11e9-dc93-3f31-9d0b-d9308c8349b6",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/0hello120hz.dylib",
+    "name" : "0hello120hz.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4368564224,
+    "size" : 163840,
+    "uuid" : "3d1bc883-81fd-30b0-8e89-9e0988a6ca56",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/AirpodsCompanion.dylib",
+    "name" : "AirpodsCompanion.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4368826368,
+    "size" : 81920,
+    "uuid" : "5fff5758-776a-385a-8ed3-c1c6c644fe1c",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/AllowLocationOnce.dylib",
+    "name" : "AllowLocationOnce.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4368973824,
+    "size" : 180224,
+    "uuid" : "0bfdfe02-91a9-3788-8e44-3fc171ed97ba",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/AppData.dylib",
+    "name" : "AppData.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4369235968,
+    "size" : 98304,
+    "uuid" : "24087ee3-b618-3b78-bb6d-f9bc8907cf55",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/BetterCCBrightness.dylib",
+    "name" : "BetterCCBrightness.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4369383424,
+    "size" : 32768,
+    "uuid" : "987515ad-d761-375c-adb1-ee90212bf17e",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/BlockAppsCreateAlbum.dylib",
+    "name" : "BlockAppsCreateAlbum.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4369465344,
+    "size" : 32768,
+    "uuid" : "f2f77ae7-6105-3aeb-82b8-095358395e35",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/BounceIt16.dylib",
+    "name" : "BounceIt16.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4369547264,
+    "size" : 98304,
+    "uuid" : "a896db40-a646-3b8a-ad3e-88adde264021",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/CCSupport.dylib",
+    "name" : "CCSupport.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4369760256,
+    "size" : 3473408,
+    "uuid" : "e5ef063f-7cc1-369a-8ba1-05d2a258e832",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/CallAssist.dylib",
+    "name" : "CallAssist.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4374249472,
+    "size" : 32768,
+    "uuid" : "e72ad3e8-9a4d-30d7-b695-83b36de499fa",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/libsandy.dylib",
+    "name" : "libsandy.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4374347776,
+    "size" : 638976,
+    "uuid" : "68c0bcf7-6fe3-3239-b79c-d317398b25f9",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/ChevronV3.dylib",
+    "name" : "ChevronV3.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4375134208,
+    "size" : 49152,
+    "uuid" : "695a8449-aae8-38b6-851c-ced0b1176f03",
+    "path" : "\/private\/preboot\/Cryptexes\/OS\/usr\/lib\/libobjc-trampolines.dylib",
+    "name" : "libobjc-trampolines.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4375281664,
+    "size" : 49152,
+    "uuid" : "542c638f-f1c2-30e0-83b2-db0246562e67",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/ChevronV3VideoBridge.dylib",
+    "name" : "ChevronV3VideoBridge.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4375379968,
+    "size" : 32768,
+    "uuid" : "c6d44953-453b-3b80-80ed-57ed95a3b790",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/CompactorFix.dylib",
+    "name" : "CompactorFix.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4375445504,
+    "size" : 163840,
+    "uuid" : "0e985918-9ed6-3e41-bbed-c37b329d1a24",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/FakeTweak.dylib",
+    "name" : "FakeTweak.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4375674880,
+    "size" : 1130496,
+    "uuid" : "be2bd667-3372-3d1d-bde3-8eb8df3ba3d0",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/FlexLoader.dylib",
+    "name" : "FlexLoader.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4377165824,
+    "size" : 32768,
+    "uuid" : "bfc81eae-51d6-3b80-a8e7-a3bcab25eff1",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/FreePIP.dylib",
+    "name" : "FreePIP.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4377247744,
+    "size" : 32768,
+    "uuid" : "663b1365-b346-3911-b8b6-171629d87372",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/libroot.dylib",
+    "name" : "libroot.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4377329664,
+    "size" : 212992,
+    "uuid" : "70444443-d7ca-340f-8c15-f0beb109452e",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/GPSTravellerTweakProX.dylib",
+    "name" : "GPSTravellerTweakProX.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4377755648,
+    "size" : 180224,
+    "uuid" : "888ed12f-be6f-339e-a94b-bd4ba2f8032b",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/KayokoCore.dylib",
+    "name" : "KayokoCore.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4378017792,
+    "size" : 81920,
+    "uuid" : "570ab0f7-2c78-3dce-a87d-1c54e596eb57",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/KayokoHelper.dylib",
+    "name" : "KayokoHelper.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4378148864,
+    "size" : 114688,
+    "uuid" : "7ad1deac-b845-3b0b-b9f0-d893846518ab",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/KeyboardCorner16.dylib",
+    "name" : "KeyboardCorner16.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4378345472,
+    "size" : 65536,
+    "uuid" : "362d5fb4-cd83-34c0-8449-ddfb8a285076",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/LiquidAssRWB.dylib",
+    "name" : "LiquidAssRWB.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4378460160,
+    "size" : 32768,
+    "uuid" : "ae9f3051-ee85-30a5-afaf-7b857097d770",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/MiniIsland.dylib",
+    "name" : "MiniIsland.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4378542080,
+    "size" : 32768,
+    "uuid" : "4521c83d-8ced-3514-b242-b77183a01a8b",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/MoreComplications.dylib",
+    "name" : "MoreComplications.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4378624000,
+    "size" : 49152,
+    "uuid" : "d58138d9-a276-3f4c-b262-df6c98cae2cc",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/NoHomeIcons16.dylib",
+    "name" : "NoHomeIcons16.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4378722304,
+    "size" : 32768,
+    "uuid" : "557a217b-c9d4-3614-bb45-b7c6c33e7d94",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/NoPassAfterRespringSafe.dylib",
+    "name" : "NoPassAfterRespringSafe.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4378804224,
+    "size" : 65536,
+    "uuid" : "a49f761e-4f35-3588-a6ce-2a087021b926",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/NoRedirect.dylib",
+    "name" : "NoRedirect.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4378918912,
+    "size" : 917504,
+    "uuid" : "f2d027a4-6b18-313f-a490-02e7f3d845e8",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/PerfectDynamiclsland.dylib",
+    "name" : "PerfectDynamiclsland.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4380098560,
+    "size" : 32768,
+    "uuid" : "42d168b0-9707-3f02-bdae-341a303d8e91",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/RainHost.dylib",
+    "name" : "RainHost.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4380196864,
+    "size" : 98304,
+    "uuid" : "292a3122-8fb9-3a52-8519-f3446c52d56c",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/DynamicPatches\/AutoPatches.dylib",
+    "name" : "AutoPatches.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4380344320,
+    "size" : 32768,
+    "uuid" : "55146981-4ea4-3773-9f79-6e4c46696082",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/ReScaleKB.dylib",
+    "name" : "ReScaleKB.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4380426240,
+    "size" : 32768,
+    "uuid" : "6fc003a3-59ed-3a83-a2bb-db2171a46857",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/Rode.dylib",
+    "name" : "Rode.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4380508160,
+    "size" : 49152,
+    "uuid" : "ec81d96d-2c6d-3f0c-a425-230acaf5b9f2",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/ScreenTimeLocker16.dylib",
+    "name" : "ScreenTimeLocker16.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4380606464,
+    "size" : 147456,
+    "uuid" : "10499cc8-0c30-337e-b273-dc96c0d31943",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/StatusBarScale.dylib",
+    "name" : "StatusBarScale.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4380868608,
+    "size" : 32768,
+    "uuid" : "cfe9201f-9503-35d8-a746-c69ae5117fa0",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/StoreSwitchAccounts.dylib",
+    "name" : "StoreSwitchAccounts.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4380950528,
+    "size" : 32768,
+    "uuid" : "2ec38d5d-c401-3982-94a5-360fef1daf74",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/TrollLock.dylib",
+    "name" : "TrollLock.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4381032448,
+    "size" : 81920,
+    "uuid" : "84d6df2d-9f2e-3c23-bec2-219f2a2909b5",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/TwistNTurn.dylib",
+    "name" : "TwistNTurn.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4381163520,
+    "size" : 65536,
+    "uuid" : "163374f7-d23f-3828-9757-8de23a06ee81",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/UIStatusBarWidthAdjust.dylib",
+    "name" : "UIStatusBarWidthAdjust.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4381278208,
+    "size" : 32768,
+    "uuid" : "d8d99d45-7691-3895-867a-d61152203c90",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/WherePlay.dylib",
+    "name" : "WherePlay.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4381360128,
+    "size" : 344064,
+    "uuid" : "249dfae2-3105-386d-a058-4d7ed773512d",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/ZZEvoCenterRuntime.dylib",
+    "name" : "ZZEvoCenterRuntime.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4381769728,
+    "size" : 49152,
+    "uuid" : "59a44804-be6d-3679-ba9d-b49d95c8a866",
+    "path" : "\/System\/Library\/ControlCenter\/Bundles\/FocusUIModule.bundle\/FocusUIModule",
+    "name" : "FocusUIModule"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4381917184,
+    "size" : 442368,
+    "uuid" : "63dbb9a1-ec34-332a-8d13-e4c0e384759b",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/crack.dylib",
+    "name" : "crack.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4382490624,
+    "size" : 557056,
+    "uuid" : "bbb2ed77-cea2-3618-ae03-2df457300a47",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/ellekit-mcp.dylib",
+    "name" : "ellekit-mcp.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4383244288,
+    "size" : 557056,
+    "uuid" : "bbb2ed77-cea2-3618-ae03-2df457300a47",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/ios-mcp.dylib",
+    "name" : "ios-mcp.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4383997952,
+    "size" : 98304,
+    "uuid" : "e2581237-5270-3f18-8743-ba0efbac623c",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/libsupervip.dylib",
+    "name" : "libsupervip.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4384161792,
+    "size" : 688128,
+    "uuid" : "7ebbe8b3-8ce5-3ee9-ae67-697687fa3baf",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/liquidass.dylib",
+    "name" : "liquidass.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4385013760,
+    "size" : 32768,
+    "uuid" : "5df5a8c0-2c8e-36ae-acd6-6e6976104a36",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/mcp-appsync-frontboard.dylib",
+    "name" : "mcp-appsync-frontboard.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4385095680,
+    "size" : 147456,
+    "uuid" : "dcd17875-15d3-3e84-b9b1-fae89f009778",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/usr\/lib\/TweakInject\/passby.dylib",
+    "name" : "passby.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4385964032,
+    "size" : 32768,
+    "uuid" : "4f998d4d-cc46-31e1-ba82-7fb9b2582750",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/Library\/ControlCenter\/CCSupport_Providers\/HomeProvider.bundle\/HomeProvider",
+    "name" : "HomeProvider"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4386193408,
+    "size" : 163840,
+    "uuid" : "6556c333-63ef-3f17-8892-850e94028e81",
+    "path" : "\/System\/Library\/AccessibilityBundles\/GAXSpringboardServer.bundle\/GAXSpringboardServer",
+    "name" : "GAXSpringboardServer"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4396498944,
+    "size" : 49152,
+    "uuid" : "be201030-c32f-3e32-b8d3-5b9b62bd5708",
+    "path" : "\/System\/Library\/ControlCenter\/Bundles\/VideoConferenceControlCenterModule.bundle\/VideoConferenceControlCenterModule",
+    "name" : "VideoConferenceControlCenterModule"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4395614208,
+    "size" : 49152,
+    "uuid" : "1c847898-bf3f-30f2-9b78-89c8dff4b230",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/Library\/ControlCenter\/Bundles\/CCFConnectivityAirplaneModule.bundle\/CCFConnectivityAirplaneModule",
+    "name" : "CCFConnectivityAirplaneModule"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4397416448,
+    "size" : 49152,
+    "uuid" : "a23d0531-f9ee-3176-b136-ba80995686b1",
+    "path" : "\/System\/Library\/ControlCenter\/Bundles\/AudioConferenceControlCenterModule.bundle\/AudioConferenceControlCenterModule",
+    "name" : "AudioConferenceControlCenterModule"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4397678592,
+    "size" : 49152,
+    "uuid" : "eef46423-13df-3120-8672-ba8bd17e4f1b",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/Library\/ControlCenter\/Bundles\/CCFConnectivityAirDropModule.bundle\/CCFConnectivityAirDropModule",
+    "name" : "CCFConnectivityAirDropModule"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4399611904,
+    "size" : 49152,
+    "uuid" : "8659958e-ecbc-3998-82ca-3572dc26e34d",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/Library\/ControlCenter\/Bundles\/CCFConnectivityHotspotModule.bundle\/CCFConnectivityHotspotModule",
+    "name" : "CCFConnectivityHotspotModule"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4399710208,
+    "size" : 606208,
+    "uuid" : "f30bcf2d-f4f0-3483-8045-5aa04b156a93",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/Library\/ControlCenter\/Bundles\/hellocpucc.bundle\/hellocpucc",
+    "name" : "hellocpucc"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4400496640,
+    "size" : 49152,
+    "uuid" : "dde20e72-b20c-324b-af6d-044fb071a915",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/Library\/ControlCenter\/Bundles\/CCFSystemVPNModule.bundle\/CCFSystemVPNModule",
+    "name" : "CCFSystemVPNModule"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4400594944,
+    "size" : 98304,
+    "uuid" : "90d158cf-2961-351d-83b3-8e6010ecd42a",
+    "path" : "\/System\/Library\/ControlCenter\/Bundles\/ReplayKitModule.bundle\/ReplayKitModule",
+    "name" : "ReplayKitModule"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4400758784,
+    "size" : 49152,
+    "uuid" : "39ec0104-07ca-399e-924d-5bd643599d57",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/Library\/ControlCenter\/Bundles\/CCFConnectivityBluetoothModule.bundle\/CCFConnectivityBluetoothModule",
+    "name" : "CCFConnectivityBluetoothModule"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4400857088,
+    "size" : 49152,
+    "uuid" : "3233a5e5-07c3-3e17-90c2-f7e768cdd3c4",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/Library\/ControlCenter\/Bundles\/CCFConnectivityWiFiModule.bundle\/CCFConnectivityWiFiModule",
+    "name" : "CCFConnectivityWiFiModule"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4400955392,
+    "size" : 147456,
+    "uuid" : "9874357e-ba07-34fb-be57-c344bfca8952",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/Library\/ControlCenter\/Bundles\/PassByCC.bundle\/PassByCC",
+    "name" : "PassByCC"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4401168384,
+    "size" : 32768,
+    "uuid" : "9794d042-a559-356b-a9a4-bf58315ff2ee",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/Library\/ControlCenter\/Bundles\/CCFSystemMuteModule.bundle\/CCFSystemMuteModule",
+    "name" : "CCFSystemMuteModule"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4401414144,
+    "size" : 49152,
+    "uuid" : "1f526947-1e72-39ea-bd6d-3ff4ce4fd575",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/Library\/ControlCenter\/Bundles\/CCFConnectivityCellularModule.bundle\/CCFConnectivityCellularModule",
+    "name" : "CCFConnectivityCellularModule"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4401250304,
+    "size" : 114688,
+    "uuid" : "905ae789-5f05-3341-91e2-cfcfba4e61c3",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/Library\/ControlCenter\/Bundles\/NRManager.bundle\/NRManager",
+    "name" : "NRManager"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4401512448,
+    "size" : 32768,
+    "uuid" : "cdebcb7e-1694-38dc-897d-027b17faa9aa",
+    "path" : "\/private\/var\/containers\/Bundle\/Application\/.jbroot-B9636BA7D932E518\/Library\/ControlCenter\/Bundles\/CCFSystemLocationModule.bundle\/CCFSystemLocationModule",
+    "name" : "CCFSystemLocationModule"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 4387438592,
+    "size" : 65536,
+    "uuid" : "86fd9e71-a29f-3042-9623-1ff96c6af0e9",
+    "path" : "\/System\/Library\/SpringBoardPlugins\/StoreDemoPlugin.servicebundle\/StoreDemoPlugin",
+    "name" : "StoreDemoPlugin"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 7012941824,
+    "size" : 278432,
+    "uuid" : "085a190c-6214-38ea-accb-428c3e8afa65",
+    "path" : "\/usr\/lib\/libobjc.A.dylib",
+    "name" : "libobjc.A.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 7163813888,
+    "size" : 25317376,
+    "uuid" : "b3834960-244b-34e4-9ea0-ca4bb44ef0f3",
+    "path" : "\/System\/Library\/PrivateFrameworks\/UIKitCore.framework\/UIKitCore",
+    "name" : "UIKitCore"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 7129804800,
+    "size" : 4096000,
+    "uuid" : "4230c122-42e8-383b-beec-ee7b61f8bb61",
+    "path" : "\/System\/Library\/Frameworks\/CoreFoundation.framework\/CoreFoundation",
+    "name" : "CoreFoundation"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 8125014016,
+    "size" : 36864,
+    "uuid" : "e830ad84-d612-3b6b-8de7-ea61a786d132",
+    "path" : "\/System\/Library\/PrivateFrameworks\/GraphicsServices.framework\/GraphicsServices",
+    "name" : "GraphicsServices"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 8243535872,
+    "size" : 11976704,
+    "uuid" : "5d7a4f20-6de5-35fc-a5d6-86c164873fef",
+    "path" : "\/System\/Library\/PrivateFrameworks\/SpringBoard.framework\/SpringBoard",
+    "name" : "SpringBoard"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 8737832960,
+    "size" : 49140,
+    "uuid" : "56698309-210a-3137-97d4-14e4604b1117",
+    "path" : "\/usr\/lib\/system\/libsystem_pthread.dylib",
+    "name" : "libsystem_pthread.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 8185999360,
+    "size" : 229368,
+    "uuid" : "75da6452-934e-3f80-b181-d47074378e83",
+    "path" : "\/usr\/lib\/system\/libsystem_kernel.dylib",
+    "name" : "libsystem_kernel.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 7032000512,
+    "size" : 9297920,
+    "uuid" : "6e76dc96-11af-3b2e-b71e-215f9cc6e822",
+    "path" : "\/System\/Library\/Frameworks\/Foundation.framework\/Foundation",
+    "name" : "Foundation"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 7320580096,
+    "size" : 4259840,
+    "uuid" : "30e3286c-f5fc-3655-a5c0-d8604de58645",
+    "path" : "\/System\/Library\/Frameworks\/CoreMotion.framework\/CoreMotion",
+    "name" : "CoreMotion"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 7585226752,
+    "size" : 122880,
+    "uuid" : "09b86d2e-523f-3dfd-a2dc-0d1279ba1888",
+    "path" : "\/System\/Library\/PrivateFrameworks\/CommonUtilities.framework\/CommonUtilities",
+    "name" : "CommonUtilities"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 7252275200,
+    "size" : 290816,
+    "uuid" : "bb347f0e-f21c-3607-82e6-c8d750fdbf8c",
+    "path" : "\/usr\/lib\/system\/libdispatch.dylib",
+    "name" : "libdispatch.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 7151972352,
+    "size" : 3645440,
+    "uuid" : "dd5e562e-69cc-3f21-bfb8-770b08f82fd9",
+    "path" : "\/System\/Library\/Frameworks\/QuartzCore.framework\/QuartzCore",
+    "name" : "QuartzCore"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 9085128704,
+    "size" : 823296,
+    "uuid" : "efc4530f-ea51-36da-9555-4dc2751c3983",
+    "path" : "\/System\/Library\/PrivateFrameworks\/WiFiKit.framework\/WiFiKit",
+    "name" : "WiFiKit"
+  },
+  {
+    "size" : 0,
+    "source" : "A",
+    "base" : 0,
+    "uuid" : "00000000-0000-0000-0000-000000000000"
+  }
+],
+  "sharedCache" : {
+  "base" : 7012188160,
+  "size" : 3033006080,
+  "uuid" : "2e09d0b2-dbdd-3fd0-b8ef-1c8d95e3be00"
+},
+  "vmSummary" : "ReadOnly portion of Libraries: Total=1.4G resident=0K(0%) swapped_out_or_unallocated=1.4G(100%)\nWritable regions: Total=845.9M written=0K(0%) resident=0K(0%) swapped_out=0K(0%) unallocated=845.9M(100%)\n\n                                VIRTUAL   REGION \nREGION TYPE                        SIZE    COUNT (non-coalesced) \n===========                     =======  ======= \nAccelerate framework               128K        1 \nActivity Tracing                   256K        1 \nCG raster data                    13.1M      181 \nColorSync                          464K       26 \nCoreAnimation                     8176K      203 \nCoreUI image data                  144K        2 \nFoundation                          16K        1 \nImage IO                          1104K       33 \nKernel Alloc Once                   32K        1 \nMALLOC                           627.4M      308 \nMALLOC guard page                  128K        8 \nSQLite page cache                 1920K       15 \nSTACK GUARD                        464K       29 \nStack                             15.9M       29 \nVM_ALLOCATE                        624K       21 \nWebKit Malloc                    192.1M        6 \n__AUTH                            5013K      610 \n__AUTH_CONST                      45.7M     1174 \n__CTF                               824        1 \n__DATA                            22.6M     1238 \n__DATA_CONST                      65.3M     1248 \n__DATA_DIRTY                      10.7M     1055 \n__FONT_DATA                        346K        3 \n__INFO_FILTER                         8        1 \n__LINKEDIT                       322.2M       80 \n__OBJC_RO                         79.8M        1 \n__OBJC_RW                         2465K        1 \n__TEXT                             1.1G     1293 \ndyld private memory                272K        1 \nmapped file                      660.5M      296 \nshared memory                       64K        4 \n===========                     =======  ======= \nTOTAL                              3.1G     7871 \n",
+  "legacyInfo" : {
+  "threadTriggered" : {
+    "queue" : "com.apple.main-thread"
+  }
+},
+  "logWritingSignature" : "cf5b820abd737126f244c4b3dd48e443e2c134d1",
+  "trialInfo" : {
+  "rollouts" : [
+    {
+      "rolloutId" : "6297d96be2c9387df974efa4",
+      "factorPackIds" : {
+        "SIRI_VALUE_INFERENCE_APP_RESOLUTION" : "65d92566bcbbe039283f5dce"
+      },
+      "deploymentId" : 240000032
+    },
+    {
+      "rolloutId" : "601074e4af9bef000c169ea8",
+      "factorPackIds" : {
+        "BIFROST_DEV_1" : "6ab95a910182126b287d8fbb"
+      },
+      "deploymentId" : 240005092
+    }
+  ],
+  "experiments" : [
+
+  ]
+}
+}

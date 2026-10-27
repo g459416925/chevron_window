@@ -796,10 +796,8 @@ static BOOL CV3OpenBundleInFloatingWindow(NSString *bundleID, NSString *reason) 
 
     // Screen Time 限额闸门（通知点开/其他回调开分屏的统一入口）
     if (!CV3ScreenTimeGateBundleID(bundleID,
-                                   [NSString stringWithFormat:@"FloatingWindowOpen:%@", reason ?: @"Unknown"],
-                                   YES,
-                                   sharedWindow.windowScene)) {
-        return YES;   // 已呈现拦截页，视为已处理
+                                   [NSString stringWithFormat:@"FloatingWindowOpen:%@", reason ?: @"Unknown"])) {
+        return YES;   // 已拒绝，视为已处理
     }
 
     if (CV3EnsureFreshClientBridgeBeforeHosting(bundleID, ^{
@@ -1374,8 +1372,8 @@ static UIView *CV3FindWallpaperViewInView(UIView *view, NSInteger depth) {
         return;
     }
 
-    // Screen Time 限额闸门：命中则呈现系统拦截页（含 STL16 的 Face ID 增强），不发起启动
-    if (!CV3ScreenTimeGateBundleID(bid, @"PanelLaunch", YES, self.windowScene)) {
+    // Screen Time 限额闸门：命中直接拒绝，不发起启动
+    if (!CV3ScreenTimeGateBundleID(bid, @"PanelLaunch")) {
         [self.collectionView reloadData];
         return;
     }
@@ -2202,7 +2200,7 @@ static UIView *CV3FindWallpaperViewInView(UIView *view, NSInteger depth) {
 static void CV3PreWarmAppForSplit(NSString *bundleID) {
     if (bundleID.length == 0) return;
     // Screen Time 限额中：不预热（分屏闸门会拦截，预热只会白启动进程）
-    if (!CV3ScreenTimeGateBundleID(bundleID, @"PreWarm", NO, nil)) {
+    if (!CV3ScreenTimeGateBundleID(bundleID, @"PreWarm")) {
         CV3LogToFile(@"[PreWarm] ScreenTime 限额中，跳过分屏预热: %@", bundleID);
         return;
     }
@@ -2330,8 +2328,8 @@ static void CV3PreWarmAppForSplit(NSString *bundleID) {
                         return;
                     }
 
-                    // Screen Time 限额闸门：命中则呈现系统拦截页，不再创建分屏
-                    if (!CV3ScreenTimeGateBundleID(bundleID, @"SplitDrop", YES, self.windowScene)) {
+                    // Screen Time 限额闸门：命中直接拒绝，不再创建分屏
+                    if (!CV3ScreenTimeGateBundleID(bundleID, @"SplitDrop")) {
                         [self.collectionView reloadData];
                         return;
                     }

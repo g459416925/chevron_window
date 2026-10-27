@@ -1,0 +1,6 @@
+[2026-10-27 12:26:18 +0000][ChevronProbe] springboard.bootstrap pid=57032 version=1.0.18-228+screentime-guard
+[2026-10-27 12:26:18 +0000][seq=2][mono=208014.581324][thread=main][clock=event-v3] [HomeBarTrace] phase=logger.ready version=1.0.18-228+screentime-guard
+[2026-10-27 12:26:18 +0000][seq=3][mono=208014.581395][thread=main][clock=event-v3] [SplitTrace] [NotificationSplit] phase=logger.ready version=1.0.18-228+screentime-guard path=/rootfs/var/mobile/Library/Logs/ChevronV3_Logs.txt
+---
+-rw-rw---- 1 root _analyticsusers   69539 Oct 27 12:49 /rootfs/private/var/mobile/Library/Logs/CrashReporter/SpringBoard-2026-10-27-124900.ips
+-rw-rw---- 1 root _analyticsusers   29176 Oct 27 12:49 /rootfs/private/var/mobile/Library/Logs/CrashReporter/SpringBoard-2026-10-22-134854.ips

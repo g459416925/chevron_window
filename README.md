@@ -1,23 +1,30 @@
-# ChevronLauncher
+# ChevronV3（com.xu.chevronv3）
 
-ChevronV3 is a RootHide/Theos SpringBoard tweak for hosting applications in floating windows on iOS 16.
+> 原项目路径 `/Users/xu/ChevronLauncher` 已归置到本工作区。
+> 项目区：`ChevronV3/`；源码唯一位置：`src/`；构建配置：根目录 `Makefile`/`control`/`layout`；产物：`dist/`。
 
-The package contains two tweak targets:
+## 结构
 
-- `ChevronV3`: SpringBoard launcher, floating-window host, Scene lifecycle and gesture handling.
-- `ChevronV3VideoBridge`: application-side fullscreen-video orientation reporter. It reports orientation requests through a Darwin notification; SpringBoard remains the owner of hosted Scene geometry.
-
-The SpringBoard tweak also suppresses the compact Dynamic Island's outer border while preserving its background, app icon and expanded Live Activity content.
-
-## Build
-
-```sh
-make
-make package
+```text
+ChevronV3/
+├── src/                    Tweak.x、CV3*.h/.inc/.x、ChevronV3*.plist、ChevronV3Prefs/
+├── Makefile / control      Theos 构建配置
+├── layout/                 PreferenceLoader 布局
+├── dist/                   当前 deb（1.0.18-227+env-fast-1+debug）
+├── docs/                   原 README/FEATURE/测试记录
+├── data/                   历史构建、证据、备份、工具（项目数据）
+└── .git/                   原项目 Git 历史
 ```
 
-Both `arm64` and `arm64e` are built. The target environment is RootHide on iOS 16.5.1; private APIs must be revalidated before changing the deployment OS.
+## 构建
 
-## Diagnostics
+```bash
+cd ChevronV3
+make clean package
+```
 
-Runtime diagnostics are written to `/var/mobile/Library/Logs/ChevronV3_Logs.txt` and rotated to `ChevronV3_Logs.txt.1` at 10 MB. A successful build only validates compilation; use the device matrix in `test_plan.md` before release.
+## 当前设备状态
+
+- 已安装：`com.xu.chevronv3 1.0.18-227+env-fast-1+debug`
+- 项目 deb：`dist/com.xu.chevronv3_1.0.18-227+env-fast-1+debug_iphoneos-arm64e.deb`
+- 版本一致；deb 已同步到发布仓库 `ios-tweaks/debs/`。

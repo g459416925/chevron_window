@@ -3868,7 +3868,7 @@ static NSString *CV3OrientationResolverTrace(id settings) {
     if (self.isClosing || self.fullscreenLaunchPending || self.bundleID.length == 0) return;
 
     // Screen Time 限额闸门：全屏化同样不允许绕过
-    if (!CV3ScreenTimeGateBundleID(self.bundleID, @"FullscreenActivate", YES, self.windowScene)) {
+    if (!CV3ScreenTimeGateBundleID(self.bundleID, @"FullscreenActivate")) {
         return;
     }
 
@@ -5369,7 +5369,7 @@ static const NSTimeInterval kCV3InitialCanvasSoftGateMaxWait = 0.8;
 
     // Screen Time 兜底闸门：限额中的 App 不允许再把分屏拉到前台
     //（覆盖「限额在窗口存续期间生效后再次聚焦」的场景：快捷切换/收起还原等）
-    if (focused && !CV3ScreenTimeGateBundleID(self.bundleID, @"FocusWindow", YES, self.windowScene)) {
+    if (focused && !CV3ScreenTimeGateBundleID(self.bundleID, @"FocusWindow")) {
         [self recordOrientationTrace:@"setWindowFocused.blockedByScreenTime" force:YES];
         return;
     }
@@ -6288,8 +6288,8 @@ static const NSTimeInterval kCV3InitialCanvasSoftGateMaxWait = 0.8;
         if (self.isClosing || generation != self.sceneHostGeneration) return;
         @try {
             // Screen Time 兜底闸门：入口闸门全部命中正常流程时不该走到这里；
-            // 命中说明限额在窗口创建间隙生效（或存在未覆盖入口）→ 呈现拦截页并关窗
-            if (!CV3ScreenTimeGateBundleID(self.bundleID, @"LoadAppScene", YES, self.windowScene)) {
+            // 命中说明限额在窗口创建间隙生效（或存在未覆盖入口）→ 直接关窗
+            if (!CV3ScreenTimeGateBundleID(self.bundleID, @"LoadAppScene")) {
                 [self closeWindow];
                 return;
             }
