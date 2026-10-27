@@ -685,15 +685,9 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
 @end
 
 #pragma mark - Root VC
-#import <UIKit/UIKit.h> // Explicitly import UIKit to ensure visibility of UIWindowScene
-
 @interface CV3RootViewController : UIViewController
 @end
 
-static void CV3LogStashAnimation(NSString *format, ...);
-static void CV3LogVideoFullscreen(NSString *format, ...);
-static void CV3LogHomeBarVisibility(NSString *format, ...);
-static void CV3LogWindowOrientation(NSString *format, ...);
 static void CV3WriteFocusedDiagnostic(NSString *message);
 static BOOL CV3HasVisibleHostedWindow(void);
 static void CV3DumpKeyboardForensics(NSString *reason);
@@ -1061,33 +1055,20 @@ static void CV3WriteFormattedDiagnostic(NSString *format, va_list arguments) {
     CV3WriteFocusedDiagnostic(message);
 }
 
-static void CV3LogStashAnimation(NSString *format, ...) {
+// StashAnimation / VideoFullscreen / HomeBarVisibility / WindowOrientation
+// 四条通道的日志入口原本是四份逐字节相同的 va_list 转发实现；统一为一份，
+// 通道名以宏别名保留，调用点前缀不变。
+static void CV3LogDiag(NSString *format, ...) {
     va_list args;
     va_start(args, format);
     CV3WriteFormattedDiagnostic(format, args);
     va_end(args);
 }
 
-static void CV3LogVideoFullscreen(NSString *format, ...) {
-    va_list args;
-    va_start(args, format);
-    CV3WriteFormattedDiagnostic(format, args);
-    va_end(args);
-}
-
-static void CV3LogHomeBarVisibility(NSString *format, ...) {
-    va_list args;
-    va_start(args, format);
-    CV3WriteFormattedDiagnostic(format, args);
-    va_end(args);
-}
-
-static void CV3LogWindowOrientation(NSString *format, ...) {
-    va_list args;
-    va_start(args, format);
-    CV3WriteFormattedDiagnostic(format, args);
-    va_end(args);
-}
+#define CV3LogStashAnimation CV3LogDiag
+#define CV3LogVideoFullscreen CV3LogDiag
+#define CV3LogHomeBarVisibility CV3LogDiag
+#define CV3LogWindowOrientation CV3LogDiag
 
 @implementation CV3RootViewController
 @end
@@ -1101,10 +1082,19 @@ static UIColor *CV3AverageColorFromImage(UIImage *image) {
     CGSize size = {1, 1};
     UIGraphicsBeginImageContext(size);
     CGContextRef ctx = UIGraphicsGetCurrentContext();
+    if (!ctx) {
+        UIGraphicsEndImageContext();
+        return nil;
+    }
     CGContextSetInterpolationQuality(ctx, kCGInterpolationMedium);
     [image drawInRect:(CGRect){.size = size} blendMode:kCGBlendModeCopy alpha:1];
     uint8_t *data = (uint8_t *)CGBitmapContextGetData(ctx);
-    UIColor *color = [UIColor colorWithRed:data[0]/255.0 green:data[1]/255.0 blue:data[2]/255.0 alpha:1.0];
+    UIColor *color = nil;
+    // 内存吃紧时 1x1 位图上下文仍可能失败（ctx 或 data 为空），直接返回 nil，
+    // 避免对 NULL 位图平面取色导致 SIGSEGV。
+    if (data) {
+        color = [UIColor colorWithRed:data[0]/255.0 green:data[1]/255.0 blue:data[2]/255.0 alpha:1.0];
+    }
     UIGraphicsEndImageContext();
     return color;
 }
@@ -2744,14 +2734,24 @@ static void CV3QueuePanelPresentationAfterSystemGesture(dispatch_block_t present
 }
 
 static BOOL CV3ShouldSuppressWallpaperLongPress(void) {
+    // 该判定挂在 SBIconView touches*、layoutSubviews、手势注册等高频路径上，
+    // 原实现每次调用都做 CFPreferencesAppSynchronize（磁盘 IPC），触屏期间会
+    // 反复触发。改为 2 秒 TTL 缓存（与 CV3KbRotateFixEnabled 同模式）：调用点
+    // 全部在主线程，静态缓存无需加锁；设置页改开关最迟 2 秒内生效。
+    static BOOL cached = YES;
+    static CFTimeInterval lastCheck = 0.0;
+    CFTimeInterval now = CACurrentMediaTime();
+    if (lastCheck != 0.0 && now - lastCheck < 2.0) return cached;
+    lastCheck = now;
+
+    cached = YES; // 默认开启：禁止主屏幕空白处长按，仅长按 App 允许编辑
     CFPreferencesAppSynchronize(CFSTR("com.xu.chevronv3"));
     CFPropertyListRef val = CFPreferencesCopyAppValue(CFSTR("CV3SuppressWallpaperLongPress"), CFSTR("com.xu.chevronv3"));
     if (val) {
-        BOOL result = [(__bridge id)val boolValue];
+        cached = [(__bridge id)val boolValue];
         CFRelease(val);
-        return result;
     }
-    return YES; // 默认开启：禁止主屏幕空白处长按，仅长按 App 允许编辑
+    return cached;
 }
 
 static BOOL CV3IsEditTriggerFromAppOrContextMenu(id reason) {
@@ -4340,19 +4340,9 @@ static void CV3ApplySceneRotationContextToProject(CV3SceneRotationContext contex
 
 @interface SBMainWorkspaceTransitionRequest : SBWorkspaceTransitionRequest
 @property (nonatomic, assign) NSInteger source;
-- (BOOL)isAppearingBackgrounded;
-- (BOOL)isAppearingInBackground;
 @end
 
 %hook SBMainWorkspaceTransitionRequest
-- (BOOL)isAppearingBackgrounded {
-    return %orig;
-}
-
-- (BOOL)isAppearingInBackground {
-    return %orig;
-}
-
 - (NSSet *)deactivatedEntities {
     NSSet *orig = %orig;
     if (floatingWindows && floatingWindows.count > 0 && orig.count > 0) {

@@ -7155,26 +7155,20 @@ static const NSTimeInterval kCV3InitialCanvasSoftGateMaxWait = 0.8;
     
     CGFloat deltaRoll = m.attitude.roll - self.baseRoll;
     CGFloat deltaPitch = m.attitude.pitch - self.basePitch;
-    
-    CGFloat tilt = sqrt(deltaRoll * deltaRoll + deltaPitch * deltaPitch);
-    CGFloat dynamicBorderWidth = MIN(0.8, 0.3 + tilt * 0.5);
-    
+
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     // 1. 镜面高光流动
     self.specularHighlight.startPoint = CGPointMake(0.0 - deltaRoll * 1.5, 0.0 - deltaPitch * 1.5);
     self.specularHighlight.endPoint = CGPointMake(1.0 - deltaRoll * 1.5, 1.0 - deltaPitch * 1.5);
-    
-    // 2. 青红分光折射与厚度动态色散
+
+    // 2. 青红分光折射（221：动态彩框已去除，边框宽度恒 0，不再计算倾角总量）
     CGFloat dx = deltaRoll * 1.2;
     CGFloat dy = deltaPitch * 1.2;
     self.cyanLayer.transform = CATransform3DMakeTranslation(-dx, -dy, 0);
     self.magentaLayer.transform = CATransform3DMakeTranslation(dx, dy, 0);
-    
-    // 221：彩框去除后不再动态改边框宽度（保留结构，宽度恒 0）
     self.cyanLayer.borderWidth = 0.0;
     self.magentaLayer.borderWidth = 0.0;
-    (void)dynamicBorderWidth; // 显式消费（-Werror,-Wunused-variable）
     [CATransaction commit];
 }
 

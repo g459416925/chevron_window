@@ -2244,6 +2244,13 @@ static void CV3PreWarmAppForSplit(NSString *bundleID) {
                 return;
             }
 
+            // Screen Time 限额：长按拖动从源头拦截——不建拖拽图标、不预热、
+            // 不锁滚动、无任何视觉变化（松手落点闸门仍作兜底）
+            if (!CV3ScreenTimeGateBundleID(self.draggedAppInfo.bundleId, @"LongPressDrag")) {
+                self.draggedAppInfo = nil;
+                return;
+            }
+
             CV3ExitExposeModeIfNeeded(nil, NO);
 
             // 分屏预热（2026-10-16）：拖拽一开始就在后台预启动目标 App。用户从长按激活到松手
