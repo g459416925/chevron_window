@@ -4122,6 +4122,8 @@ static NSUInteger CV3IconCacheCost(UIImage *image) {
                                      searchText:searchText
                                         isFirst:isFirst
                                protectionState:CV3AppPanelProtectionStateForBundleID(info.bundleId)];
+        // 限额状态每秒同步：限额到期自动摘掉蒙层、中途生效即时盖上
+        [appCell setScreenTimeLimited:(CV3ScreenTimePolicyForBundleID(info.bundleId) != 0)];
         // readded 是「呼吸动画被谁拆掉了」的探测器：稳定状态下必须恒为 0。
         if (!hadBreathing && [appCell hasBreathingAnimation]) readded++;
         updated++;
@@ -4491,6 +4493,8 @@ static NSUInteger CV3IconCacheCost(UIImage *image) {
     BOOL isFirst = (index == 0 && self.searchField.text.length > 0);
     CV3AppPanelProtectionState protectionState = CV3AppPanelProtectionStateForBundleID(info.bundleId);
     [cell configureWithInfo:info searchText:self.searchField.text isFirst:isFirst protectionState:protectionState];
+    // 限额 App：图标加暗蒙层+沙漏（与系统主屏限额视觉一致）
+    [cell setScreenTimeLimited:(CV3ScreenTimePolicyForBundleID(info.bundleId) != 0)];
     [self loadIconForAppInfo:info cell:cell];
 
     // 应用“熵减”衰老视觉效果

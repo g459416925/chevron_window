@@ -379,6 +379,8 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
 @property (nonatomic, assign) NSInteger unreadCount;
 @property (nonatomic, assign) BOOL isFirstResult; // 新增：是否为搜索首项
 @property (nonatomic, copy) NSString *representedBundleId;
+@property (nonatomic, strong) UIView *screenTimeOverlay;
+- (void)setScreenTimeLimited:(BOOL)limited;
 - (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst protectionState:(CV3AppPanelProtectionState)protectionState;
 // 只刷新随外部状态变化的外观（保护态 / 未读 / 搜索高亮），不碰图标图与布局。
 // 面板每秒一次的标记刷新走这里，避免 reloadItemsAtIndexPaths 重建 Cell。
@@ -477,6 +479,7 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
     self.representedBundleId = nil;
     self.iconView.image = nil;
     [self setUnreadCount:0];
+    [self setScreenTimeLimited:NO];
 }
 
 - (void)configureWithInfo:(CV3AppInfo *)info searchText:(NSString *)searchText isFirst:(BOOL)isFirst protectionState:(CV3AppPanelProtectionState)protectionState {
@@ -548,6 +551,36 @@ typedef NS_ENUM(NSInteger, CV3AppPanelProtectionState) {
 - (void)setIconImage:(UIImage *)image forBundleId:(NSString *)bundleId {
     if (bundleId.length == 0 || ![self.representedBundleId isEqualToString:bundleId]) return;
     self.iconView.image = image;
+}
+
+// Screen Time 限额视觉：暗色蒙层 + 沙漏标记（纯 UI；限额判定由 CV3Window
+// 查询 policy 后传入，与系统主屏限额图标观感一致：一眼可见、等时限结束即恢复）
+- (void)setScreenTimeLimited:(BOOL)limited {
+    if (!_screenTimeOverlay && limited) {
+        UIView *overlay = [[UIView alloc] initWithFrame:self.iconView.bounds];
+        overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        overlay.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.45];
+        overlay.userInteractionEnabled = NO;
+
+        UIImageView *hourglass = [[UIImageView alloc]
+            initWithImage:[UIImage systemImageNamed:@"hourglass"]];
+        hourglass.tintColor = [UIColor whiteColor];
+        hourglass.contentMode = UIViewContentModeScaleAspectFit;
+        CGFloat s = 26.0;
+        hourglass.frame = CGRectMake((CGRectGetWidth(overlay.bounds) - s) / 2.0,
+                                     (CGRectGetHeight(overlay.bounds) - s) / 2.0, s, s);
+        hourglass.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin |
+                                     UIViewAutoresizingFlexibleRightMargin |
+                                     UIViewAutoresizingFlexibleTopMargin |
+                                     UIViewAutoresizingFlexibleBottomMargin;
+        [overlay addSubview:hourglass];
+        [self.iconView addSubview:overlay];
+        _screenTimeOverlay = overlay;
+    }
+    _screenTimeOverlay.hidden = !limited;
+    if (limited && !self.pinnedIndicator.hidden) {
+        [self.iconView bringSubviewToFront:self.pinnedIndicator];
+    }
 }
 
 - (void)setUnreadCount:(NSInteger)unreadCount {

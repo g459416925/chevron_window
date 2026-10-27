@@ -1,7 +1,7 @@
 Package: com.xu.chevronv3
 Name: ChevronV3
 Depends: mobilesubstrate, preferenceloader
-Version: 1.0.18-230+screentime-guard-v3
+Version: 1.0.18-231+screentime-limit-badge
 Architecture: iphoneos-arm64
 Description: New generation for testing.
 Maintainer: xu
