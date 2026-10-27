@@ -3,6 +3,5 @@
 # (the Windows default) that would otherwise mark the whole tree stale.
 # Binaries are auto-detected and left untouched.
 * text=auto eol=lf
-frida-mod.zip filter=lfs diff=lfs merge=lfs -text
-tools.zip filter=lfs diff=lfs merge=lfs -text
-backups/** filter=lfs diff=lfs merge=lfs -text
+# LFS 已废弃：frida-mod.zip / tools.zip / backups 历史大文件已于 2026-10-27
+# 经 filter-repo 从历史中彻底剔除，不再需要 LFS。
