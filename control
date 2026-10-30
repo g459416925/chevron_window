@@ -1,7 +1,7 @@
 Package: com.xu.chevronv3
 Name: ChevronV3
 Depends: mobilesubstrate, preferenceloader
-Version: 1.0.18-233+screentime-drag-gate
+Version: 1.0.18-234+zombie-window-reap
 Architecture: iphoneos-arm64
 Description: New generation for testing.
 Maintainer: xu

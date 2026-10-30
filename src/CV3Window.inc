@@ -756,12 +756,77 @@ static void CV3LaunchApplicationThroughSpringBoard(NSString *bundleID, NSString 
     }
 }
 
+// 宿主 app 进程存活判定。覆盖 app 崩溃 / scene-update watchdog kill /
+// 用户划掉后台卡片等「窗口对象还在但进程已没了」的场景。
+// 结果按 bundle 缓存 1 秒：面板刷新循环会高频调用本函数。
+static BOOL CV3HostedProcessAliveForBundleID(NSString *bundleID) {
+    if (bundleID.length == 0) return NO;
+
+    static NSMutableDictionary<NSString *, NSNumber *> *aliveCache = nil;
+    static CFAbsoluteTime cacheEpoch = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (!aliveCache) aliveCache = [NSMutableDictionary dictionary];
+    if (cacheEpoch == 0 || now - cacheEpoch > 1.0) {
+        [aliveCache removeAllObjects];
+        cacheEpoch = now;
+    }
+    NSNumber *cached = aliveCache[bundleID];
+    if (cached) return cached.boolValue;
+
+    BOOL alive = NO;
+    @try {
+        SBApplication *app = [[CV3ClassNamed(@"SBApplicationController") sharedInstance]
+            applicationWithBundleIdentifier:bundleID];
+        if (app) {
+            NSInteger pid = CV3InvokeInteger(app, @selector(pid), 0);
+            if (pid <= 0) {
+                id processState = CV3InvokeObject(app, @selector(processState));
+                pid = CV3InvokeInteger(processState, @selector(pid), 0);
+            }
+            alive = (pid > 0);
+        }
+    } @catch (NSException *e) {}
+    aliveCache[bundleID] = @(alive);
+    return alive;
+}
+
+// 回收「宿主进程已退出」的分屏窗。稳态下零副作用（无僵尸时不关窗、
+// 不发通知）；仅发现僵尸窗口才产生动作。
+static NSUInteger CV3ReapDeadHostedWindows(void) {
+    if (!floatingWindows.count) return 0;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ CV3ReapDeadHostedWindows(); });
+        return 0;
+    }
+
+    NSUInteger reaped = 0;
+    for (id candidate in [floatingWindows copy]) {
+        if (![candidate isKindOfClass:[CV3FloatingAppWindow class]]) continue;
+        CV3FloatingAppWindow *window = (CV3FloatingAppWindow *)candidate;
+        if (window.isClosing || window.bundleID.length == 0) continue;
+        if (CV3HostedProcessAliveForBundleID(window.bundleID)) continue;
+        CV3LogToFile(@"[Recovery] 宿主进程已退出，回收分屏窗 bundle=%@", window.bundleID);
+        [window closeWindow];
+        reaped++;
+    }
+    if (reaped > 0) {
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:CV3FloatingWindowsDidChangeNotification object:nil];
+    }
+    return reaped;
+}
+
 static CV3FloatingAppWindow *CV3FloatingWindowForBundleID(NSString *bundleID) {
     if (bundleID.length == 0 || !floatingWindows) return nil;
 
     for (CV3FloatingAppWindow *win in [floatingWindows copy]) {
         if (![win isKindOfClass:[CV3FloatingAppWindow class]] || win.isClosing) continue;
-        if ([win.bundleID isEqualToString:bundleID]) return win;
+        if (![win.bundleID isEqualToString:bundleID]) continue;
+        // 宿主进程已死（崩溃 / watchdog kill）：窗口不出让「已分屏」保护态，
+        // 否则面板会一直拒绝再次启动该 app（真实故障：抖音被 watchdog 杀掉后
+        // 面板不释放，用户无法再次开启分屏）。清理交给 CV3ReapDeadHostedWindows。
+        if (!CV3HostedProcessAliveForBundleID(bundleID)) continue;
+        return win;
     }
 
     return nil;
@@ -793,6 +858,10 @@ static BOOL CV3OpenBundleInFloatingWindow(NSString *bundleID, NSString *reason) 
         });
         return YES;
     }
+
+    // 入口即回收宿主已退出的僵尸分屏窗：让同一 bundle 能重新开窗而不是
+    // 复用/被旧窗口挡住。
+    CV3ReapDeadHostedWindows();
 
     // Screen Time 限额闸门（通知点开/其他回调开分屏的统一入口）
     if (!CV3ScreenTimeGateBundleID(bundleID,
@@ -4090,6 +4159,10 @@ static NSUInteger CV3IconCacheCost(UIImage *image) {
 - (void)refreshProtectedAppMarkers {
     if (!self.isPanelShowing || self.collectionView.hidden) return;
     if (CV3ScrollViewIsActivelyControlled(self.collectionView)) return;
+
+    // 面板刷新顺带回收僵尸分屏窗：宿主 app 崩溃/被 kill 后面板无需等待
+    // 任何系统回调即可恢复「可再次开分屏」。
+    CV3ReapDeadHostedWindows();
 
     CFTimeInterval passStart = CACurrentMediaTime();
 

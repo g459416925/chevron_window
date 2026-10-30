@@ -1001,6 +1001,7 @@ static void CV3WriteFocusedDiagnostic(NSString *message) {
         [message hasPrefix:@"[SplitTrace] [LaunchChain]"] ||
         [message hasPrefix:@"[SplitTrace] [LauncherTouch]"] ||
         [message hasPrefix:@"[SplitTrace] [ScreenTimeGuard]"] ||
+        [message hasPrefix:@"[SplitTrace] [Warning]"] ||
         [message hasPrefix:@"[SplitTrace] [Launcher]"] ||
         [message hasPrefix:@"[LauncherTouch]"] ||
         [message hasPrefix:@"[Launcher]"] ||
